@@ -67,6 +67,9 @@ Options:
 
 We use Striped UniFrac as the ground truth. A pure Rust implementaion can be [here](https://github.com/jianshu93/unifrac_bp).
 
+## Acknowledgements
+We want to thank Otmar Ertl and Xiaoyun Li for their helpful comments on DartMinHash and Efficient Rejection Sampling, respectively. We want to thank Sherlyn Weng for helping with DartUniFrac logo design.
+
 ## References
 
 Paper to come
