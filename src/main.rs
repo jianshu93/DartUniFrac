@@ -29,17 +29,12 @@ use succparen::{
     tree::Node,
 };
 use hdf5::{types::VarLenUnicode, File as H5File};
-
-// Weighted MinHash backends
 use dartminhash::{rng_utils::mt_from_seed, DartMinHash, ErsWmh};
-
-// SIMD Hamming (normalized) over u64
 use anndists::dist::{Distance, DistHamming};
 
 type NwkTree = newick::NewickTree;
 
-// ---------------- Tree traversal to collect branch lengths ----------------
-
+// Tree traversal to collect branch lengths 
 struct SuccTrav<'a> {
     t: &'a NwkTree,
     stack: Vec<(NodeID, usize, usize)>,
@@ -85,7 +80,7 @@ fn collect_children<N: NndOne>(
     post.push(pid);
 }
 
-// ---------------- TSV / BIOM readers (presence/absence) ----------------
+// TSV/BIOM readers
 
 fn read_table(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<Vec<f64>>)> {
     let f = File::open(p)?;
@@ -134,9 +129,10 @@ fn read_biom_csr(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32
     Ok((taxa, samples, indptr, indices))
 }
 
-// ---------------- Write TSV matrix ----------------
+// Write TSV matrix (fast ryu formatting; one Buffer per row)
 
 fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()> {
+    // Header
     let header = {
         let mut s = String::with_capacity(n * 16);
         s.push_str("Sample");
@@ -147,22 +143,29 @@ fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()>
         s.push('\n');
         s
     };
+
+    // Build all rows in parallel, reusing a single ryu buffer per row.
+    // (This keeps it allocation-light and avoids per-cell buffer creation.)
     let mut rows: Vec<String> = (0..n)
         .into_par_iter()
         .map(|i| {
-            let mut line = String::with_capacity(n * 12);
+            // rough capacity hint: sample name + tabs + ~8-12 chars per float
+            let mut line = String::with_capacity(8 + n * 12);
             line.push_str(&names[i]);
             let base = i * n;
+            let mut buf = ryu::Buffer::new(); // reused for this entire row
             for j in 0..n {
                 let val = unsafe { *d.get_unchecked(base + j) };
                 line.push('\t');
-                line.push_str(ryu::Buffer::new().format_finite(val));
+                let s = buf.format_finite(val);
+                line.push_str(s);
             }
             line.push('\n');
             line
         })
         .collect();
 
+    // Output
     let mut out = BufWriter::with_capacity(16 << 20, File::create(path)?);
     out.write_all(header.as_bytes())?;
     for line in &mut rows {
@@ -173,7 +176,7 @@ fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()>
     Ok(())
 }
 
-// -------------- Build per-node sample bitsets (presence under node) --------------
+// Build per-node sample bitsets (presence under node)
 
 fn build_node_bits(
     post: &[usize],
@@ -260,7 +263,7 @@ fn build_node_bits(
 fn main() -> Result<()> {
     println!("\n ************** initializing logger *****************\n");
     env_logger::Builder::from_default_env().init();
-    log::info!("logger initialized from default environment");
+    log::info!("Logger initialized from default environment");
 
     let m = Command::new("dartunifrac")
         .version("0.1.0")
@@ -284,7 +287,10 @@ fn main() -> Result<()> {
                 .long("biom")
                 .help("OTU/Feature table in BIOM (HDF5) format"),
         )
-        .group(ArgGroup::new("table").args(["input", "biom"]).required(true))
+        .group(
+            ArgGroup::new("table").
+            args(["input", "biom"]).
+            required(true))
         .arg(
             Arg::new("output")
                 .short('o')
@@ -513,7 +519,7 @@ fn main() -> Result<()> {
     };
     info!("pairwise distances in {} ms", t2.elapsed().as_millis());
 
-    // Write output
+    // Write output (fast ryu formatting)
     write_matrix(&samples, &dist, nsamp, out_file)?;
     info!("Done → {}", out_file);
 

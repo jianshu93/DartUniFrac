@@ -51,6 +51,10 @@ cargo build --release
 
 ## Usage
 ```bash
+$ ./target/release/dartunifrac -h
+
+ ************** initializing logger *****************
+
 Approximate unweighted UniFrac via Weighted MinHash
 
 Usage: dartunifrac [OPTIONS] --tree <tree> <--input <input>|--biom <biom>>
@@ -71,10 +75,10 @@ Options:
 
 ## Benchmark
 
-We use Striped UniFrac as the ground truth. A pure Rust implementaion can be [here](https://github.com/jianshu93/unifrac_bp).
+We use Striped UniFrac as the ground truth. A pure Rust implementaion can be found [here](https://github.com/jianshu93/unifrac_bp).
 
 ## Acknowledgements
-We want to thank Otmar Ertl and Xiaoyun Li for their helpful comments on DartMinHash and Efficient Rejection Sampling, respectively. We want to thank Sherlyn Weng for helping with DartUniFrac logo design.
+We want to thank [Otmar Ertl](https://www.dynatrace.com/engineering/persons/otmar-ertl/) and [Xiaoyun Li](https://lixiaoyun0239.github.io/cv/) for their helpful comments on DartMinHash and Efficient Rejection Sampling, respectively. We want to thank Sherlyn Weng for helping with DartUniFrac logo design.
 
 ## References
 
