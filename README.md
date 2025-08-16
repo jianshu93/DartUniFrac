@@ -1,5 +1,5 @@
 <div align="center">
-  <img width="35%" src ="DartUniFrac_logo.png">
+  <img width="30%" src ="DartUniFrac_logo.png">
 </div>
 
 # DartUniFrac: Approximate unweighted UniFrac via Weighted MinHash
@@ -9,7 +9,7 @@ This crate provides an efficieint implementation of the DartUniFrac algorithm fo
 UniFrac can be simply described as unique branches that differ two samples over shared branches. Here, each sample has some taxa (or features) that are in the phylogenetic tree. 
 
 <div align="center">
-  <img width="50%" src ="unweighted_unifrac_schematic.png">
+  <img width="30%" src ="unweighted_unifrac_schematic.png">
 </div>
 
 If we reformulate UniFrac in math, it can be descriped below:
