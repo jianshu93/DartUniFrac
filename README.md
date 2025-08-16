@@ -9,7 +9,7 @@ This crate provides an efficieint implementation of the DartUniFrac algorithm fo
 UniFrac can be simply described as unique branches that differ two samples over shared branches. Here, each sample has some taxa (or features) that are in the phylogenetic tree. 
 
 <div align="center">
-  <img width="30%" src ="unweighted_unifrac_schematic.png">
+  <img width="40%" src ="unweighted_unifrac_schematic.png">
 </div>
 
 If we reformulate UniFrac in math, it can be descriped below:
