@@ -1,6 +1,7 @@
 [package]
 name = "dartunifrac"
 authors = ["jianshuzhao@yahoo.com"]
+repository = "https://github.com/jianshu93/dartunifrac.git"
 version = "0.1.0"
 edition = "2024"
 description = "Ultra-fast approximate UniFrac via Weighted MinHash"
