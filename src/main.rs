@@ -153,6 +153,7 @@ fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()>
             let mut line = String::with_capacity(8 + n * 12);
             line.push_str(&names[i]);
             let base = i * n;
+            // Ulf Adams. 2018. Ryū: fast float-to-string conversion. In Proceedings of the 39th ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI 2018). Association for Computing Machinery, New York, NY, USA, 270–282. https://doi.org/10.1145/3192366.3192369
             let mut buf = ryu::Buffer::new(); // reused for this entire row
             for j in 0..n {
                 let val = unsafe { *d.get_unchecked(base + j) };

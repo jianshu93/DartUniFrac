@@ -3,7 +3,7 @@
 </div>
 
 # DartUniFrac: Approximate unweighted UniFrac via Weighted MinHash
-This crate provides an efficieint implementation of the DartUniFrac algorithm for large-scale UniFrac computation. We named this new algorithm DartUniFrac because the key step is to use DartMinHash on branches and the DartMinHash is about "Among the first r darts thrown, return those hitting $x_i$" 
+This crate provides an efficient implementation of the DartUniFrac algorithm for large-scale UniFrac computation. We named this new algorithm DartUniFrac because the key step is to use DartMinHash on branches and the DartMinHash is about "Among the first r darts thrown, return those hitting $x_i$" 
 
 ## Overview
 UniFrac can be simply described as unique branches that differ two samples over shared branches. Here, each sample has some taxa (or features) that are in the phylogenetic tree. 
@@ -37,9 +37,12 @@ In summary, unweighted UniFrac distance can be considered as weighted Jaccard di
 
 ## Libraries
 We first created a few libraries for the best performance of DartUniFrac implementation. 
-1.Optimal representation of balanced parenthesis for phylogenetic trees via succparen 
+
+1.Optimal representation of balanced parenthesis for phylogenetic trees via [succparen](https://github.com/sile/succparen)
+
 2.Implementation of DartMinHash and Efficient Rejection Sampling algorithms can be found [here](https://github.com/jianshu93/dartminhash-rs).
-3.SIMD-awared hamming similarity for computing hash collision probability of sketches, anndists
+
+3.SIMD-aware hamming similarity for computing hash collision probability of sketches, [anndists](https://github.com/jianshu93/anndists)
 
 ## Install
 ```bash
@@ -75,7 +78,7 @@ Options:
 
 ## Benchmark
 
-We use Striped UniFrac as the ground truth. A pure Rust implementaion can be found [here](https://github.com/jianshu93/unifrac_bp).
+We use Striped UniFrac algorithm as the ground truth, which is an exact and efficient algorithm for large number of samples. A pure Rust implementaion, as a supporting crate for this one, can be found [here](https://github.com/jianshu93/unifrac_bp).
 
 ## Acknowledgements
 We want to thank [Otmar Ertl](https://www.dynatrace.com/engineering/persons/otmar-ertl/) and [Xiaoyun Li](https://lixiaoyun0239.github.io/cv/) for their helpful comments on DartMinHash and Efficient Rejection Sampling, respectively. We want to thank Sherlyn Weng for helping with DartUniFrac logo design.
