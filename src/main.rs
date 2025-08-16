@@ -258,7 +258,9 @@ fn build_node_bits(
 }
 
 fn main() -> Result<()> {
+    println!("\n ************** initializing logger *****************\n");
     env_logger::Builder::from_default_env().init();
+    log::info!("logger initialized from default environment");
 
     let m = Command::new("dartunifrac")
         .version("0.1.0")
@@ -481,7 +483,7 @@ fn main() -> Result<()> {
             .collect()
     };
 
-    // Pairwise UniFrac (≈ 1 - Jaccard) via normalized Hamming on ID arrays.
+    // Pairwise UniFrac (≈ 1 - Jaccard) via normalized Hamming (or simply hamming similarity) on ID arrays.
     let t2 = Instant::now();
     let dist = {
         let n = nsamp;

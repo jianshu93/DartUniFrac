@@ -3,7 +3,7 @@
 </div>
 
 # DartUniFrac: Approximate unweighted UniFrac via Weighted MinHash
-This crate provides an efficieint implementation of the DartUniFrac algorithm for large-scale UniFrac computation. 
+This crate provides an efficieint implementation of the DartUniFrac algorithm for large-scale UniFrac computation. We named this new algorithm DartUniFrac because the key step is to use DartMinHash on branches and the DartMinHash is about "Among the first r darts thrown, return those hitting $x_i$" 
 
 ## Overview
 UniFrac can be simply described as unique branches that differ two samples over shared branches. Here, each sample has some taxa (or features) that are in the phylogenetic tree. 
@@ -31,9 +31,15 @@ $$D_{UniFrac}(A,B)=1-\frac{\displaystyle \sum_{i\in E} \ell_i \cdot \min(\max_{j
 since $\displaystyle \ell_i$ can be moved inside max and min (same for sample A and B) and $\max_{j\in {Desc}(i)} x_j(A)$ and $\max_{j\in {Desc}(i)} x_j(B)$ are either 1 or 0. Therefore, it can be rewritten as:
 $$D_{UniFrac}(x,y)=1-J_w(x,y) = \frac{\sum_{i=1}^n \min(x_i, y_i)}{\sum_{i=1}^n \max(x_i, y_i)}$$
 
-here, $\displaystyle J_w(x,y)$ is ***Weighted Jaccard Similarity***, which can be efficiently estimated via Weighted MinHash, a sketching algorithm that is widely used for large-scale text mining. We chose [DartMinHash](https://arxiv.org/abs/2005.11547) and [Efficient Rejection Sampling](https://ojs.aaai.org/index.php/AAAI/article/view/16543) due to their speed for sparse and dense data respectively. The library implementation of the algorithms can be found [here](https://github.com/jianshu93/dartminhash-rs).
+here, $\displaystyle J_w(x,y)$ is ***Weighted Jaccard Similarity***, which can be efficiently estimated via Weighted MinHash, a sketching algorithm that is widely used for large-scale text mining. We chose [DartMinHash](https://arxiv.org/abs/2005.11547) and [Efficient Rejection Sampling](https://ojs.aaai.org/index.php/AAAI/article/view/16543) due to their speed for sparse and dense data respectively. 
 
 In summary, unweighted UniFrac distance can be considered as weighted Jaccard distance on branches. 
+
+## Libraries
+We first created a few libraries for the best performance of DartUniFrac implementation. 
+1.Optimal representation of balanced parenthesis for phylogenetic trees via succparen 
+2.Implementation of DartMinHash and Efficient Rejection Sampling algorithms can be found [here](https://github.com/jianshu93/dartminhash-rs).
+3.SIMD-awared hamming similarity for computing hash collision probability of sketches, anndists
 
 ## Install
 ```bash
