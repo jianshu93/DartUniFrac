@@ -1,10 +1,9 @@
-// ===============================================
-// DartUniFrac (DMH/ERS) — drop empty samples and continue
-// ===============================================
-//! DartUniFrac (approximate unweighted UniFrac via Weighted MinHash)
-//! Methods: DartMinHash or ERS (Efficient Rejection Sampling)
-//! Tree parsing via succinct-BP (balanced parenthesis)
-//! Input: TSV or BIOM (HDF5) feature tables
+//! DartUniFrac: Approximate unweighted UniFrac via Weighted MinHash
+//! DartMinHash or ERS (Efficient Rejection Sampling) can be used as the underlying algorithm
+//! Tree parsing via optimal balanced parenthesis: 
+//! With constant-time rank/select primitives (rank₁(i) = # of 1-bits up to i, select₁(k) = position of the k-th 1-bit) you get parent, k-th child, next sibling, sub-tree size, depth, all in O(1). every node knows its opening index i. parent(i) = select₁(rank₁(i) - 1), next_sibling(i) = find_close(i) + 1 (where find_close is the matching 0), etc. Those functions are just pointer-arithmetic on the backing Vec<u64>.
+
+//! Input: TSV or BIOM (HDF5) feature tables. BIOM can be used for very sparse dataset to save space
 //! Output: TSV distance matrix
 
 use std::{
@@ -37,7 +36,7 @@ use anndists::dist::{Distance, DistHamming};
 
 type NwkTree = newick::NewickTree;
 
-// ---------------- Tree traversal to collect branch lengths ----------------
+// Tree traversal to collect branch lengths 
 
 struct SuccTrav<'a> {
     t: &'a NwkTree,
@@ -84,7 +83,7 @@ fn collect_children<N: NndOne>(
     post.push(pid);
 }
 
-// ---------------- TSV / BIOM readers (presence/absence) ----------------
+// TSV / BIOM readers
 
 fn read_table(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<Vec<f64>>)> {
     let f = File::open(p)?;
@@ -133,7 +132,7 @@ fn read_biom_csr(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32
     Ok((taxa, samples, indptr, indices))
 }
 
-// ---------------- Write TSV matrix (fast, reusing ryu buffer per row) ----------------
+// Write TSV matrix (fast, reusing ryu buffer per row)
 
 fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()> {
     // Header
@@ -155,6 +154,7 @@ fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()>
             let mut line = String::with_capacity(8 + n * 12);
             line.push_str(&names[i]);
             let base = i * n;
+            // Adams, U., 2018, June. Ryū: fast float-to-string conversion. In Proceedings of the 39th ACM SIGPLAN Conference on Programming Language Design and Implementation (pp. 270-282).
             let mut buf = ryu::Buffer::new();
             for j in 0..n {
                 let val = unsafe { *d.get_unchecked(base + j) };
@@ -176,7 +176,7 @@ fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()>
     Ok(())
 }
 
-// ---------------- Build per-node sample bitsets (presence under node) ----------------
+// Build per-node sample bitsets (presence under node)
 
 fn build_node_bits(
     post: &[usize],
@@ -320,7 +320,7 @@ fn main() -> Result<()> {
                 .short('l')
                 .help("Per-hash independent random sequence length L for ERS")
                 .value_parser(clap::value_parser!(u64))
-                // See Li and Li 2021 AAAI paper Figure 2.
+                // See Li and Li 2021 AAAI paper Figure 2. Large L has smaller bias and will be unbiased when L is unlimited (Rejection Sampling)
                 .default_value("4096"),
         )
         .arg(
@@ -450,7 +450,7 @@ fn main() -> Result<()> {
         t1.elapsed().as_millis()
     );
 
-    // ---- Drop empty samples (no covered branches) and continue ----
+    // Drop empty samples (no covered branches) and continue
     let empty_idx: Vec<usize> = wsets
         .iter()
         .enumerate()

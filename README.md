@@ -80,6 +80,39 @@ Options:
 
 We use Striped UniFrac algorithm as the ground truth, which is an exact and efficient algorithm for large number of samples. A pure Rust implementaion, as a supporting crate for this one, can be found [here](https://github.com/jianshu93/unifrac_bp).
 
+For the testing data (ASV_count.tsv and ASV_aligned.tre), the truth from Striped UniFrac is:
+
+| Sample | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
+|---|---:|---:|---:|---:|---:|---:|
+| Orwoll_BI0023_BI | 0 | 0.403847873210907 | 0.3646169304847717 | 0.366204708814621 | 0.3484474122524261 | 0.5317433476448059 |
+| Orwoll_BI0056_BI | 0.403847873210907 | 0 | 0.3883068859577179 | 0.4069649279117584 | 0.3338068425655365 | 0.5172212719917297 |
+| Orwoll_BI0131_BI | 0.3646169304847717 | 0.3883068859577179 | 0 | 0.4222687482833862 | 0.4006152451038361 | 0.5693299174308777 |
+| Orwoll_BI0153_BI | 0.366204708814621 | 0.4069649279117584 | 0.4222687482833862 | 0 | 0.2608364820480347 | 0.4297698140144348 |
+| Orwoll_BI0215_BI | 0.3484474122524261 | 0.3338068425655365 | 0.4006152451038361 | 0.2608364820480347 | 0 | 0.4572696685791016 |
+| Orwoll_BI0353_BI | 0.5317433476448059 | 0.5172212719917297 | 0.5693299174308777 | 0.4297698140144348 | 0.4572696685791016 | 0 |
+
+DartUniFrac estimation (DartMinHash) is: 
+
+| Sample | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
+|:--|---:|---:|---:|---:|---:|---:|
+| Orwoll_BI0023_BI | 0.0 | 0.40307617187 | 0.36596679687 | 0.36010742187 | 0.35815429687 | 0.530273437 |
+| Orwoll_BI0056_BI | 0.40307617187 | 0.0 | 0.3901367187 | 0.40747070312 | 0.3398437 | 0.5209960937 |
+| Orwoll_BI0131_BI | 0.36596679687 | 0.3901367187 | 0.0 | 0.41577148437 | 0.40014648437 | 0.56860351562 |
+| Orwoll_BI0153_BI | 0.36010742187 | 0.40747070312 | 0.41577148437 | 0.0 | 0.260742187 | 0.422851562 |
+| Orwoll_BI0215_BI | 0.35815429687 | 0.3398437 | 0.40014648437 | 0.260742187 | 0.0 | 0.45825195312 |
+| Orwoll_BI0353_BI | 0.530273437 | 0.5209960937 | 0.56860351562 | 0.422851562 | 0.45825195312 | 0.0 |
+
+DartUniFrac estimation (Efficient Rejection Sampling) is: 
+| Sample | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
+|:--|---:|---:|---:|---:|---:|---:|
+| Orwoll_BI0023_BI | 0.0 | 0.4101562 | 0.3657226562 | 0.3618164062 | 0.3569335937 | 0.52539062 |
+| Orwoll_BI0056_BI | 0.4101562 | 0.0 | 0.40039062 | 0.4086914062 | 0.340820312 | 0.5190429687 |
+| Orwoll_BI0131_BI | 0.3657226562 | 0.40039062 | 0.0 | 0.4360351562 | 0.4145507812 | 0.570312 |
+| Orwoll_BI0153_BI | 0.3618164062 | 0.4086914062 | 0.4360351562 | 0.0 | 0.264648437 | 0.4311523437 |
+| Orwoll_BI0215_BI | 0.3569335937 | 0.340820312 | 0.4145507812 | 0.264648437 | 0.0 | 0.460937 |
+| Orwoll_BI0353_BI | 0.52539062 | 0.5190429687 | 0.570312 | 0.4311523437 | 0.460937 | 0.0 |
+
+
 ## Acknowledgements
 We want to thank [Otmar Ertl](https://www.dynatrace.com/engineering/persons/otmar-ertl/) and [Xiaoyun Li](https://lixiaoyun0239.github.io/cv/) for their helpful comments on DartMinHash and Efficient Rejection Sampling, respectively. We want to thank Yuhan(Sherlyn) Weng for helping with DartUniFrac logo design.
 
