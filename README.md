@@ -81,7 +81,7 @@ Options:
 We use Striped UniFrac algorithm as the ground truth, which is an exact and efficient algorithm for large number of samples. A pure Rust implementaion, as a supporting crate for this one, can be found [here](https://github.com/jianshu93/unifrac_bp).
 
 ## Acknowledgements
-We want to thank [Otmar Ertl](https://www.dynatrace.com/engineering/persons/otmar-ertl/) and [Xiaoyun Li](https://lixiaoyun0239.github.io/cv/) for their helpful comments on DartMinHash and Efficient Rejection Sampling, respectively. We want to thank Sherlyn Weng for helping with DartUniFrac logo design.
+We want to thank [Otmar Ertl](https://www.dynatrace.com/engineering/persons/otmar-ertl/) and [Xiaoyun Li](https://lixiaoyun0239.github.io/cv/) for their helpful comments on DartMinHash and Efficient Rejection Sampling, respectively. We want to thank Yuhan(Sherlyn) Weng for helping with DartUniFrac logo design.
 
 ## References
 
