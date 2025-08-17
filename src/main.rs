@@ -1,3 +1,6 @@
+// ===============================================
+// DartUniFrac (DMH/ERS) — drop empty samples and continue
+// ===============================================
 //! DartUniFrac (approximate unweighted UniFrac via Weighted MinHash)
 //! Methods: DartMinHash or ERS (Efficient Rejection Sampling)
 //! Tree parsing via succinct-BP (balanced parenthesis)
@@ -34,7 +37,8 @@ use anndists::dist::{Distance, DistHamming};
 
 type NwkTree = newick::NewickTree;
 
-// Tree traversal to collect branch lengths 
+// ---------------- Tree traversal to collect branch lengths ----------------
+
 struct SuccTrav<'a> {
     t: &'a NwkTree,
     stack: Vec<(NodeID, usize, usize)>,
@@ -80,7 +84,7 @@ fn collect_children<N: NndOne>(
     post.push(pid);
 }
 
-// TSV/BIOM readers
+// ---------------- TSV / BIOM readers (presence/absence) ----------------
 
 fn read_table(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<Vec<f64>>)> {
     let f = File::open(p)?;
@@ -129,7 +133,7 @@ fn read_biom_csr(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32
     Ok((taxa, samples, indptr, indices))
 }
 
-// Write TSV matrix (fast ryu formatting; one Buffer per row)
+// ---------------- Write TSV matrix (fast, reusing ryu buffer per row) ----------------
 
 fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()> {
     // Header
@@ -144,29 +148,24 @@ fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()>
         s
     };
 
-    // Build all rows in parallel, reusing a single ryu buffer per row.
-    // (This keeps it allocation-light and avoids per-cell buffer creation.)
+    // Build all rows in parallel; reuse a single ryu buffer per row
     let mut rows: Vec<String> = (0..n)
         .into_par_iter()
         .map(|i| {
-            // rough capacity hint: sample name + tabs + ~8-12 chars per float
             let mut line = String::with_capacity(8 + n * 12);
             line.push_str(&names[i]);
             let base = i * n;
-            // Ulf Adams. 2018. Ryū: fast float-to-string conversion. In Proceedings of the 39th ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI 2018). Association for Computing Machinery, New York, NY, USA, 270–282. https://doi.org/10.1145/3192366.3192369
-            let mut buf = ryu::Buffer::new(); // reused for this entire row
+            let mut buf = ryu::Buffer::new();
             for j in 0..n {
                 let val = unsafe { *d.get_unchecked(base + j) };
                 line.push('\t');
-                let s = buf.format_finite(val);
-                line.push_str(s);
+                line.push_str(buf.format_finite(val));
             }
             line.push('\n');
             line
         })
         .collect();
 
-    // Output
     let mut out = BufWriter::with_capacity(16 << 20, File::create(path)?);
     out.write_all(header.as_bytes())?;
     for line in &mut rows {
@@ -177,7 +176,7 @@ fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()>
     Ok(())
 }
 
-// Build per-node sample bitsets (presence under node)
+// ---------------- Build per-node sample bitsets (presence under node) ----------------
 
 fn build_node_bits(
     post: &[usize],
@@ -204,7 +203,7 @@ fn build_node_bits(
             let masks_slice = &masks[stripe_start..stripe_end];
 
             scope.spawn(move |_| {
-                // scatter leaves for this stripe
+                // scatter leaves
                 for (local_s, sm) in masks_slice.iter().enumerate() {
                     for pos in sm.iter_ones() {
                         let v = leaf_ids[pos];
@@ -318,9 +317,11 @@ fn main() -> Result<()> {
         .arg(
             Arg::new("seq-length")
                 .long("length")
+                .short('l')
                 .help("Per-hash independent random sequence length L for ERS")
                 .value_parser(clap::value_parser!(u64))
-                .default_value("1024"),
+                // See Li and Li 2021 AAAI paper Figure 2.
+                .default_value("4096"),
         )
         .arg(
             Arg::new("seed")
@@ -372,7 +373,7 @@ fn main() -> Result<()> {
     collect_children::<SparseOneNnd>(&bp.root(), &mut kids, &mut post);
 
     // Read table and build leaf masks
-    let (_taxa, samples, masks) = if let Some(tsv) = m.get_one::<String>("input") {
+    let (_taxa, mut samples, masks) = if let Some(tsv) = m.get_one::<String>("input") {
         let (taxa, samples, mat) = read_table(tsv)?;
         let nsamp = samples.len();
         let mut masks: Vec<BitVec<u8, Lsb0>> =
@@ -406,7 +407,7 @@ fn main() -> Result<()> {
         (taxa, samples, masks)
     };
 
-    let nsamp = samples.len();
+    let mut nsamp = samples.len();
     info!(
         "nodes = {}  leaves = {}  samples = {}",
         total,
@@ -449,9 +450,40 @@ fn main() -> Result<()> {
         t1.elapsed().as_millis()
     );
 
-    // Sketch per sample (parallel).
-    // We keep only the per-bucket **ID** in the signature.
-    // Collisions are (idA[j] == idB[j]). DistHamming over u64 gives 1 - collision rate.
+    // ---- Drop empty samples (no covered branches) and continue ----
+    let empty_idx: Vec<usize> = wsets
+        .iter()
+        .enumerate()
+        .filter_map(|(i, ws)| if ws.is_empty() { Some(i) } else { None })
+        .collect();
+
+    if !empty_idx.is_empty() {
+        let show = empty_idx.len().min(20);
+        for &s in empty_idx.iter().take(show) {
+            warn!("Dropping sample '{}' (no covered branches; all zeros).", samples[s]);
+        }
+        if empty_idx.len() > show {
+            warn!("... and {} more empty samples.", empty_idx.len() - show);
+        }
+        // Filter wsets and sample names in lockstep
+        let mut kept_ws = Vec::with_capacity(nsamp - empty_idx.len());
+        let mut kept_names = Vec::with_capacity(nsamp - empty_idx.len());
+        for (i, ws) in wsets.into_iter().enumerate() {
+            if !ws.is_empty() {
+                kept_ws.push(ws);
+                kept_names.push(samples[i].clone());
+            }
+        }
+        wsets = kept_ws;
+        samples = kept_names;
+        nsamp = samples.len();
+        info!("Kept {} non-empty samples.", nsamp);
+        if nsamp < 2 {
+            anyhow::bail!("Fewer than 2 non-empty samples after filtering; nothing to compare.");
+        }
+    }
+
+    // Sketch per sample (parallel) — keep only IDs; DistHamming over IDs gives 1 - Jaccard
     let mut rng = mt_from_seed(seed);
     let sketches_u64: Vec<Vec<u64>> = if method == "dmh" {
         // DartMinHash: reuse one instance so bucket hash & dart stream are shared.
@@ -489,15 +521,15 @@ fn main() -> Result<()> {
             })
             .collect()
     };
+    info!("sketching done.");
 
-    // Pairwise UniFrac (≈ 1 - Jaccard) via normalized Hamming (or simply hamming similarity) on ID arrays.
+    // Pairwise UniFrac (≈ 1 - Jaccard) via normalized Hamming on ID arrays.
     let t2 = Instant::now();
     let dist = {
         let n = nsamp;
         let dh = DistHamming;
         let mut out = vec![0.0f64; n * n];
 
-        // Fill upper triangle (including diagonal) in parallel, per-row.
         out.par_chunks_mut(n)
             .enumerate()
             .for_each(|(i, row)| {
