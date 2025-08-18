@@ -31,7 +31,7 @@ $$D_{UniFrac}(A,B)=1-\frac{\displaystyle \sum_{i\in E} \ell_i \cdot \min(\max_{j
 since $\displaystyle \ell_i$ can be moved inside max and min (same for sample A and B) and $\max_{j\in {Desc}(i)} x_j(A)$ and $\max_{j\in {Desc}(i)} x_j(B)$ are either 1 or 0. Therefore, it can be rewritten as:
 $$D_{UniFrac}(x,y)=1-J_w(x,y) = \frac{\sum_{i=1}^n \min(x_i, y_i)}{\sum_{i=1}^n \max(x_i, y_i)}$$
 
-here, $\displaystyle J_w(x,y)$ is ***Weighted Jaccard Similarity***, which can be efficiently estimated via Weighted MinHash, a sketching algorithm that is widely used for large-scale text mining. We chose [DartMinHash](https://arxiv.org/abs/2005.11547) and [Efficient Rejection Sampling](https://ojs.aaai.org/index.php/AAAI/article/view/16543) due to their speed for sparse and dense data respectively. 
+here, $\displaystyle J_w(x,y)$ is ***Weighted Jaccard Similarity***, which can be efficiently estimated via Weighted MinHash, a sketching algorithm that is widely used for large-scale text mining. We chose [DartMinHash](https://arxiv.org/abs/2005.11547) and [Efficient Rejection Sampling](https://ojs.aaai.org/index.php/AAAI/article/view/16543) due to their speed for sparse and dense data, respectively. 
 
 In summary, unweighted UniFrac distance can be considered as weighted Jaccard distance on branches. 
 
@@ -42,9 +42,26 @@ We first created a few libraries for the best performance of DartUniFrac impleme
 
 2.Implementation of DartMinHash and Efficient Rejection Sampling algorithms can be found [here](https://github.com/jianshu93/dartminhash-rs).
 
-3.SIMD-aware hamming similarity for computing hash collision probability of sketches, [anndists](https://github.com/jianshu93/anndists)
+3.SIMD-aware Hamming similarity for computing hash collision probability of sketches, [anndists](https://github.com/jianshu93/anndists)
 
 ## Install
+### Pre-compiled on Linux
+```bash
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.1.0/dartunifrac_Linux_x86-64_v0.1.0.zip
+unzip dartunifrac_Linux_x86-64_v0.1.0.zip
+chmod a+x ./dartunifrac
+./dartunifrac -h
+```
+
+### macOS via Homebrew: 
+```bash
+## install homebrew first: https://brew.sh
+brew tap jianshu93/DartUniFrac
+brew install DartUniFrac
+dartunifrac -h
+```
+
+### from source
 HDF5 needs to be installed first, see guidance [here](hdf5_install.md)
 ```bash
 git clone https://github.com/jianshu93/DartUniFrac.git
@@ -54,6 +71,7 @@ cargo build --release
 ```
 
 ## Usage
+DartUniFrac will use all availble CPU cores/threads via Rayon by default.
 ```bash
 $ ./target/release/dartunifrac -h
 
