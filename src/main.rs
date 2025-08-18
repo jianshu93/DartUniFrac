@@ -318,7 +318,7 @@ fn main() -> Result<()> {
             Arg::new("seq-length")
                 .long("length")
                 .short('l')
-                .help("Per-hash independent random sequence length L for ERS")
+                .help("Per-hash independent random sequence length for ERS, must be >= 1024")
                 .value_parser(clap::value_parser!(u64))
                 // See Li and Li 2021 AAAI paper Figure 2. Large L has smaller bias and will be unbiased when L is unlimited (Rejection Sampling)
                 .default_value("4096"),

@@ -45,6 +45,7 @@ We first created a few libraries for the best performance of DartUniFrac impleme
 3.SIMD-aware hamming similarity for computing hash collision probability of sketches, [anndists](https://github.com/jianshu93/anndists)
 
 ## Install
+HDF5 needs to be installed first, see guidance [here](hdf5_install.md)
 ```bash
 git clone https://github.com/jianshu93/DartUniFrac.git
 cd DartUniFrac
@@ -69,18 +70,17 @@ Options:
   -o, --output <output>       Output distance matrix in TSV format [default: unifrac.tsv]
   -s, --sketch <sketch-size>  Sketch size for Weighted MinHash (DartMinHash or ERS) [default: 1024]
   -m, --method <method>       Sketching method: dmh (DartMinHash) or ers (Efficient Rejection Sampling) [default: dmh] [possible values: dmh, ers]
-      --length <seq-length>   Per-hash independent random sequence length L for ERS [default: 1024]
+  -l, --length <seq-length>   Per-hash independent random sequence length L for ERS [default: 4096]
       --seed <seed>           Random seed for reproducibility [default: 1337]
   -h, --help                  Print help
   -V, --version               Print version
-
 ```
 
 ## Benchmark
 
 We use Striped UniFrac algorithm as the ground truth, which is an exact and efficient algorithm for large number of samples. A pure Rust implementaion, as a supporting crate for this one, can be found [here](https://github.com/jianshu93/unifrac_bp).
 
-For the testing data (ASV_count.tsv and ASV_aligned.tre), the truth from Striped UniFrac is:
+For the testing data (ASVs_count.tsv and ASV_aligned.tre), the truth from Striped UniFrac is:
 
 | Sample | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
 |---|---:|---:|---:|---:|---:|---:|
