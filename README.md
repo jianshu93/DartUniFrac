@@ -94,8 +94,15 @@ Options:
   -V, --version               Print version
 ```
 
-## Benchmark
 
+```bash
+### DartMinHash
+dartunifrac -t ./data/ASVs_aligned.tre -i ./data/ASVs_counts.txt -m dmh -s 2048 -o unifrac_dmh.csv
+
+### Efficient Rejection Sampling
+dartunifrac -t ./data/ASVs_aligned.tre -i ./data/ASVs_counts.txt -m ers -s 2048 -l 4096 -o unifrac_ers.csv
+```
+## Benchmark
 We use Striped UniFrac algorithm as the ground truth, which is an exact and efficient algorithm for large number of samples. A pure Rust implementaion, as a supporting crate for this one, can be found [here](https://github.com/jianshu93/unifrac_bp).
 
 For the testing data (ASVs_count.tsv and ASV_aligned.tre), the truth from Striped UniFrac is:
