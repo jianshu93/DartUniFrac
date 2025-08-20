@@ -420,17 +420,34 @@ fn main() -> Result<()> {
     let node_bits = build_node_bits(&post, &kids, &leaf_ids, &masks, total);
     info!("node_bits built in {} ms", t0.elapsed().as_millis());
 
-    // Positive-length edges and weights (raw, no normalization)
+    // Positive-length edges and weights
     let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
-    let pos_edges: Vec<usize> = (0..total).filter(|&v| lens[v] > 0.0).collect();
-    if pos_edges.is_empty() {
-        warn!("No positive-length edges found.");
+
+    // Keep only edges with ℓ_e > 0 and present in at least one sample (logical prune)
+    let active_edges: Vec<usize> = (0..total)
+        .filter(|&v| lens[v] > 0.0 && node_bits[v].any())
+        .collect();
+
+    if active_edges.is_empty() {
+        anyhow::bail!("No active edges: no positive-length branch is present in any sample.");
     }
 
-    // Build weighted sets per sample: if sample S has presence under edge v, include (v, ℓ_v)
+    // Dense remap old edge id -> [0..active_edges.len())
+    let mut id_map = vec![usize::MAX; total];
+    for (new_id, &v) in active_edges.iter().enumerate() {
+        id_map[v] = new_id;
+    }
+    info!(
+        "active edges = {} (from {} total, {} leaves)",
+        active_edges.len(),
+        total,
+        leaf_ids.len()
+    );
+
+    // Build weighted sets per sample on active edges, using dense IDs
     let t1 = Instant::now();
     let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-    for &v in &pos_edges {
+    for &v in &active_edges {
         let w = lens[v];
         let words = node_bits[v].as_raw_slice();
         for (wi, &w0) in words.iter().enumerate() {
@@ -439,7 +456,8 @@ fn main() -> Result<()> {
                 let b = word.trailing_zeros() as usize;
                 let s = (wi << 6) + b;
                 if s < nsamp {
-                    wsets[s].push((v as u64, w));
+                    // use dense ID for edge v
+                    wsets[s].push((id_map[v] as u64, w));
                 }
                 word &= word - 1;
             }
@@ -500,7 +518,7 @@ fn main() -> Result<()> {
     } else {
         // ERS caps per dimension: m_i = ceil(ℓ_e), at least 1 (valid for all samples).
         let mut m_per_dim = vec![0u32; total];
-        for &v in &pos_edges {
+        for &v in &active_edges {
             let mut cap = lens[v].ceil();
             if cap < 1.0 {
                 cap = 1.0;
