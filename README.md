@@ -3,7 +3,7 @@
 </div>
 
 # DartUniFrac: Approximate unweighted UniFrac via Weighted MinHash
-This crate provides an efficient implementation of the newly invented DartUniFrac algorithm for large-scale UniFrac computation. We named this new algorithm DartUniFrac because the key step is to use DartMinHash or Efficient Rejection Sampling (or ERS) on branches and the DartMinHash/ERS is about "Among the first r darts thrown, return those hitting $x_i$" 
+This crate provides an efficient implementation of the newly invented DartUniFrac algorithm for large-scale UniFrac computation. We named this new algorithm DartUniFrac because the key step is to use DartMinHash or Efficient Rejection Sampling (or ERS) on branches and the DartMinHash/ERS is about "Among the first r darts thrown, return those hitting $x_i$". 
 
 ## Overview
 UniFrac can be simply described as unique branches that differ two samples over shared branches. Here, each sample has some taxa (or features) that are in the phylogenetic tree. 
@@ -107,7 +107,7 @@ We use Striped UniFrac algorithm as the ground truth, which is an exact and effi
 
 For the testing data (ASVs_count.tsv and ASV_aligned.tre), the truth from Striped UniFrac is:
 
-| Sample | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
+|    | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
 |---|---:|---:|---:|---:|---:|---:|
 | Orwoll_BI0023_BI | 0 | 0.403847873210907 | 0.3646169304847717 | 0.366204708814621 | 0.3484474122524261 | 0.5317433476448059 |
 | Orwoll_BI0056_BI | 0.403847873210907 | 0 | 0.3883068859577179 | 0.4069649279117584 | 0.3338068425655365 | 0.5172212719917297 |
@@ -118,7 +118,7 @@ For the testing data (ASVs_count.tsv and ASV_aligned.tre), the truth from Stripe
 
 DartUniFrac estimation (DartMinHash) is: 
 
-| Sample | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
+|    | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
 |:--|---:|---:|---:|---:|---:|---:|
 | Orwoll_BI0023_BI | 0.0 | 0.40307617187 | 0.36596679687 | 0.36010742187 | 0.35815429687 | 0.530273437 |
 | Orwoll_BI0056_BI | 0.40307617187 | 0.0 | 0.3901367187 | 0.40747070312 | 0.3398437 | 0.5209960937 |
@@ -128,7 +128,7 @@ DartUniFrac estimation (DartMinHash) is:
 | Orwoll_BI0353_BI | 0.530273437 | 0.5209960937 | 0.56860351562 | 0.422851562 | 0.45825195312 | 0.0 |
 
 DartUniFrac estimation (Efficient Rejection Sampling) is: 
-| Sample | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
+|    | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
 |:--|---:|---:|---:|---:|---:|---:|
 | Orwoll_BI0023_BI | 0.0 | 0.4101562 | 0.3657226562 | 0.3618164062 | 0.3569335937 | 0.52539062 |
 | Orwoll_BI0056_BI | 0.4101562 | 0.0 | 0.40039062 | 0.4086914062 | 0.340820312 | 0.5190429687 |
