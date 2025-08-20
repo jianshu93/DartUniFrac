@@ -3,10 +3,10 @@
 </div>
 
 # DartUniFrac: Approximate unweighted UniFrac via Weighted MinHash
-This crate provides an efficient implementation of the newly invented DartUniFrac algorithm for large-scale UniFrac computation. We named this new algorithm DartUniFrac because the key step is to use DartMinHash or Efficient Rejection Sampling (or ERS) on branches and the DartMinHash/ERS is about "Among the first r darts thrown, return those hitting $x_i$". 
+This crate provides an efficient implementation of the newly invented DartUniFrac algorithm for large-scale [UniFrac](https://en.wikipedia.org/wiki/UniFrac) computation. We named this new algorithm DartUniFrac because the key step is to use DartMinHash or Efficient Rejection Sampling (or ERS) on branches and the DartMinHash/ERS is about "Among the first r darts thrown, return those hitting $x_i$". 
 
 ## Overview
-UniFrac can be simply described as unique branches that differ two samples over shared branches. Here, each sample has some taxa (or features) that are in the phylogenetic tree. 
+UniFrac can be simply described as unique branches that differ two samples over shared branches (see original UniFrac paper [here](https://journals.asm.org/doi/full/10.1128/aem.71.12.8228-8235.2005)). Here, each sample has some taxa (or features) that are in the phylogenetic tree. 
 
 <div align="center">
   <img width="40%" src ="unweighted_unifrac_schematic.png">
