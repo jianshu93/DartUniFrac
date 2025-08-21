@@ -323,7 +323,7 @@ fn main() -> Result<()> {
     log::info!("Logger initialized from default environment");
 
     let m = Command::new("dartunifrac")
-        .version("0.1.0")
+        .version("0.2.0")
         .about("Approximate unweighted UniFrac via Weighted MinHash")
         .arg(
             Arg::new("tree")
@@ -378,6 +378,7 @@ fn main() -> Result<()> {
                 .help("Per-hash independent random sequence length for ERS, must be >= 1024")
                 .value_parser(clap::value_parser!(u64))
                 // See Li and Li 2021 AAAI paper Figure 2. Large L has smaller bias and will be unbiased when L is unlimited (Rejection Sampling)
+                // L should be determined by the sparsity of relevant branches for each sample
                 .default_value("4096"),
         )
         .arg(

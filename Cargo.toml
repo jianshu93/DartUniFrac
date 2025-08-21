@@ -8,6 +8,16 @@ description = "Ultra-fast approximate UniFrac via Weighted MinHash"
 license = "MIT OR Apache-2.0"
 keywords = ["unifrac", "phylogenetic", "MinHash", "succint", "Jaccard"]
 
+[[bin]]
+
+name = "dartunifrac"
+path = "src/dartunifrac.rs"
+
+[[bin]]
+
+name = "striped_unifrac"
+path = "src/striped_unifrac.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4.3", features = ["derive"] }

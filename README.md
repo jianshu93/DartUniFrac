@@ -103,7 +103,7 @@ dartunifrac -t ./data/ASVs_aligned.tre -i ./data/ASVs_counts.txt -m dmh -s 2048 
 dartunifrac -t ./data/ASVs_aligned.tre -i ./data/ASVs_counts.txt -m ers -s 2048 -l 4096 -o unifrac_ers.csv
 ```
 ## Benchmark
-We use Striped UniFrac algorithm as the ground truth, which is an exact and efficient algorithm for large number of samples. A pure Rust implementaion, as a supporting crate for this one, can be found [here](https://github.com/jianshu93/unifrac_bp).
+We use Striped UniFrac algorithm as the ground truth, which is an exact and efficient algorithm for large number of samples. A pure Rust implementaion, as a supporting crate for this one, can be found [here](https://github.com/jianshu93/unifrac_bp), also included as a binary in this crate.
 
 For the testing data (ASVs_count.tsv and ASV_aligned.tre), the truth from Striped UniFrac is:
 
@@ -136,6 +136,35 @@ DartUniFrac estimation (Efficient Rejection Sampling) is:
 | Orwoll_BI0153_BI | 0.3618164062 | 0.4086914062 | 0.4360351562 | 0.0 | 0.264648437 | 0.4311523437 |
 | Orwoll_BI0215_BI | 0.3569335937 | 0.340820312 | 0.4145507812 | 0.264648437 | 0.0 | 0.460937 |
 | Orwoll_BI0353_BI | 0.52539062 | 0.5190429687 | 0.570312 | 0.4311523437 | 0.460937 | 0.0 |
+
+
+## Choosing L for Efficent Rejection Sampling (ERS)
+The best L for achiving a given accuracy is related to the sparsity of the data (see ERS paper [here](https://ojs.aaai.org/index.php/AAAI/article/view/16543)). The author recommended an equation for L: $l=\frac{\alpha}{s}$, where s is the sparsity of the data while $\alpha$ is a constant, normally 0.5 to 5. If you have a large dataset, you can randomly choose several samples to check the sparsity (relevant branches). You can obtain $\alpha$ using the Striped UniFrac binary: 
+
+```bash
+RUST_LOG=info ./target/release/striped_unifrac -t ./data/ASVs_aligned.tre -i ./data/AS
+Vs_counts.txt -o ASVs_striped_unifac_dist.tsv
+```
+You will see some log like this:
+```bash
+ ************** initializing logger *****************
+
+[2025-08-21T20:12:38Z INFO  striped_unifrac] logger initialized from default environment
+[2025-08-21T20:12:38Z INFO  striped_unifrac] Total branches with positive length: 923
+[2025-08-21T20:12:38Z INFO  striped_unifrac] Start parsing input.
+[2025-08-21T20:12:38Z INFO  striped_unifrac] phase-1 masks built      0 ms
+[2025-08-21T20:12:38Z INFO  striped_unifrac] sample 0: relevant branches = 689 / 923
+[2025-08-21T20:12:38Z INFO  striped_unifrac] sample 1: relevant branches = 594 / 923
+[2025-08-21T20:12:38Z INFO  striped_unifrac] sample 2: relevant branches = 646 / 923
+[2025-08-21T20:12:38Z INFO  striped_unifrac] sample 3: relevant branches = 584 / 923
+[2025-08-21T20:12:38Z INFO  striped_unifrac] sample 4: relevant branches = 647 / 923
+[2025-08-21T20:12:38Z INFO  striped_unifrac] sample 5: relevant branches = 468 / 923
+[2025-08-21T20:12:38Z INFO  striped_unifrac] phase-2 sparse lists built (1 strips)
+[2025-08-21T20:12:38Z INFO  striped_unifrac] phase-3 block pass      0 ms
+[2025-08-21T20:12:38Z INFO  striped_unifrac] Start writing output.
+
+```
+This is a dense example where $\alpha$ is almost 75% so L can be small. For real-world datasets, $\alpha$ can be as small as 0.001.
 
 
 ## Acknowledgements
