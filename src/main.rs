@@ -20,7 +20,7 @@ use env_logger;
 use log::{info, warn};
 use rayon::prelude::*;
 
-use newick::{one_from_filename, Newick, NodeID};
+use newick::{one_from_string, Newick, NodeID};
 use succparen::{
     bitwise::{ops::NndOne, SparseOneNnd},
     tree::{
@@ -37,6 +37,63 @@ use anndists::dist::{Distance, DistHamming};
 type NwkTree = newick::NewickTree;
 
 // Tree traversal to collect branch lengths 
+fn sanitize_newick_drop_internal_labels_and_comments(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'[' => {
+                // Skip bracket comments (and tolerate nested just in case)
+                i += 1;
+                let mut depth = 1;
+                while i < bytes.len() && depth > 0 {
+                    match bytes[i] {
+                        b'[' => depth += 1,
+                        b']' => depth -= 1,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            b')' => {
+                // Emit ')'
+                out.push(')');
+                i += 1;
+
+                // Skip whitespace
+                while i < bytes.len() && bytes[i].is_ascii_whitespace() { i += 1; }
+
+                // Optional internal label right after ')': quoted or unquoted.
+                if i < bytes.len() && bytes[i] == b'\'' {
+                    // Quoted label — skip it
+                    i += 1;
+                    while i < bytes.len() {
+                        if bytes[i] == b'\\' && i + 1 < bytes.len() { i += 2; continue; }
+                        if bytes[i] == b'\'' { i += 1; break; }
+                        i += 1;
+                    }
+                    // (comments after this will be removed by the '[' arm next loop)
+                } else {
+                    // Unquoted run until a delimiter
+                    while i < bytes.len() {
+                        let c = bytes[i];
+                        if c.is_ascii_whitespace() || matches!(c, b':'|b','|b')'|b'('|b';'|b'[') { break; }
+                        i += 1;
+                    }
+                }
+                // Don’t consume delimiters like ':' — they’ll be handled in the main loop.
+            }
+            _ => {
+                // Normal char — copy
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+    }
+    out
+}
 
 struct SuccTrav<'a> {
     t: &'a NwkTree,
@@ -347,7 +404,9 @@ fn main() -> Result<()> {
     info!("method={method}   k={k}   ers-L={ers_l}   seed={seed}");
 
     // Load tree
-    let t: NwkTree = one_from_filename(tree_file).context("parse newick")?;
+    let raw = std::fs::read_to_string(tree_file).context("read newick")?;
+    let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
+    let t: NwkTree = one_from_string(&sanitized).context("parse newick (sanitized)")?;
     let mut lens_f32 = Vec::<f32>::new();
     let trav = SuccTrav::new(&t, &mut lens_f32);
     let bp: BalancedParensTree<LabelVec<()>, SparseOneNnd> =
