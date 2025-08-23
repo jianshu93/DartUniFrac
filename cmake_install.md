@@ -1,4 +1,17 @@
-# Install HDF5
+## Install CMake (v3.18.2 or later) on Linux and MacOS
+```bash
+###Linux
+sudo apt install -y cmake
+```
+
+```bash
+brew install cmake
+```
+
+
+
+
+# Install HDF5 (optional)
 ## Install on Linux/Windows (Ubuntu for example)
 ```bash
 sudo apt update
@@ -13,4 +26,14 @@ brew install hdf5
 ## then add the below line to your ~/.bash_profile (if you are using bash, change it according for zsh and fish et.al.).
 export LDFLAGS="-L/opt/homebrew/opt/hdf5/lib"
 export CPPFLAGS="-I/opt/homebrew/opt/hdf5/include"
+```
+
+## Install CMake (v3.18.2 or later) on Linux and MacOS
+```bash
+###Linux
+sudo apt install -y cmake
+```
+
+```bash
+brew install cmake
 ```

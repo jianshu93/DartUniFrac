@@ -62,7 +62,7 @@ dartunifrac -h
 ```
 
 ### from source
-HDF5 needs to be installed first, see guidance [here](hdf5_install.md)
+CMake needs to be installed first, see guidance [here](cmake_install.md)
 ```bash
 git clone https://github.com/jianshu93/DartUniFrac.git
 cd DartUniFrac
