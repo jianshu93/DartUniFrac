@@ -1,3 +1,11 @@
+ //! BSD 3-Clause License
+ //!
+ //! Copyright (c) 2016-2025, UniFrac development team.
+ //! All rights reserved.
+ //!
+ //! See LICENSE file for more details
+
+
 //! DartUniFrac: Approximate unweighted UniFrac via Weighted MinHash
 //! DartMinHash or ERS (Efficient Rejection Sampling) can be used as the underlying algorithm
 //! Tree parsing via optimal balanced parenthesis: 
@@ -140,7 +148,7 @@ fn collect_children<N: NndOne>(
     post.push(pid);
 }
 
-// TSV / BIOM readers
+// TSV/BIOM readers
 
 fn read_table(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<Vec<f64>>)> {
     let f = File::open(p)?;
