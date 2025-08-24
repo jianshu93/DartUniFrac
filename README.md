@@ -3,7 +3,7 @@
 </div>
 
 # DartUniFrac: Approximate unweighted UniFrac via Weighted MinHash
-This crate provides an efficient implementation of the newly invented DartUniFrac algorithm for large-scale [UniFrac](https://en.wikipedia.org/wiki/UniFrac) computation. We named this new algorithm DartUniFrac because the key step is to use DartMinHash or Efficient Rejection Sampling (or ERS) on branches and the DartMinHash/ERS is about "Among the first r darts thrown, return those hitting $x_i$". 
+This crate provides an efficient implementation of the newly invented ***DartUniFrac*** algorithm for large-scale [UniFrac](https://en.wikipedia.org/wiki/UniFrac) computation. We named this new algorithm DartUniFrac because the key step is to use DartMinHash or Efficient Rejection Sampling (or ERS) on branches and the DartMinHash/ERS is about "Among the first r darts thrown, return those hitting $x_i$". 
 
 ## Overview
 UniFrac can be simply described as unique branches that differ two samples over shared branches (see original UniFrac paper [here](https://journals.asm.org/doi/full/10.1128/aem.71.12.8228-8235.2005)). Here, each sample has some taxa (or features) that are in the phylogenetic tree. 
@@ -31,7 +31,7 @@ $$D_{UniFrac}(A,B)=1-\frac{\displaystyle \sum_{i\in E} \ell_i \cdot \min(\max_{j
 since $\displaystyle \ell_i$ can be moved inside max and min (same for sample A and B) and $\max_{j\in {Desc}(i)} x_j(A)$ and $\max_{j\in {Desc}(i)} x_j(B)$ are either 1 or 0. Therefore, it can be rewritten as:
 $$D_{UniFrac}(x,y)=1-J_w(x,y) = \frac{\sum_{i=1}^n \min(x_i, y_i)}{\sum_{i=1}^n \max(x_i, y_i)}$$
 
-here, $\displaystyle J_w(x,y)$ is ***Weighted Jaccard Similarity***, which can be efficiently estimated via Weighted MinHash, a sketching algorithm that is widely used for large-scale text mining. We chose [DartMinHash](https://arxiv.org/abs/2005.11547) and [Efficient Rejection Sampling](https://ojs.aaai.org/index.php/AAAI/article/view/16543) due to their speed for sparse and dense data, respectively. 
+here, $\displaystyle J_w(x,y)$ is ***Weighted Jaccard Similarity***, which can be efficiently estimated via Weighted MinHash, a sketching algorithm that is widely used for large-scale text mining. We chose [DartMinHash](https://arxiv.org/abs/2005.11547) and [Efficient Rejection Sampling](https://ojs.aaai.org/index.php/AAAI/article/view/16543) due to their speed for sparse and dense data, respectively. In practice, large-scale studies are always sparse, so DartMinHash will be more appropriate because it is both fast and more accurate in this case. However, for cases where there are so many samples but not sparse (e.g., synthetic communities), ERS should be used. See "Choosing L for Efficent Rejection Sampling (ERS)" section for details.
 
 In summary, unweighted UniFrac distance can be considered as weighted Jaccard distance on branches. 
 
