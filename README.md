@@ -47,10 +47,10 @@ We first created a few libraries for the best performance of DartUniFrac impleme
 4.A fast, in-memory Principle Coordinate Analysis (PCoA) based on randomized SVD, [fpcoa](https://github.com/jianshu93/fpcoa)
 
 ## Install
-### Pre-compiled on Linux
+### Pre-compiled on Linux (x86-64)
 ```bash
-wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.1.0/dartunifrac_Linux_x86-64_v0.1.0.zip
-unzip dartunifrac_Linux_x86-64_v0.1.0.zip
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.1/dartunifrac_Linux_x86-64_v0.2.1.zip
+unzip dartunifrac_Linux_x86-64_v0.2.1.zip
 chmod a+x ./dartunifrac
 ./dartunifrac -h
 ```
@@ -68,7 +68,7 @@ CMake needs to be installed first, see guidance [here](cmake_install.md)
 ```bash
 git clone https://github.com/jianshu93/DartUniFrac.git
 cd DartUniFrac
-#### You must have HDF5 installed and its library in system path. This is for BIOM format input.
+#### You must have CMake installed to compile HDF5 from source. This is for BIOM format input. You also need zstd installed and library files in system path for compression.
 cargo build --release
 ```
 

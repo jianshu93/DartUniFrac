@@ -438,9 +438,13 @@ fn main() -> Result<()> {
     env_logger::Builder::from_default_env().init();
     log::info!("Logger initialized from default environment");
 
+    let dart = emojis::get_by_shortcode("dart")
+        .map(|e| e.as_str())
+        .unwrap_or("🎯");
+
     let m = Command::new("dartunifrac")
         .version("0.2.1")
-        .about("Approximate unweighted UniFrac via Weighted MinHash")
+        .about(format!("Approximate unweighted UniFrac via Weighted MinHash {dart}{dart}{dart}"))
         .arg(
             Arg::new("tree")
                 .short('t')
