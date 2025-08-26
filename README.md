@@ -33,7 +33,7 @@ $$D_{UniFrac}(x,y)=1-J_w(x,y) = \frac{\sum_{i=1}^n \min(x_i, y_i)}{\sum_{i=1}^n 
 
 here, $\displaystyle J_w(x,y)$ is ***Weighted Jaccard Similarity***, which can be efficiently estimated via Weighted MinHash, a sketching algorithm that is widely used for large-scale text mining. We chose [DartMinHash](https://arxiv.org/abs/2005.11547) and [Efficient Rejection Sampling](https://ojs.aaai.org/index.php/AAAI/article/view/16543) due to their speed for sparse and dense data, respectively. In practice, large-scale studies are always sparse, so DartMinHash will be more appropriate because it is both fast and more accurate in this case. However, for cases where there are so many samples but not sparse (e.g., synthetic communities), ERS should be used. See "Choosing L for Efficent Rejection Sampling (ERS)" section for details.
 
-In summary, unweighted UniFrac distance can be considered as weighted Jaccard distance on branches. 
+In summary, unweighted UniFrac distance can be considered as weighted Jaccard distance on branches. A fast PCoA on the resulting DartUniFrac distance can also be computed. We rely on fixed rank subspace iteration style randomized SVD, see below. 
 
 ## Libraries
 We first created a few libraries for the best performance of DartUniFrac implementation. 

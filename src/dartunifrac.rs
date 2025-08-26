@@ -477,7 +477,7 @@ fn main() -> Result<()> {
                 .long("sketch")
                 .help("Sketch size for Weighted MinHash (DartMinHash or ERS)")
                 .value_parser(clap::value_parser!(usize))
-                .default_value("1024"),
+                .default_value("2048"),
         )
         .arg(
             Arg::new("method")
