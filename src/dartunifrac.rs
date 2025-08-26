@@ -42,6 +42,9 @@ use hdf5::{types::VarLenUnicode, File as H5File};
 use dartminhash::{rng_utils::mt_from_seed, DartMinHash, ErsWmh};
 use anndists::dist::{Distance, DistHamming};
 
+use ndarray::Array2;
+use fpcoa::{FpcoaOptions, pcoa_randomized};
+
 type NwkTree = newick::NewickTree;
 
 // Tree traversal to collect branch lengths 
@@ -241,6 +244,55 @@ fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()>
     Ok(())
 }
 
+fn write_matrix_zstd(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()> {
+    use std::fs::File;
+    use std::io::{BufWriter, Write};
+
+    // zstd multi-threading
+    let file = File::create(path)?;
+    let mut enc = zstd::Encoder::new(file, 0)?;
+    enc.multithread(num_cpus::get() as u32)?;
+    let mut out = BufWriter::with_capacity(16 << 20, enc.auto_finish());
+
+    // Header
+    let header = {
+        let mut s = String::with_capacity(n * 16);
+        s.push_str("");
+        for name in names {
+            s.push('\t');
+            s.push_str(name);
+        }
+        s.push('\n');
+        s
+    };
+    out.write_all(header.as_bytes())?;
+
+    let mut rows: Vec<String> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let mut line = String::with_capacity(8 + n * 12);
+            line.push_str(&names[i]);
+            let base = i * n;
+            let mut buf = ryu::Buffer::new();
+            for j in 0..n {
+                let val = unsafe { *d.get_unchecked(base + j) };
+                line.push('\t');
+                line.push_str(buf.format_finite(val));
+            }
+            line.push('\n');
+            line
+        })
+        .collect();
+
+    for line in &mut rows {
+        out.write_all(line.as_bytes())?;
+        line.clear();
+    }
+    out.flush()?;
+
+    Ok(())
+}
+
 // Build per-node sample bitsets (presence under node)
 
 fn build_node_bits(
@@ -325,6 +377,62 @@ fn build_node_bits(
     node_bits
 }
 
+fn write_pcoa(
+    sample_names: &[String],
+    coords: &ndarray::Array2<f64>,
+    prop_explained: &ndarray::Array1<f64>,
+    path: &str,
+) -> Result<()> {
+    use std::io::Write;
+
+    let n = coords.nrows();
+    let k = coords.ncols();
+    assert_eq!(sample_names.len(), n);
+
+    let mut out = BufWriter::with_capacity(16 << 20, File::create(path)?);
+
+    // Header row: "", PC1..PCk
+    out.write_all(b"")?;
+    for pc in 1..=k {
+        out.write_all(b"\t")?;
+        out.write_all(format!("PC{pc}").as_bytes())?;
+    }
+    out.write_all(b"\n")?;
+
+    // Rows: sample_name, then coordinates
+    let mut buf = ryu::Buffer::new();
+    for i in 0..n {
+        out.write_all(sample_names[i].as_bytes())?;
+        for j in 0..k {
+            out.write_all(b"\t")?;
+            out.write_all(buf.format_finite(coords[[i, j]]).as_bytes())?;
+        }
+        out.write_all(b"\n")?;
+    }
+
+    // Blank line
+    out.write_all(b"\n")?;
+
+    // Header again for the rates (to match your request)
+    out.write_all(b"")?;
+    for pc in 1..=k {
+        out.write_all(b"\t")?;
+        out.write_all(format!("PC{pc}").as_bytes())?;
+    }
+    out.write_all(b"\n")?;
+
+    // One row of 10 (or k) explanation rates
+    out.write_all(b"proportion_explained")?;
+    for j in 0..k {
+        out.write_all(b"\t")?;
+        out.write_all(buf.format_finite(prop_explained[j]).as_bytes())?;
+    }
+    out.write_all(b"\n")?;
+
+    out.flush()?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     println!("\n ************** initializing logger *****************\n");
     env_logger::Builder::from_default_env().init();
@@ -396,6 +504,18 @@ fn main() -> Result<()> {
                 .value_parser(clap::value_parser!(u64))
                 .default_value("1337"),
         )
+        .arg(
+            Arg::new("compress")
+                .long("compress")
+                .help("Compress output with zstd, .zstd suffix can be added to the output file name")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("pcoa")
+                .long("pcoa")
+                .help("Fast Principle Coordinate Analysis based on Randomized SVD, output saved to pcoa.tsv")
+                .action(clap::ArgAction::SetTrue),
+        )
         .get_matches();
 
     let tree_file = m.get_one::<String>("tree").unwrap();
@@ -404,6 +524,8 @@ fn main() -> Result<()> {
     let method = m.get_one::<String>("method").unwrap().as_str(); // "dmh" | "ers"
     let ers_l = *m.get_one::<u64>("seq-length").unwrap();
     let seed = *m.get_one::<u64>("seed").unwrap();
+    let compress = m.get_flag("compress");
+    let pcoa = m.get_flag("pcoa");
 
     rayon::ThreadPoolBuilder::new()
         .num_threads(num_cpus::get())
@@ -637,9 +759,45 @@ fn main() -> Result<()> {
         out
     };
     info!("pairwise distances in {} ms", t2.elapsed().as_millis());
+    if pcoa {
+        let n = nsamp;
+
+        // Build an ndarray view for PCoA
+        // We still need `dist` later to write the matrix, so we clone here.
+        let dm = Array2::from_shape_vec((n, n), dist.clone())
+            .expect("distance matrix shape");
+
+        let opts = FpcoaOptions {
+            k: 10,            // 10 coordinates as requested
+            oversample: 8,    // standard
+            nbiter: 2,        // standard
+            symmetrize_input: true,
+        };
+
+        info!("Running randomized PCoA: k={}, oversample={}, iters={}", opts.k, opts.oversample, opts.nbiter);
+        let t_pcoa = Instant::now();
+        let res = pcoa_randomized(&dm, opts);
+        info!("PCoA done in {} ms", t_pcoa.elapsed().as_millis());
+
+        // Write pcoa.tsv in the same directory as `-o`
+        let pcoa_path = {
+            let p = std::path::Path::new(out_file);
+            let mut pb = p.to_path_buf();
+            pb.set_file_name("pcoa.tsv");
+            pb
+        };
+        info!("Writing PCoA coordinates → {}", pcoa_path.display());
+        write_pcoa(&samples, &res.coordinates, &res.proportion_explained, pcoa_path.to_str().unwrap())?;
+    }
 
     // Write output (fast ryu formatting)
-    write_matrix(&samples, &dist, nsamp, out_file)?;
+    if compress {
+        info!("Writing compressed (zstd) output → {}", out_file);
+        write_matrix_zstd(&samples, &dist, nsamp, out_file)?;
+    } else {
+        info!("Writing uncompressed output → {}", out_file);
+        write_matrix(&samples, &dist, nsamp, out_file)?;
+    }
     info!("Done → {}", out_file);
 
     Ok(())
