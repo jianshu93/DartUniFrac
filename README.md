@@ -44,6 +44,8 @@ We first created a few libraries for the best performance of DartUniFrac impleme
 
 3.SIMD-aware Hamming similarity for computing hash collision probability of sketches, [anndists](https://github.com/jianshu93/anndists)
 
+4.A fast, in-memory Principle Coordinate Analysis (PCoA) based on randomized SVD, [fpcoa](https://github.com/jianshu93/fpcoa)
+
 ## Install
 ### Pre-compiled on Linux
 ```bash
@@ -74,8 +76,7 @@ cargo build --release
 DartUniFrac will use all availble CPU cores/threads via Rayon by default.
 ```bash
 $ ./target/release/dartunifrac -h
-
- ************** initializing logger *****************
+************** initializing logger *****************
 
 Approximate unweighted UniFrac via Weighted MinHash
 
@@ -86,10 +87,12 @@ Options:
   -i, --input <input>         OTU/Feature table in TSV format
   -b, --biom <biom>           OTU/Feature table in BIOM (HDF5) format
   -o, --output <output>       Output distance matrix in TSV format [default: unifrac.tsv]
-  -s, --sketch <sketch-size>  Sketch size for Weighted MinHash (DartMinHash or ERS) [default: 1024]
+  -s, --sketch <sketch-size>  Sketch size for Weighted MinHash (DartMinHash or ERS) [default: 2048]
   -m, --method <method>       Sketching method: dmh (DartMinHash) or ers (Efficient Rejection Sampling) [default: dmh] [possible values: dmh, ers]
-  -l, --length <seq-length>   Per-hash independent random sequence length L for ERS [default: 4096]
+  -l, --length <seq-length>   Per-hash independent random sequence length for ERS, must be >= 1024 [default: 4096]
       --seed <seed>           Random seed for reproducibility [default: 1337]
+      --compress              Compress output with zstd, .zstd suffix can be added to the output file name
+      --pcoa                  Fast Principle Coordinate Analysis based on Randomized SVD, output saved to pcoa.tsv
   -h, --help                  Print help
   -V, --version               Print version
 ```
@@ -97,11 +100,47 @@ Options:
 
 ```bash
 ### DartMinHash
-dartunifrac -t ./data/ASVs_aligned.tre -i ./data/ASVs_counts.txt -m dmh -s 2048 -o unifrac_dmh.csv
+dartunifrac -t ./data/ASVs_aligned.tre -i ./data/ASVs_counts.txt -m dmh -s 2048 -o unifrac_dmh_dist.csv
 
 ### Efficient Rejection Sampling
-dartunifrac -t ./data/ASVs_aligned.tre -i ./data/ASVs_counts.txt -m ers -s 2048 -l 4096 -o unifrac_ers.csv
+dartunifrac -t ./data/ASVs_aligned.tre -i ./data/ASVs_counts.txt -m ers -s 2048 -l 4096 -o unifrac_ers_dist.csv
+
+### dartMinHash with pcoa and compressed output distance matrix
+dartunifrac -t ./data/ASVs_aligned.tre -i ./data/ASVs_counts.txt -m dmh -s 2048 -o unifrac_dmh_dist.zstd --pcoa --compress
+
 ```
+
+## Output
+A distance matrix (see also benchmark section) and pcoa stype output.
+Distance matrix:
+
+|    | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
+|:--|---:|---:|---:|---:|---:|---:|
+| Orwoll_BI0023_BI | 0.0 | 0.40307617187 | 0.36596679687 | 0.36010742187 | 0.35815429687 | 0.530273437 |
+| Orwoll_BI0056_BI | 0.40307617187 | 0.0 | 0.3901367187 | 0.40747070312 | 0.3398437 | 0.5209960937 |
+| Orwoll_BI0131_BI | 0.36596679687 | 0.3901367187 | 0.0 | 0.41577148437 | 0.40014648437 | 0.56860351562 |
+| Orwoll_BI0153_BI | 0.36010742187 | 0.40747070312 | 0.41577148437 | 0.0 | 0.260742187 | 0.422851562 |
+| Orwoll_BI0215_BI | 0.35815429687 | 0.3398437 | 0.40014648437 | 0.260742187 | 0.0 | 0.45825195312 |
+| Orwoll_BI0353_BI | 0.530273437 | 0.5209960937 | 0.56860351562 | 0.422851562 | 0.45825195312 | 0.0 |
+
+PCoA:
+|  | PC1 | PC2 | PC3 | PC4 | PC5 | PC6 |
+|:--|---:|---:|---:|---:|---:|---:|
+| Orwoll_BI0023_BI | -0.12912805176115577 | -0.13478145930844512 | 0.042380530554922635 | 0.17338355657990664 | -0.003431287906286917 | 0.0 |
+| Orwoll_BI0056_BI | -0.09201950670064461 | 0.23750165032060416 | -0.030767869352507412 | 0.05365540164234924 | -0.04135676583746806 | 0.0 |
+| Orwoll_BI0131_BI | -0.18672940644255911 | -0.01880872256563759 | 0.15163198033883335 | -0.1408718693633402 | 0.013611393370684486 | 0.0 |
+| Orwoll_BI0153_BI | 0.06843838458354137 | -0.09791766405635079 | -0.12381078744019998 | -0.07508375468747691 | -0.10416130668711489 | 0.0 |
+| Orwoll_BI0215_BI | -0.003937706919220717 | -0.00814970660379848 | -0.15251179756497754 | -0.028692966865033972 | 0.11819355132475588 | 0.0 |
+| Orwoll_BI0353_BI | 0.3433762872400387 | 0.022155902213627746 | 0.11307794346392891 | 0.017609632693595324 | 0.017144415735429568 | 0.0 |
+
+
+|  | PC1 | PC2 | PC3 | PC4 | PC5 | PC6 |
+|:--|---:|---:|---:|---:|---:|---:|
+| proportion_explained | 0.4233339721296298 | 0.19721082825095754 | 0.17875499078496368 | 0.13806192702856432 | 0.0626382818058847 | 0.0 |
+
+
+
+
 ## Benchmark
 We use Striped UniFrac algorithm as the ground truth, which is an exact and efficient algorithm for large number of samples. A pure Rust implementaion, as a supporting crate for this one, can be found [here](https://github.com/jianshu93/unifrac_bp), also included as a binary in this crate.
 

@@ -439,7 +439,7 @@ fn main() -> Result<()> {
     log::info!("Logger initialized from default environment");
 
     let m = Command::new("dartunifrac")
-        .version("0.2.0")
+        .version("0.2.1")
         .about("Approximate unweighted UniFrac via Weighted MinHash")
         .arg(
             Arg::new("tree")
