@@ -793,7 +793,7 @@ fn main() -> Result<()> {
         .arg(
             Arg::new("compress")
                 .long("compress")
-                .help("Compress output with zstd, .zstd suffix can be added to the output file name")
+                .help("Compress output with zstd, .zst suffix can be added to the output file name")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
