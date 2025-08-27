@@ -237,8 +237,10 @@ fn log_relevant_branch_counts_from_bits(node_bits: &[bitvec::vec::BitVec<u64, Ls
     }
 
     for s in 0..nsamp {
+        let cnt = rel_counts[s] as usize;
+        let frac = (cnt as f64) / (total_branches as f64);
         log::info!("sample {}: relevant branches = {} / {} = {}",
-                   s, rel_counts[s], total_branches, rel_counts[s] as usize/total_branches );
+                   s, rel_counts[s], total_branches, frac);
     }
 }
 /// Striped UniFrac (unweighted)

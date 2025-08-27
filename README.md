@@ -69,7 +69,10 @@ CMake needs to be installed first, see guidance [here](cmake_install.md)
 git clone https://github.com/jianshu93/DartUniFrac.git
 cd DartUniFrac
 #### You must have CMake installed to compile HDF5 from source. This is for BIOM format input. You also need zstd installed and library files in system path for compression.
-cargo build --release
+### Linux
+cargo build --release --features intel-mkl-static
+### macos
+cargo build --release --features macos-accelerate
 ```
 
 ## Usage
@@ -78,7 +81,7 @@ DartUniFrac will use all availble CPU cores/threads via Rayon by default.
 $ ./target/release/dartunifrac -h
 ************** initializing logger *****************
 
-Approximate unweighted UniFrac via Weighted MinHash
+DartUniFrac: Approximate unweighted UniFrac via Weighted MinHash 🎯🎯🎯
 
 Usage: dartunifrac [OPTIONS] --tree <tree> <--input <input>|--biom <biom>>
 
@@ -93,6 +96,8 @@ Options:
       --seed <seed>           Random seed for reproducibility [default: 1337]
       --compress              Compress output with zstd, .zstd suffix can be added to the output file name
       --pcoa                  Fast Principle Coordinate Analysis based on Randomized SVD, output saved to pcoa.tsv
+      --stream                Stream the distance matrix while computing (zstd-compressed)
+      --block <block>         Number of rows per chunk, streaming mode only
   -h, --help                  Print help
   -V, --version               Print version
 ```
