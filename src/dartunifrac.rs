@@ -293,6 +293,79 @@ fn write_matrix_zstd(names: &[String], d: &[f64], n: usize, path: &str) -> Resul
     Ok(())
 }
 
+fn write_matrix_streaming_zstd(
+    names: &[String],
+    sketches: &[Vec<u64>],
+    path: &str,
+    block_size_opt: Option<usize>,
+) -> Result<()> {
+    use std::io::Write;
+
+    let n = names.len();
+    assert_eq!(sketches.len(), n);
+
+    // zstd multi-threaded encoder + big buffer
+    let file = File::create(path)?;
+    let mut enc = zstd::Encoder::new(file, 0)?;
+    enc.multithread(num_cpus::get() as u32)?;
+    let mut w = BufWriter::with_capacity(16 << 20, enc.auto_finish());
+
+    // Header: "", <names...>
+    w.write_all(b"")?;
+    for name in names {
+        w.write_all(b"\t")?;
+        w.write_all(name.as_bytes())?;
+    }
+    w.write_all(b"\n")?;
+
+    // Block size: default = floor(sqrt(n))
+    let default_bs = ((n as f64).sqrt() as usize).max(1);
+    let bs = block_size_opt.unwrap_or(default_bs);
+    info!("streaming block-size = {} (n = {})", bs, n);
+
+    // Column-major block buffer: n × bs (each column j is a contiguous slice of length bs)
+    let mut block = vec![0.0f64; n * bs];
+    let mut fmt = ryu::Buffer::new();
+    let dh = DistHamming;
+
+    let mut i0 = 0usize;
+    while i0 < n {
+        let h = (n - i0).min(bs);
+
+        // Fill block in parallel over columns; each `col` is a disjoint &mut [f64] (length = bs)
+        block
+            .par_chunks_mut(bs)
+            .enumerate()
+            .for_each(|(j, col)| {
+                for bi in 0..h {
+                    let i = i0 + bi;
+                    let d = if i == j {
+                        0.0
+                    } else {
+                        dh.eval(&sketches[i], &sketches[j]) as f64
+                    };
+                    col[bi] = d; // write into column-major slot (j, bi)
+                }
+            });
+
+        // Write the block (single writer, amortized I/O)
+        for bi in 0..h {
+            let i = i0 + bi;
+            w.write_all(names[i].as_bytes())?;
+            for j in 0..n {
+                w.write_all(b"\t")?;
+                let v = block[j * bs + bi]; // column-major index (j, bi)
+                w.write_all(fmt.format_finite(v).as_bytes())?;
+            }
+            w.write_all(b"\n")?;
+        }
+        w.flush()?;
+        i0 += h;
+    }
+
+    Ok(())
+}
+
 // Build per-node sample bitsets (presence under node)
 
 fn build_node_bits(
@@ -375,6 +448,215 @@ fn build_node_bits(
     });
 
     node_bits
+}
+
+fn build_sketches(
+    tree_file: &str,
+    input_tsv: Option<&str>,
+    biom_h5: Option<&str>,
+    k: usize,
+    method: &str,
+    ers_l: u64,
+    seed: u64,
+) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
+    // ---- Load tree ----
+    let raw = std::fs::read_to_string(tree_file).context("read newick")?;
+    let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
+    let t: NwkTree = one_from_string(&sanitized).context("parse newick (sanitized)")?;
+    let mut lens_f32 = Vec::<f32>::new();
+    let trav = SuccTrav::new(&t, &mut lens_f32);
+    let bp: BalancedParensTree<LabelVec<()>, SparseOneNnd> =
+        BalancedParensTree::new_builder(trav, LabelVec::<()>::new()).build_all();
+
+    // Leaves and mapping name to leaf index
+    let mut leaf_ids = Vec::<usize>::new();
+    let mut leaf_nm = Vec::<String>::new();
+    for n in t.nodes() {
+        if t[n].is_leaf() {
+            leaf_ids.push(n);
+            leaf_nm.push(t.name(n).map(|s| s.to_owned()).unwrap_or_else(|| format!("L{n}")));
+        }
+    }
+    let t2leaf: HashMap<&str, usize> =
+        leaf_nm.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+
+    // children & postorder 
+    let total = bp.len() + 1;
+    lens_f32.resize(total, 0.0);
+    let mut kids = vec![Vec::<usize>::new(); total];
+    let mut post = Vec::<usize>::with_capacity(total);
+    collect_children::<SparseOneNnd>(&bp.root(), &mut kids, &mut post);
+
+    // Read table/biom and build leaf masks
+    let (_taxa, mut samples, masks) = if let Some(tsv) = input_tsv {
+        let (taxa, samples, mat) = read_table(tsv)?;
+        let nsamp = samples.len();
+        let mut masks: Vec<BitVec<u8, Lsb0>> =
+            (0..nsamp).map(|_| BitVec::repeat(false, leaf_ids.len())).collect();
+        for (ti, tax) in taxa.iter().enumerate() {
+            if let Some(&leaf) = t2leaf.get(tax.as_str()) {
+                for (s, bits) in masks.iter_mut().enumerate() {
+                    if mat[ti][s] > 0.0 {
+                        bits.set(leaf, true);
+                    }
+                }
+            }
+        }
+        (taxa, samples, masks)
+    } else {
+        let biom = biom_h5.expect("biom path required when TSV not provided");
+        let (taxa, samples, indptr, indices) = read_biom_csr(biom)?;
+        let nsamp = samples.len();
+        let mut masks: Vec<BitVec<u8, Lsb0>> =
+            (0..nsamp).map(|_| BitVec::repeat(false, leaf_ids.len())).collect();
+        for row in 0..taxa.len() {
+            if let Some(&leaf) = t2leaf.get(taxa[row].as_str()) {
+                let start = indptr[row] as usize;
+                let stop = indptr[row + 1] as usize;
+                for k in start..stop {
+                    let s = indices[k] as usize;
+                    masks[s].set(leaf, true);
+                }
+            }
+        }
+        (taxa, samples, masks)
+    };
+
+    let nsamp0 = samples.len();
+    info!(
+        "nodes = {}  leaves = {}  samples = {}",
+        total,
+        leaf_ids.len(),
+        nsamp0
+    );
+
+    // node_bits[v]: bitset over samples
+    let t0 = Instant::now();
+    let node_bits = build_node_bits(&post, &kids, &leaf_ids, &masks, total);
+    info!("node_bits built in {} ms", t0.elapsed().as_millis());
+    // masks is not need after obtaining node_bits
+    drop(masks);
+    // Positive-length edges and weights
+    let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
+
+    // Keep only edges with ℓ_e > 0 and present in at least one sample
+    let active_edges: Vec<usize> = (0..total)
+        .filter(|&v| lens[v] > 0.0 && node_bits[v].any())
+        .collect();
+
+    if active_edges.is_empty() {
+        anyhow::bail!("No active edges: no positive-length branch is present in any sample.");
+    }
+
+    // Dense remap old edge id -> [0..active_edges.len())
+    let mut id_map = vec![usize::MAX; total];
+    for (new_id, &v) in active_edges.iter().enumerate() {
+        id_map[v] = new_id;
+    }
+    info!(
+        "active edges = {} (from {} total, {} leaves)",
+        active_edges.len(),
+        total,
+        leaf_ids.len()
+    );
+
+    // Build weighted sets per sample on active edges
+    let t1 = Instant::now();
+    let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); samples.len()];
+    for &v in &active_edges {
+        let w = lens[v];
+        let words = node_bits[v].as_raw_slice();
+        for (wi, &w0) in words.iter().enumerate() {
+            let mut word = w0;
+            while word != 0 {
+                let b = word.trailing_zeros() as usize;
+                let s = (wi << 6) + b;
+                if s < wsets.len() {
+                    wsets[s].push((id_map[v] as u64, w));
+                }
+                word &= word - 1;
+            }
+        }
+    }
+    info!(
+        "built per-sample weighted sets in {} ms",
+        t1.elapsed().as_millis()
+    );
+    // keep memory tight
+    drop(node_bits);
+    drop(kids);
+    drop(post);
+    drop(leaf_ids);
+    drop(t2leaf);
+    drop(id_map);
+
+    // Drop empty samples
+    let empty_idx: Vec<usize> = wsets
+        .iter()
+        .enumerate()
+        .filter_map(|(i, ws)| if ws.is_empty() { Some(i) } else { None })
+        .collect();
+
+    if !empty_idx.is_empty() {
+        let show = empty_idx.len().min(20);
+        for &s in empty_idx.iter().take(show) {
+            warn!("Dropping sample '{}' (no covered branches; all zeros).", samples[s]);
+        }
+        if empty_idx.len() > show {
+            warn!("... and {} more empty samples.", empty_idx.len() - show);
+        }
+        // Filter wsets and sample names in lockstep
+        let mut kept_ws = Vec::with_capacity(wsets.len() - empty_idx.len());
+        let mut kept_names = Vec::with_capacity(samples.len() - empty_idx.len());
+        for (i, ws) in wsets.into_iter().enumerate() {
+            if !ws.is_empty() {
+                kept_ws.push(ws);
+                kept_names.push(samples[i].clone());
+            }
+        }
+        wsets = kept_ws;
+        samples = kept_names;
+        info!("Kept {} non-empty samples.", samples.len());
+        if samples.len() < 2 {
+            anyhow::bail!("Fewer than 2 non-empty samples after filtering; nothing to compare.");
+        }
+    }
+
+    // Sketch per sample in parallel
+    let mut rng = mt_from_seed(seed);
+    let sketches_u64: Vec<Vec<u64>> = if method == "dmh" {
+        let dmh = DartMinHash::new_mt(&mut rng, k as u64);
+        wsets
+            .par_iter()
+            .map(|ws| {
+                dmh.sketch(ws)
+                    .into_iter()
+                    .map(|(id, _rank)| id)
+                    .collect::<Vec<u64>>()
+            })
+            .collect()
+    } else {
+        let mut m_per_dim = vec![0u32; total];
+        for &v in &active_edges {
+            let mut cap = lens[v].ceil();
+            if cap < 1.0 { cap = 1.0; }
+            let cap_u32 = if cap.is_finite() {
+                cap.min(u32::MAX as f64) as u32
+            } else { u32::MAX };
+            m_per_dim[v] = cap_u32;
+        }
+        let ers = ErsWmh::new_mt(&mut rng, &m_per_dim, k as u64);
+        wsets
+            .par_iter()
+            .map(|ws| {
+                let sk = ers.sketch(ws, Some(ers_l));
+                sk.into_iter().map(|(id, _rank)| id).collect::<Vec<u64>>()
+            })
+            .collect()
+    };
+    info!("sketching done.");
+    // Everything heavy (tree structures, masks, node_bits, wsets, etc.) drops here.
+    Ok((samples, sketches_u64))
 }
 
 fn write_pcoa(
@@ -520,16 +802,32 @@ fn main() -> Result<()> {
                 .help("Fast Principle Coordinate Analysis based on Randomized SVD, output saved to pcoa.tsv")
                 .action(clap::ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("stream")
+                .long("stream")
+                .help("Stream the distance matrix while computing (zstd-compressed)")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("block")
+                .long("block")
+                .help("Number of rows per chunk, streaming mode only")
+                .value_parser(clap::value_parser!(usize)),
+        )
         .get_matches();
 
     let tree_file = m.get_one::<String>("tree").unwrap();
+    let input_tsv = m.get_one::<String>("input").map(|s| s.as_str());
+    let biom_path = m.get_one::<String>("biom").map(|s| s.as_str());
     let out_file = m.get_one::<String>("output").unwrap();
     let k = *m.get_one::<usize>("sketch-size").unwrap();
-    let method = m.get_one::<String>("method").unwrap().as_str(); // "dmh" | "ers"
+    let method = m.get_one::<String>("method").unwrap().as_str();
     let ers_l = *m.get_one::<u64>("seq-length").unwrap();
     let seed = *m.get_one::<u64>("seed").unwrap();
     let compress = m.get_flag("compress");
     let pcoa = m.get_flag("pcoa");
+    let stream = m.get_flag("stream");
+    let block = m.get_one::<usize>("block").copied();
 
     rayon::ThreadPoolBuilder::new()
         .num_threads(num_cpus::get())
@@ -538,203 +836,21 @@ fn main() -> Result<()> {
 
     info!("method={method}   k={k}   ers-L={ers_l}   seed={seed}");
 
-    // Load tree
-    let raw = std::fs::read_to_string(tree_file).context("read newick")?;
-    let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
-    let t: NwkTree = one_from_string(&sanitized).context("parse newick (sanitized)")?;
-    let mut lens_f32 = Vec::<f32>::new();
-    let trav = SuccTrav::new(&t, &mut lens_f32);
-    let bp: BalancedParensTree<LabelVec<()>, SparseOneNnd> =
-        BalancedParensTree::new_builder(trav, LabelVec::<()>::new()).build_all();
-
-    // Leaves and mapping name -> leaf index
-    let mut leaf_ids = Vec::<usize>::new();
-    let mut leaf_nm = Vec::<String>::new();
-    for n in t.nodes() {
-        if t[n].is_leaf() {
-            leaf_ids.push(n);
-            leaf_nm.push(t.name(n).map(|s| s.to_owned()).unwrap_or_else(|| format!("L{n}")));
+    let (samples, sketches_u64) =
+    build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?;
+    let nsamp = samples.len();
+    if stream {
+        if pcoa {
+            warn!("--pcoa is incompatible with --stream; skipping PCoA in streaming mode.");
         }
+        if compress {
+            warn!("--compress is ignored with --stream; streaming output is already zstd-compressed.");
+        }
+        info!("Streaming zstd-compressed distance matrix → {}", out_file);
+        write_matrix_streaming_zstd(&samples, &sketches_u64, out_file, block)?;
+        info!("Done → {}", out_file);
+        return Ok(());
     }
-    let t2leaf: HashMap<&str, usize> =
-        leaf_nm.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
-
-    // children & postorder
-    let total = bp.len() + 1;
-    lens_f32.resize(total, 0.0);
-    let mut kids = vec![Vec::<usize>::new(); total];
-    let mut post = Vec::<usize>::with_capacity(total);
-    collect_children::<SparseOneNnd>(&bp.root(), &mut kids, &mut post);
-
-    // Read table and build leaf masks
-    let (_taxa, mut samples, masks) = if let Some(tsv) = m.get_one::<String>("input") {
-        let (taxa, samples, mat) = read_table(tsv)?;
-        let nsamp = samples.len();
-        let mut masks: Vec<BitVec<u8, Lsb0>> =
-            (0..nsamp).map(|_| BitVec::repeat(false, leaf_ids.len())).collect();
-        for (ti, tax) in taxa.iter().enumerate() {
-            if let Some(&leaf) = t2leaf.get(tax.as_str()) {
-                for (s, bits) in masks.iter_mut().enumerate() {
-                    if mat[ti][s] > 0.0 {
-                        bits.set(leaf, true);
-                    }
-                }
-            }
-        }
-        (taxa, samples, masks)
-    } else {
-        let biom = m.get_one::<String>("biom").unwrap();
-        let (taxa, samples, indptr, indices) = read_biom_csr(biom)?;
-        let nsamp = samples.len();
-        let mut masks: Vec<BitVec<u8, Lsb0>> =
-            (0..nsamp).map(|_| BitVec::repeat(false, leaf_ids.len())).collect();
-        for row in 0..taxa.len() {
-            if let Some(&leaf) = t2leaf.get(taxa[row].as_str()) {
-                let start = indptr[row] as usize;
-                let stop = indptr[row + 1] as usize;
-                for k in start..stop {
-                    let s = indices[k] as usize;
-                    masks[s].set(leaf, true);
-                }
-            }
-        }
-        (taxa, samples, masks)
-    };
-
-    let mut nsamp = samples.len();
-    info!(
-        "nodes = {}  leaves = {}  samples = {}",
-        total,
-        leaf_ids.len(),
-        nsamp
-    );
-
-    // node_bits[v]: bitset over samples that have presence under node v
-    let t0 = Instant::now();
-    let node_bits = build_node_bits(&post, &kids, &leaf_ids, &masks, total);
-    info!("node_bits built in {} ms", t0.elapsed().as_millis());
-
-    // Positive-length edges and weights
-    let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
-
-    // Keep only edges with ℓ_e > 0 and present in at least one sample (logical prune)
-    let active_edges: Vec<usize> = (0..total)
-        .filter(|&v| lens[v] > 0.0 && node_bits[v].any())
-        .collect();
-
-    if active_edges.is_empty() {
-        anyhow::bail!("No active edges: no positive-length branch is present in any sample.");
-    }
-
-    // Dense remap old edge id -> [0..active_edges.len())
-    let mut id_map = vec![usize::MAX; total];
-    for (new_id, &v) in active_edges.iter().enumerate() {
-        id_map[v] = new_id;
-    }
-    info!(
-        "active edges = {} (from {} total, {} leaves)",
-        active_edges.len(),
-        total,
-        leaf_ids.len()
-    );
-
-    // Build weighted sets per sample on active edges, using dense IDs
-    let t1 = Instant::now();
-    let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-    for &v in &active_edges {
-        let w = lens[v];
-        let words = node_bits[v].as_raw_slice();
-        for (wi, &w0) in words.iter().enumerate() {
-            let mut word = w0;
-            while word != 0 {
-                let b = word.trailing_zeros() as usize;
-                let s = (wi << 6) + b;
-                if s < nsamp {
-                    // use dense ID for edge v
-                    wsets[s].push((id_map[v] as u64, w));
-                }
-                word &= word - 1;
-            }
-        }
-    }
-    info!(
-        "built per-sample weighted sets in {} ms",
-        t1.elapsed().as_millis()
-    );
-
-    // Drop empty samples (no covered branches) and continue
-    let empty_idx: Vec<usize> = wsets
-        .iter()
-        .enumerate()
-        .filter_map(|(i, ws)| if ws.is_empty() { Some(i) } else { None })
-        .collect();
-
-    if !empty_idx.is_empty() {
-        let show = empty_idx.len().min(20);
-        for &s in empty_idx.iter().take(show) {
-            warn!("Dropping sample '{}' (no covered branches; all zeros).", samples[s]);
-        }
-        if empty_idx.len() > show {
-            warn!("... and {} more empty samples.", empty_idx.len() - show);
-        }
-        // Filter wsets and sample names in lockstep
-        let mut kept_ws = Vec::with_capacity(nsamp - empty_idx.len());
-        let mut kept_names = Vec::with_capacity(nsamp - empty_idx.len());
-        for (i, ws) in wsets.into_iter().enumerate() {
-            if !ws.is_empty() {
-                kept_ws.push(ws);
-                kept_names.push(samples[i].clone());
-            }
-        }
-        wsets = kept_ws;
-        samples = kept_names;
-        nsamp = samples.len();
-        info!("Kept {} non-empty samples.", nsamp);
-        if nsamp < 2 {
-            anyhow::bail!("Fewer than 2 non-empty samples after filtering; nothing to compare.");
-        }
-    }
-
-    // Sketch per sample (parallel) — keep only IDs; DistHamming over IDs gives 1 - Jaccard
-    let mut rng = mt_from_seed(seed);
-    let sketches_u64: Vec<Vec<u64>> = if method == "dmh" {
-        // DartMinHash: reuse one instance so bucket hash & dart stream are shared.
-        let dmh = DartMinHash::new_mt(&mut rng, k as u64);
-        wsets
-            .par_iter()
-            .map(|ws| {
-                dmh.sketch(ws)
-                    .into_iter()
-                    .map(|(id, _rank)| id) // keep ID only
-                    .collect::<Vec<u64>>()
-            })
-            .collect()
-    } else {
-        // ERS caps per dimension: m_i = ceil(ℓ_e), at least 1 (valid for all samples).
-        let mut m_per_dim = vec![0u32; total];
-        for &v in &active_edges {
-            let mut cap = lens[v].ceil();
-            if cap < 1.0 {
-                cap = 1.0;
-            }
-            let cap_u32 = if cap.is_finite() {
-                cap.min(u32::MAX as f64) as u32
-            } else {
-                u32::MAX
-            };
-            m_per_dim[v] = cap_u32;
-        }
-        let ers = ErsWmh::new_mt(&mut rng, &m_per_dim, k as u64);
-        wsets
-            .par_iter()
-            .map(|ws| {
-                let sk = ers.sketch(ws, Some(ers_l));
-                sk.into_iter().map(|(id, _rank)| id).collect::<Vec<u64>>()
-            })
-            .collect()
-    };
-    info!("sketching done.");
-
     // Pairwise UniFrac (≈ 1 - Jaccard) via normalized Hamming on ID arrays.
     let t2 = Instant::now();
     let dist = {
