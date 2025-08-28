@@ -717,48 +717,19 @@ fn write_pcoa(
 
 fn write_pcoa_ordination(
     sample_names: &[String],
-    coords: &ndarray::Array2<f64>,
-    eigenvalues_opt: Option<&ndarray::Array1<f64>>,
-    prop_explained_opt: Option<&ndarray::Array1<f64>>,
+    coords: &Array2<f64>,
+    eigenvalues: &Array1<f64>,
+    proportion_explained: &Array1<f64>,
     path: &str,
 ) -> anyhow::Result<()> {
+    use std::io::Write;
+
     let n = coords.nrows();
-    let k = coords.ncols();
+    let k = eigenvalues.len();
     assert_eq!(sample_names.len(), n, "sample_names length mismatch");
+    assert_eq!(coords.ncols(), k, "coords.ncols() must equal eigenvalues.len()");
+    assert_eq!(proportion_explained.len(), k, "proportion_explained length mismatch");
 
-    // (1) Eigenvalues for the K returned axes
-    let mut eigvals = if let Some(ev) = eigenvalues_opt {
-        let mut out = Array1::<f64>::zeros(k);
-        let m = ev.len().min(k);
-        out.slice_mut(ndarray::s![..m]).assign(&ev.slice(ndarray::s![..m]));
-        out
-    } else {
-        let mut out = Array1::<f64>::zeros(k);
-        for j in 0..k {
-            let mut s = 0.0;
-            for i in 0..n { let v = coords[[i, j]]; s += v * v; }
-            out[j] = s;
-        }
-        out
-    };
-    for e in eigvals.iter_mut() {
-        if *e < 0.0 { *e = 0.0; } // clamp tiny negatives
-    }
-
-    // (2) Proportion explained (sum to 1 over returned axes)
-    let mut prop = if let Some(p) = prop_explained_opt {
-        let mut out = Array1::<f64>::zeros(k);
-        let m = p.len().min(k);
-        out.slice_mut(ndarray::s![..m]).assign(&p.slice(ndarray::s![..m]));
-        out
-    } else {
-        let s = eigvals.sum();
-        if s > 0.0 { eigvals.mapv(|x| x / s) } else { Array1::<f64>::zeros(k) }
-    };
-    let ps = prop.sum();
-    if ps > 0.0 && (ps - 1.0).abs() > 1e-12 { prop /= ps; }
-
-    // (3) Writer (tabs + blank lines exactly like scikit-bio ordination)
     let mut out = std::io::BufWriter::with_capacity(16 << 20, std::fs::File::create(path)?);
     let mut buf = ryu::Buffer::new();
 
@@ -766,7 +737,7 @@ fn write_pcoa_ordination(
     writeln!(out, "Eigvals\t{}", k)?;
     for j in 0..k {
         if j > 0 { out.write_all(b"\t")?; }
-        out.write_all(buf.format_finite(eigvals[j]).as_bytes())?;
+        out.write_all(buf.format_finite(eigenvalues[j]).as_bytes())?;
     }
     out.write_all(b"\n\n")?;
 
@@ -774,15 +745,15 @@ fn write_pcoa_ordination(
     writeln!(out, "Proportion explained\t{}", k)?;
     for j in 0..k {
         if j > 0 { out.write_all(b"\t")?; }
-        out.write_all(buf.format_finite(prop[j]).as_bytes())?;
+        out.write_all(buf.format_finite(proportion_explained[j]).as_bytes())?;
     }
     out.write_all(b"\n\n")?;
 
-    // Species (none)
+    // Species
     writeln!(out, "Species\t0\t0")?;
     out.write_all(b"\n")?;
 
-    // Site (samples × PCs)
+    // Site
     writeln!(out, "Site\t{}\t{}", n, k)?;
     for i in 0..n {
         out.write_all(sample_names[i].as_bytes())?;
@@ -1005,10 +976,10 @@ fn main() -> Result<()> {
         write_pcoa_ordination(
             &samples,
             &res.coordinates,
-            Some(&res.eigenvalues),
-            Some(&res.proportion_explained), // writer renormalizes if needed
+            &res.eigenvalues,
+            &res.proportion_explained,
             ord_path.to_str().unwrap(),
-        )?;    
+        )?;
     }
 
     // Write output (fast ryu formatting)
