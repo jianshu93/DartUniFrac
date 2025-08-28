@@ -938,10 +938,21 @@ fn main() -> Result<()> {
         out
     };
     info!("pairwise distances in {} ms", t2.elapsed().as_millis());
+
+    // Write output (fast ryu formatting)
+    if compress {
+        info!("Writing compressed (zstd) output → {}", out_file);
+        write_matrix_zstd(&samples, &dist, nsamp, out_file)?;
+    } else {
+        info!("Writing uncompressed output → {}", out_file);
+        write_matrix(&samples, &dist, nsamp, out_file)?;
+    }
+    info!("Done → {}", out_file);
+
     if pcoa {
         let n = nsamp;
 
-        let dm = Array2::from_shape_vec((n, n), dist.clone())
+        let dm = Array2::from_shape_vec((n, n), dist)
             .expect("distance matrix shape");
 
         let opts = FpcoaOptions {
@@ -953,7 +964,7 @@ fn main() -> Result<()> {
 
         info!("Running randomized PCoA: k={}, oversample={}, iters={}", opts.k, opts.oversample, opts.nbiter);
         let t_pcoa = Instant::now();
-        let res = pcoa_randomized(&dm, opts);
+        let res = pcoa_randomized(dm.view(), opts);
         info!("PCoA done in {} ms", t_pcoa.elapsed().as_millis());
 
         // Write ordination in simple format
@@ -981,16 +992,6 @@ fn main() -> Result<()> {
             ord_path.to_str().unwrap(),
         )?;
     }
-
-    // Write output (fast ryu formatting)
-    if compress {
-        info!("Writing compressed (zstd) output → {}", out_file);
-        write_matrix_zstd(&samples, &dist, nsamp, out_file)?;
-    } else {
-        info!("Writing uncompressed output → {}", out_file);
-        write_matrix(&samples, &dist, nsamp, out_file)?;
-    }
-    info!("Done → {}", out_file);
 
     Ok(())
 }
