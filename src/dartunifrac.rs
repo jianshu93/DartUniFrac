@@ -20,6 +20,7 @@ use std::{
     io::{BufRead, BufReader, BufWriter, Write},
     time::Instant,
 };
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use bitvec::{order::Lsb0, vec::BitVec};
@@ -852,13 +853,13 @@ fn main() -> Result<()> {
         .arg(
             Arg::new("compress")
                 .long("compress")
-                .help("Compress output with zstd, .zst suffix can be added to the output file name")
+                .help("Compress output with zstd, .zst suffix will be added to the output file name")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
             Arg::new("pcoa")
                 .long("pcoa")
-                .help("Fast Principle Coordinate Analysis based on Randomized SVD, output saved to pcoa.tsv")
+                .help("Fast Principle Coordinate Analysis based on Randomized SVD (subspace iteration), output saved to pcoa.txt/ordination.txt")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
@@ -916,7 +917,7 @@ fn main() -> Result<()> {
         let n = nsamp;
         let dh = DistHamming;
         let mut out = vec![0.0f64; n * n];
-
+        // this is the most computational expensive part (N^2/2 hamming similarity computation)
         out.par_chunks_mut(n)
             .enumerate()
             .for_each(|(i, row)| {
@@ -939,15 +940,28 @@ fn main() -> Result<()> {
     };
     info!("pairwise distances in {} ms", t2.elapsed().as_millis());
 
-    // Write output (fast ryu formatting)
-    if compress {
-        info!("Writing compressed (zstd) output → {}", out_file);
-        write_matrix_zstd(&samples, &dist, nsamp, out_file)?;
+    // Write output (fast ryu formatting) with compression (.zst)
+    let out_path: PathBuf = if compress {
+        let p = Path::new(out_file);
+        match p.extension().and_then(|e| e.to_str()) {
+            Some("zst") => p.to_path_buf(),
+            _ => PathBuf::from(format!("{out_file}.zst")),
+        }
     } else {
-        info!("Writing uncompressed output → {}", out_file);
-        write_matrix(&samples, &dist, nsamp, out_file)?;
+        PathBuf::from(out_file)
+    };
+
+    // Convert to &str for your existing functions
+    let out_path_str = out_path.to_string_lossy();
+
+    if compress {
+        info!("Writing compressed (zstd) output → {}", out_path_str);
+        write_matrix_zstd(&samples, &dist, nsamp, &out_path_str)?;
+    } else {
+        info!("Writing uncompressed output → {}", out_path_str);
+        write_matrix(&samples, &dist, nsamp, &out_path_str)?;
     }
-    info!("Done → {}", out_file);
+    info!("Done → {}", out_path_str);
 
     if pcoa {
         let n = nsamp;
