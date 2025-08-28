@@ -116,7 +116,7 @@ dartunifrac -t ./data/ASVs_aligned.tre -i ./data/ASVs_counts.txt -m dmh -s 2048 
 ```
 
 ## Output
-A distance matrix (see also benchmark section) and pcoa stype output.
+1.A distance matrix (see also benchmark section) and pcoa stype output.
 Distance matrix:
 
 |    | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
@@ -128,7 +128,7 @@ Distance matrix:
 | Orwoll_BI0215_BI | 0.35815429687 | 0.3398437 | 0.40014648437 | 0.260742187 | 0.0 | 0.45825195312 |
 | Orwoll_BI0353_BI | 0.530273437 | 0.5209960937 | 0.56860351562 | 0.422851562 | 0.45825195312 | 0.0 |
 
-PCoA:
+2.pcoa.txt (simple):
 |  | PC1 | PC2 | PC3 | PC4 | PC5 | PC6 |
 |:--|---:|---:|---:|---:|---:|---:|
 | Orwoll_BI0023_BI | -0.12912805176115577 | -0.13478145930844512 | 0.042380530554922635 | 0.17338355657990664 | -0.003431287906286917 | 0.0 |
@@ -143,7 +143,29 @@ PCoA:
 |:--|---:|---:|---:|---:|---:|---:|
 | proportion_explained | 0.4233339721296298 | 0.19721082825095754 | 0.17875499078496368 | 0.13806192702856432 | 0.0626382818058847 | 0.0 |
 
+3.ordination.txt (scikit-bio/qiime format):
+```bash
+Eigvals 6
+0.18261610725439215     0.0850720143777559      0.07711060939718065     0.059556599124712034    0.027020650223156684    0.0
 
+Proportion explained    6
+0.42333397212962964     0.19721082825095754     0.17875499078496382     0.13806192702856435     0.06263828180588471     0.0
+
+Species 0       0
+
+Site    6       6
+Orwoll_BI0023_BI        -0.12912805176115583    -0.1347814593084449     0.04238053055492221     0.1733835565799069      -0.0034312879062869286  0.0
+Orwoll_BI0056_BI        -0.09201950670064456    0.23750165032060455     -0.030767869352506142   0.05365540164234891     -0.0413567658374681     0.0
+Orwoll_BI0131_BI        -0.18672940644255914    -0.018808722565638855   0.15163198033883318     -0.14087186936334042    0.013611393370684503    0.0
+Orwoll_BI0153_BI        0.06843838458354136     -0.0979176640563503     -0.1238107874402007     -0.07508375468747673    -0.104161306687115      0.0
+Orwoll_BI0215_BI        -0.003937706919220702   -0.008149706603797708   -0.15251179756497782    -0.028692966865033843   0.11819355132475592     0.0
+Orwoll_BI0353_BI        0.3433762872400386      0.02215590221362715     0.11307794346392917     0.017609632693595185    0.017144415735429578    0.0
+
+Biplot  0       0
+
+Site constraints        0       0
+
+```
 
 
 ## Benchmark
@@ -208,7 +230,7 @@ You will see some log like this:
 [2025-08-21T20:12:38Z INFO  striped_unifrac] Start writing output.
 
 ```
-This is a dense example where $\alpha$ is almost 75% so L can be small. For real-world datasets, $\alpha$ can be as small as 0.001.
+This is a dense example where $\alpha$ is almost 75% so L can be small. For real-world large-scale datasets, $\alpha$ can be as small as 0.001, so a default L=4096 should cover average sparsity around 0.001
 
 
 ## Acknowledgements

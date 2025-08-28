@@ -42,7 +42,7 @@ use hdf5::{types::VarLenUnicode, File as H5File};
 use dartminhash::{rng_utils::mt_from_seed, DartMinHash, ErsWmh};
 use anndists::dist::{Distance, DistHamming};
 
-use ndarray::Array2;
+use ndarray::{Array1, Array2};
 use fpcoa::{FpcoaOptions, pcoa_randomized};
 
 type NwkTree = newick::NewickTree;
@@ -715,6 +715,94 @@ fn write_pcoa(
     Ok(())
 }
 
+fn write_pcoa_ordination(
+    sample_names: &[String],
+    coords: &ndarray::Array2<f64>,
+    eigenvalues_opt: Option<&ndarray::Array1<f64>>,
+    prop_explained_opt: Option<&ndarray::Array1<f64>>,
+    path: &str,
+) -> anyhow::Result<()> {
+    let n = coords.nrows();
+    let k = coords.ncols();
+    assert_eq!(sample_names.len(), n, "sample_names length mismatch");
+
+    // (1) Eigenvalues for the K returned axes
+    let mut eigvals = if let Some(ev) = eigenvalues_opt {
+        let mut out = Array1::<f64>::zeros(k);
+        let m = ev.len().min(k);
+        out.slice_mut(ndarray::s![..m]).assign(&ev.slice(ndarray::s![..m]));
+        out
+    } else {
+        let mut out = Array1::<f64>::zeros(k);
+        for j in 0..k {
+            let mut s = 0.0;
+            for i in 0..n { let v = coords[[i, j]]; s += v * v; }
+            out[j] = s;
+        }
+        out
+    };
+    for e in eigvals.iter_mut() {
+        if *e < 0.0 { *e = 0.0; } // clamp tiny negatives
+    }
+
+    // (2) Proportion explained (sum to 1 over returned axes)
+    let mut prop = if let Some(p) = prop_explained_opt {
+        let mut out = Array1::<f64>::zeros(k);
+        let m = p.len().min(k);
+        out.slice_mut(ndarray::s![..m]).assign(&p.slice(ndarray::s![..m]));
+        out
+    } else {
+        let s = eigvals.sum();
+        if s > 0.0 { eigvals.mapv(|x| x / s) } else { Array1::<f64>::zeros(k) }
+    };
+    let ps = prop.sum();
+    if ps > 0.0 && (ps - 1.0).abs() > 1e-12 { prop /= ps; }
+
+    // (3) Writer (tabs + blank lines exactly like scikit-bio ordination)
+    let mut out = std::io::BufWriter::with_capacity(16 << 20, std::fs::File::create(path)?);
+    let mut buf = ryu::Buffer::new();
+
+    // Eigvals
+    writeln!(out, "Eigvals\t{}", k)?;
+    for j in 0..k {
+        if j > 0 { out.write_all(b"\t")?; }
+        out.write_all(buf.format_finite(eigvals[j]).as_bytes())?;
+    }
+    out.write_all(b"\n\n")?;
+
+    // Proportion explained
+    writeln!(out, "Proportion explained\t{}", k)?;
+    for j in 0..k {
+        if j > 0 { out.write_all(b"\t")?; }
+        out.write_all(buf.format_finite(prop[j]).as_bytes())?;
+    }
+    out.write_all(b"\n\n")?;
+
+    // Species (none)
+    writeln!(out, "Species\t0\t0")?;
+    out.write_all(b"\n")?;
+
+    // Site (samples × PCs)
+    writeln!(out, "Site\t{}\t{}", n, k)?;
+    for i in 0..n {
+        out.write_all(sample_names[i].as_bytes())?;
+        for j in 0..k {
+            out.write_all(b"\t")?;
+            out.write_all(buf.format_finite(coords[[i, j]]).as_bytes())?;
+        }
+        out.write_all(b"\n")?;
+    }
+    out.write_all(b"\n")?;
+
+    // Biplot & Site constraints
+    writeln!(out, "Biplot\t0\t0")?;
+    out.write_all(b"\n")?;
+    writeln!(out, "Site constraints\t0\t0")?;
+
+    out.flush()?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     println!("\n ************** initializing logger *****************\n");
     env_logger::Builder::from_default_env().init();
@@ -882,15 +970,13 @@ fn main() -> Result<()> {
     if pcoa {
         let n = nsamp;
 
-        // Build an ndarray view for PCoA
-        // We still need `dist` later to write the matrix, so we clone here.
         let dm = Array2::from_shape_vec((n, n), dist.clone())
             .expect("distance matrix shape");
 
         let opts = FpcoaOptions {
-            k: 10,            // 10 coordinates as requested
-            oversample: 8,    // standard
-            nbiter: 2,        // standard
+            k: 10,
+            oversample: 8,
+            nbiter: 2,
             symmetrize_input: true,
         };
 
@@ -899,15 +985,30 @@ fn main() -> Result<()> {
         let res = pcoa_randomized(&dm, opts);
         info!("PCoA done in {} ms", t_pcoa.elapsed().as_millis());
 
-        // Write pcoa.tsv in the same directory as `-o`
+        // Write ordination in simple format
         let pcoa_path = {
+            let p_pcoa = std::path::Path::new(out_file);
+            let mut pb_poca = p_pcoa.to_path_buf();
+            pb_poca.set_file_name("pcoa.txt");
+            pb_poca
+        };
+        // Write ordination in scikit-bio format
+        let ord_path = {
             let p = std::path::Path::new(out_file);
             let mut pb = p.to_path_buf();
-            pb.set_file_name("pcoa.tsv");
+            pb.set_file_name("ordination.txt");
             pb
         };
-        info!("Writing PCoA coordinates → {}", pcoa_path.display());
         write_pcoa(&samples, &res.coordinates, &res.proportion_explained, pcoa_path.to_str().unwrap())?;
+        info!("Writing pcoa and ordination results → {}", ord_path.display());
+        // ordination results
+        write_pcoa_ordination(
+            &samples,
+            &res.coordinates,
+            Some(&res.eigenvalues),
+            Some(&res.proportion_explained), // writer renormalizes if needed
+            ord_path.to_str().unwrap(),
+        )?;    
     }
 
     // Write output (fast ryu formatting)
