@@ -946,8 +946,8 @@ fn main() -> Result<()> {
 
         let opts = FpcoaOptions {
             k: 10,
-            oversample: 10,
-            nbiter: 3,
+            oversample: 8,
+            nbiter: 2,
             symmetrize_input: true,
         };
 
