@@ -948,7 +948,7 @@ fn main() -> Result<()> {
             k: 10,
             oversample: 8,
             nbiter: 2,
-            symmetrize_input: true,
+            symmetrize_input: false,
         };
 
         info!("Running randomized PCoA: k={}, oversample={}, iters={}", opts.k, opts.oversample, opts.nbiter);
