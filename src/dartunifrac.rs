@@ -252,7 +252,10 @@ fn write_matrix_zstd(names: &[String], d: &[f64], n: usize, path: &str) -> Resul
     // zstd multi-threading
     let file = File::create(path)?;
     let mut enc = zstd::Encoder::new(file, 0)?;
-    enc.multithread(num_cpus::get() as u32)?;
+    let zstd_threads = rayon::current_num_threads() as u32;
+    if zstd_threads > 1 {
+        enc.multithread(zstd_threads)?;
+    }
     let mut out = BufWriter::with_capacity(16 << 20, enc.auto_finish());
 
     // Header
@@ -308,7 +311,10 @@ fn write_matrix_streaming_zstd(
     // zstd multi-threaded encoder + big buffer
     let file = File::create(path)?;
     let mut enc = zstd::Encoder::new(file, 0)?;
-    enc.multithread(num_cpus::get() as u32)?;
+    let zstd_threads = rayon::current_num_threads() as u32;
+    if zstd_threads > 1 {
+        enc.multithread(zstd_threads)?;
+    }
     let mut w = BufWriter::with_capacity(16 << 20, enc.auto_finish());
 
     // Header: "", <names...>
@@ -858,6 +864,13 @@ fn main() -> Result<()> {
                 .default_value("4096"),
         )
         .arg(
+            Arg::new("threads")
+                .long("threads")
+                .short('T')
+                .help("Number of threads, default all logical cores")
+                .value_parser(clap::value_parser!(usize)),
+        )
+        .arg(
             Arg::new("seed")
                 .long("seed")
                 .help("Random seed for reproducibility")
@@ -903,10 +916,15 @@ fn main() -> Result<()> {
     let stream = m.get_flag("streaming");
     let block = m.get_one::<usize>("block").copied();
 
+    let threads = m.get_one::<usize>("threads").copied()
+        .unwrap_or_else(|| num_cpus::get());
+
     rayon::ThreadPoolBuilder::new()
-        .num_threads(num_cpus::get())
+        .num_threads(threads.max(1))
         .build_global()
         .unwrap();
+
+    info!("{} threads will be used ", rayon::current_num_threads());
 
     info!("method={method}   k={k}   ers-L={ers_l}   seed={seed}");
 
