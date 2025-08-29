@@ -326,7 +326,6 @@ fn write_matrix_streaming_zstd(
 
     // Column-major block buffer: n × bs (each column j is a contiguous slice of length bs)
     let mut block = vec![0.0f64; n * bs];
-    let mut fmt = ryu::Buffer::new();
     let dh = DistHamming;
 
     let mut i0 = 0usize;
@@ -350,15 +349,30 @@ fn write_matrix_streaming_zstd(
             });
 
         // Write the block (single writer, amortized I/O)
-        for bi in 0..h {
-            let i = i0 + bi;
-            w.write_all(names[i].as_bytes())?;
-            for j in 0..n {
-                w.write_all(b"\t")?;
-                let v = block[j * bs + bi]; // column-major index (j, bi)
-                w.write_all(fmt.format_finite(v).as_bytes())?;
-            }
-            w.write_all(b"\n")?;
+        let mut lines: Vec<String> = (0..h)
+            .into_par_iter()
+            .map(|bi| {
+                let i = i0 + bi;
+                // Pre-size roughly: tab + ~12 chars per number
+                let mut line = String::with_capacity(8 + n * 12);
+                line.push_str(&names[i]);
+
+                // Each worker needs its own Ryu buffer
+                let mut fmt = ryu::Buffer::new();
+                for j in 0..n {
+                    line.push('\t');
+                    let v = block[j * bs + bi]; // column-major index (j, bi)
+                    line.push_str(fmt.format_finite(v));
+                }
+                line.push('\n');
+                line
+            })
+            .collect();
+
+        // Single writer, amortized by BufWriter + zstd MT compression
+        for line in &mut lines {
+            w.write_all(line.as_bytes())?;
+            line.clear(); // allow capacity reuse across iterations (if the allocator keeps it)
         }
         w.flush()?;
         i0 += h;
@@ -863,9 +877,9 @@ fn main() -> Result<()> {
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
-            Arg::new("stream")
-                .long("stream")
-                .help("Stream the distance matrix while computing (zstd-compressed)")
+            Arg::new("streaming")
+                .long("streaming")
+                .help("Streaming the distance matrix while computing (zstd-compressed)")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
@@ -886,7 +900,7 @@ fn main() -> Result<()> {
     let seed = *m.get_one::<u64>("seed").unwrap();
     let compress = m.get_flag("compress");
     let pcoa = m.get_flag("pcoa");
-    let stream = m.get_flag("stream");
+    let stream = m.get_flag("streaming");
     let block = m.get_one::<usize>("block").copied();
 
     rayon::ThreadPoolBuilder::new()
@@ -906,9 +920,22 @@ fn main() -> Result<()> {
         if compress {
             warn!("--compress is ignored with --stream; streaming output is already zstd-compressed.");
         }
-        info!("Streaming zstd-compressed distance matrix → {}", out_file);
-        write_matrix_streaming_zstd(&samples, &sketches_u64, out_file, block)?;
-        info!("Done → {}", out_file);
+        let out_path_stream: PathBuf = if stream {
+            let p_stream = Path::new(out_file);
+            match p_stream.extension().and_then(|e| e.to_str()) {
+                Some("zst") => p_stream.to_path_buf(),
+                _ => PathBuf::from(format!("{out_file}.zst")),
+            }
+        } else {
+            PathBuf::from(out_file)
+        };
+
+        // Convert to &str for your existing functions
+        let out_path_stream_str = out_path_stream.to_string_lossy();
+
+        info!("Streaming zstd-compressed distance matrix → {}", out_path_stream_str);
+        write_matrix_streaming_zstd(&samples, &sketches_u64, &out_path_stream_str, block)?;
+        info!("Done → {}", out_path_stream_str);
         return Ok(());
     }
     // Pairwise UniFrac (≈ 1 - Jaccard) via normalized Hamming on ID arrays.
