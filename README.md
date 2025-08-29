@@ -49,8 +49,8 @@ We first created a few libraries for the best performance of DartUniFrac impleme
 ## Install
 ### Pre-compiled on Linux (x86-64)
 ```bash
-wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.1/dartunifrac_Linux_x86-64_v0.2.1.zip
-unzip dartunifrac_Linux_x86-64_v0.2.1.zip
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.2/dartunifrac_Linux_x86-64_v0.2.2.zip
+unzip dartunifrac_Linux_x86-64_v0.2.2.zip
 chmod a+x ./dartunifrac
 ./dartunifrac -h
 ```
