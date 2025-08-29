@@ -1,26 +1,25 @@
- //! BSD 3-Clause License
- //!
- //! Copyright (c) 2016-2025, UniFrac development team.
- //! All rights reserved.
- //!
- //! See LICENSE file for more details
-
+//! BSD 3-Clause License
+//!
+//! Copyright (c) 2016-2025, UniFrac development team.
+//! All rights reserved.
+//!
+//! See LICENSE file for more details
 
 //! DartUniFrac: Approximate unweighted UniFrac via Weighted MinHash
 //! DartMinHash or ERS (Efficient Rejection Sampling) can be used as the underlying algorithm
-//! Tree parsing via optimal balanced parenthesis: 
+//! Tree parsing via optimal balanced parenthesis:
 //! With constant-time rank/select primitives (rank₁(i) = # of 1-bits up to i, select₁(k) = position of the k-th 1-bit) you get parent, k-th child, next sibling, sub-tree size, depth, all in O(1). every node knows its opening index i. parent(i) = select₁(rank₁(i) - 1), next_sibling(i) = find_close(i) + 1 (where find_close is the matching 0), etc. Those functions are just pointer-arithmetic on the backing Vec<u64>.
 
 //! Input: TSV or BIOM (HDF5) feature tables. BIOM can be used for very sparse dataset to save space
 //! Output: TSV distance matrix and pcoa results (optional)
 
+use std::path::{Path, PathBuf};
 use std::{
     collections::HashMap,
     fs::File,
     io::{BufRead, BufReader, BufWriter, Write},
     time::Instant,
 };
-use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use bitvec::{order::Lsb0, vec::BitVec};
@@ -29,26 +28,26 @@ use env_logger;
 use log::{info, warn};
 use rayon::prelude::*;
 
-use newick::{one_from_string, Newick, NodeID};
+use anndists::dist::{DistHamming, Distance};
+use dartminhash::{DartMinHash, ErsWmh, rng_utils::mt_from_seed};
+use hdf5::{File as H5File, types::VarLenUnicode};
+use newick::{Newick, NodeID, one_from_string};
 use succparen::{
-    bitwise::{ops::NndOne, SparseOneNnd},
+    bitwise::{SparseOneNnd, ops::NndOne},
+    tree::Node,
     tree::{
+        LabelVec,
         balanced_parens::{BalancedParensTree, Node as BpNode},
         traversal::{DepthFirstTraverse, VisitNode},
-        LabelVec,
     },
-    tree::Node,
 };
-use hdf5::{types::VarLenUnicode, File as H5File};
-use dartminhash::{rng_utils::mt_from_seed, DartMinHash, ErsWmh};
-use anndists::dist::{Distance, DistHamming};
 
-use ndarray::{Array1, Array2};
 use fpcoa::{FpcoaOptions, pcoa_randomized};
+use ndarray::{Array1, Array2};
 
 type NwkTree = newick::NewickTree;
 
-// Tree traversal to collect branch lengths 
+// Tree traversal to collect branch lengths
 fn sanitize_newick_drop_internal_labels_and_comments(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(bytes.len());
@@ -75,15 +74,23 @@ fn sanitize_newick_drop_internal_labels_and_comments(s: &str) -> String {
                 i += 1;
 
                 // Skip whitespace
-                while i < bytes.len() && bytes[i].is_ascii_whitespace() { i += 1; }
+                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
 
                 // Optional internal label right after ')': quoted or unquoted.
                 if i < bytes.len() && bytes[i] == b'\'' {
                     // Quoted label — skip it
                     i += 1;
                     while i < bytes.len() {
-                        if bytes[i] == b'\\' && i + 1 < bytes.len() { i += 2; continue; }
-                        if bytes[i] == b'\'' { i += 1; break; }
+                        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                            i += 2;
+                            continue;
+                        }
+                        if bytes[i] == b'\'' {
+                            i += 1;
+                            break;
+                        }
                         i += 1;
                     }
                     // (comments after this will be removed by the '[' arm next loop)
@@ -91,7 +98,11 @@ fn sanitize_newick_drop_internal_labels_and_comments(s: &str) -> String {
                     // Unquoted run until a delimiter
                     while i < bytes.len() {
                         let c = bytes[i];
-                        if c.is_ascii_whitespace() || matches!(c, b':'|b','|b')'|b'('|b';'|b'[') { break; }
+                        if c.is_ascii_whitespace()
+                            || matches!(c, b':' | b',' | b')' | b'(' | b';' | b'[')
+                        {
+                            break;
+                        }
                         i += 1;
                     }
                 }
@@ -169,7 +180,13 @@ fn read_table(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<Vec<f64>>)> {
         let mut p = row.split('\t');
         let tax = p.next().unwrap().to_owned();
         let vals = p
-            .map(|v| if v.parse::<f64>().unwrap_or(0.0) > 0.0 { 1.0 } else { 0.0 })
+            .map(|v| {
+                if v.parse::<f64>().unwrap_or(0.0) > 0.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
             .collect();
         taxa.push(tax);
         mat.push(vals);
@@ -339,20 +356,17 @@ fn write_matrix_streaming_zstd(
         let h = (n - i0).min(bs);
 
         // Fill block in parallel over columns; each `col` is a disjoint &mut [f64] (length = bs)
-        block
-            .par_chunks_mut(bs)
-            .enumerate()
-            .for_each(|(j, col)| {
-                for bi in 0..h {
-                    let i = i0 + bi;
-                    let d = if i == j {
-                        0.0
-                    } else {
-                        dh.eval(&sketches[i], &sketches[j]) as f64
-                    };
-                    col[bi] = d; // write into column-major slot (j, bi)
-                }
-            });
+        block.par_chunks_mut(bs).enumerate().for_each(|(j, col)| {
+            for bi in 0..h {
+                let i = i0 + bi;
+                let d = if i == j {
+                    0.0
+                } else {
+                    dh.eval(&sketches[i], &sketches[j]) as f64
+                };
+                col[bi] = d; // write into column-major slot (j, bi)
+            }
+        });
 
         // Write the block (single writer, amortized I/O)
         let mut lines: Vec<String> = (0..h)
@@ -399,17 +413,20 @@ fn build_node_bits(
     let nsamp = masks.len();
     let n_threads = rayon::current_num_threads().max(1);
     let stripe = (nsamp + n_threads - 1) / n_threads; // ceil
-    let words_str = (stripe + 63) >> 6;               // u64 words per stripe
+    let words_str = (stripe + 63) >> 6; // u64 words per stripe
 
     // node_masks[tid][node][word] – per-thread stripes
-    let mut node_masks: Vec<Vec<Vec<u64>>> =
-        (0..n_threads).map(|_| vec![vec![0u64; words_str]; total_nodes]).collect();
+    let mut node_masks: Vec<Vec<Vec<u64>>> = (0..n_threads)
+        .map(|_| vec![vec![0u64; words_str]; total_nodes])
+        .collect();
 
     // Phase 1: build per-thread stripes bottom-up
     rayon::scope(|scope| {
         for (tid, node_masks_t) in node_masks.iter_mut().enumerate() {
             let stripe_start = tid * stripe;
-            if stripe_start >= nsamp { break; }
+            if stripe_start >= nsamp {
+                break;
+            }
             let stripe_end = (stripe_start + stripe).min(nsamp);
             let masks_slice = &masks[stripe_start..stripe_end];
 
@@ -436,19 +453,22 @@ fn build_node_bits(
     });
 
     // Phase 2: merge stripes to a single BitVec per node
-    let mut node_bits: Vec<bitvec::vec::BitVec<u64, Lsb0>> =
-        (0..total_nodes).map(|_| bitvec::vec::BitVec::repeat(false, nsamp)).collect();
+    let mut node_bits: Vec<bitvec::vec::BitVec<u64, Lsb0>> = (0..total_nodes)
+        .map(|_| bitvec::vec::BitVec::repeat(false, nsamp))
+        .collect();
 
     node_bits.par_iter_mut().enumerate().for_each(|(v, bv)| {
         let dst_words = bv.as_raw_mut_slice();
         for tid in 0..n_threads {
             let stripe_start = tid * stripe;
-            let stripe_end   = (stripe_start + stripe).min(nsamp);
-            if stripe_start >= stripe_end { break; }
+            let stripe_end = (stripe_start + stripe).min(nsamp);
+            if stripe_start >= stripe_end {
+                break;
+            }
 
             let src_words = &node_masks[tid][v];
-            let word_off  = stripe_start >> 6;
-            let bit_off   = (stripe_start & 63) as u32;
+            let word_off = stripe_start >> 6;
+            let bit_off = (stripe_start & 63) as u32;
 
             let n_src_words = src_words.len();
             for w in 0..n_src_words {
@@ -459,7 +479,9 @@ fn build_node_bits(
                         val &= (1u64 << tail_bits) - 1;
                     }
                 }
-                if val == 0 { continue; }
+                if val == 0 {
+                    continue;
+                }
                 dst_words[word_off + w] |= val << bit_off;
                 if bit_off != 0 && word_off + w + 1 < dst_words.len() {
                     dst_words[word_off + w + 1] |= val >> (64 - bit_off);
@@ -495,13 +517,20 @@ fn build_sketches(
     for n in t.nodes() {
         if t[n].is_leaf() {
             leaf_ids.push(n);
-            leaf_nm.push(t.name(n).map(|s| s.to_owned()).unwrap_or_else(|| format!("L{n}")));
+            leaf_nm.push(
+                t.name(n)
+                    .map(|s| s.to_owned())
+                    .unwrap_or_else(|| format!("L{n}")),
+            );
         }
     }
-    let t2leaf: HashMap<&str, usize> =
-        leaf_nm.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+    let t2leaf: HashMap<&str, usize> = leaf_nm
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
 
-    // children & postorder 
+    // children & postorder
     let total = bp.len() + 1;
     lens_f32.resize(total, 0.0);
     let mut kids = vec![Vec::<usize>::new(); total];
@@ -512,8 +541,9 @@ fn build_sketches(
     let (_taxa, mut samples, masks) = if let Some(tsv) = input_tsv {
         let (taxa, samples, mat) = read_table(tsv)?;
         let nsamp = samples.len();
-        let mut masks: Vec<BitVec<u8, Lsb0>> =
-            (0..nsamp).map(|_| BitVec::repeat(false, leaf_ids.len())).collect();
+        let mut masks: Vec<BitVec<u8, Lsb0>> = (0..nsamp)
+            .map(|_| BitVec::repeat(false, leaf_ids.len()))
+            .collect();
         for (ti, tax) in taxa.iter().enumerate() {
             if let Some(&leaf) = t2leaf.get(tax.as_str()) {
                 for (s, bits) in masks.iter_mut().enumerate() {
@@ -528,8 +558,9 @@ fn build_sketches(
         let biom = biom_h5.expect("biom path required when TSV not provided");
         let (taxa, samples, indptr, indices) = read_biom_csr(biom)?;
         let nsamp = samples.len();
-        let mut masks: Vec<BitVec<u8, Lsb0>> =
-            (0..nsamp).map(|_| BitVec::repeat(false, leaf_ids.len())).collect();
+        let mut masks: Vec<BitVec<u8, Lsb0>> = (0..nsamp)
+            .map(|_| BitVec::repeat(false, leaf_ids.len()))
+            .collect();
         for row in 0..taxa.len() {
             if let Some(&leaf) = t2leaf.get(taxa[row].as_str()) {
                 let start = indptr[row] as usize;
@@ -621,7 +652,10 @@ fn build_sketches(
     if !empty_idx.is_empty() {
         let show = empty_idx.len().min(20);
         for &s in empty_idx.iter().take(show) {
-            warn!("Dropping sample '{}' (no covered branches; all zeros).", samples[s]);
+            warn!(
+                "Dropping sample '{}' (no covered branches; all zeros).",
+                samples[s]
+            );
         }
         if empty_idx.len() > show {
             warn!("... and {} more empty samples.", empty_idx.len() - show);
@@ -660,10 +694,14 @@ fn build_sketches(
         let mut m_per_dim = vec![0u32; total];
         for &v in &active_edges {
             let mut cap = lens[v].ceil();
-            if cap < 1.0 { cap = 1.0; }
+            if cap < 1.0 {
+                cap = 1.0;
+            }
             let cap_u32 = if cap.is_finite() {
                 cap.min(u32::MAX as f64) as u32
-            } else { u32::MAX };
+            } else {
+                u32::MAX
+            };
             m_per_dim[v] = cap_u32;
         }
         let ers = ErsWmh::new_mt(&mut rng, &m_per_dim, k as u64);
@@ -748,8 +786,16 @@ fn write_pcoa_ordination(
     let n = coords.nrows();
     let k = eigenvalues.len();
     assert_eq!(sample_names.len(), n, "sample_names length mismatch");
-    assert_eq!(coords.ncols(), k, "coords.ncols() must equal eigenvalues.len()");
-    assert_eq!(proportion_explained.len(), k, "proportion_explained length mismatch");
+    assert_eq!(
+        coords.ncols(),
+        k,
+        "coords.ncols() must equal eigenvalues.len()"
+    );
+    assert_eq!(
+        proportion_explained.len(),
+        k,
+        "proportion_explained length mismatch"
+    );
 
     let mut out = std::io::BufWriter::with_capacity(16 << 20, std::fs::File::create(path)?);
     let mut buf = ryu::Buffer::new();
@@ -757,7 +803,9 @@ fn write_pcoa_ordination(
     // Eigvals
     writeln!(out, "Eigvals\t{}", k)?;
     for j in 0..k {
-        if j > 0 { out.write_all(b"\t")?; }
+        if j > 0 {
+            out.write_all(b"\t")?;
+        }
         out.write_all(buf.format_finite(eigenvalues[j]).as_bytes())?;
     }
     out.write_all(b"\n\n")?;
@@ -765,7 +813,9 @@ fn write_pcoa_ordination(
     // Proportion explained
     writeln!(out, "Proportion explained\t{}", k)?;
     for j in 0..k {
-        if j > 0 { out.write_all(b"\t")?; }
+        if j > 0 {
+            out.write_all(b"\t")?;
+        }
         out.write_all(buf.format_finite(proportion_explained[j]).as_bytes())?;
     }
     out.write_all(b"\n\n")?;
@@ -916,7 +966,9 @@ fn main() -> Result<()> {
     let stream = m.get_flag("streaming");
     let block = m.get_one::<usize>("block").copied();
 
-    let threads = m.get_one::<usize>("threads").copied()
+    let threads = m
+        .get_one::<usize>("threads")
+        .copied()
         .unwrap_or_else(|| num_cpus::get());
 
     rayon::ThreadPoolBuilder::new()
@@ -929,14 +981,16 @@ fn main() -> Result<()> {
     info!("method={method}   k={k}   ers-L={ers_l}   seed={seed}");
 
     let (samples, sketches_u64) =
-    build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?;
+        build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?;
     let nsamp = samples.len();
     if stream {
         if pcoa {
             warn!("--pcoa is incompatible with --stream; skipping PCoA in streaming mode.");
         }
         if compress {
-            warn!("--compress is ignored with --stream; streaming output is already zstd-compressed.");
+            warn!(
+                "--compress is ignored with --stream; streaming output is already zstd-compressed."
+            );
         }
         let out_path_stream: PathBuf = if stream {
             let p_stream = Path::new(out_file);
@@ -951,7 +1005,10 @@ fn main() -> Result<()> {
         // Convert to &str for your existing functions
         let out_path_stream_str = out_path_stream.to_string_lossy();
 
-        info!("Streaming zstd-compressed distance matrix → {}", out_path_stream_str);
+        info!(
+            "Streaming zstd-compressed distance matrix → {}",
+            out_path_stream_str
+        );
         write_matrix_streaming_zstd(&samples, &sketches_u64, &out_path_stream_str, block)?;
         info!("Done → {}", out_path_stream_str);
         return Ok(());
@@ -963,16 +1020,14 @@ fn main() -> Result<()> {
         let dh = DistHamming;
         let mut out = vec![0.0f64; n * n];
         // this is the most computational expensive part (N^2/2 hamming similarity computation)
-        out.par_chunks_mut(n)
-            .enumerate()
-            .for_each(|(i, row)| {
-                row[i] = 0.0;
-                for j in (i + 1)..n {
-                    // DistHamming<u64> returns (# !=)/k ∈ [0,1]
-                    let d = dh.eval(&sketches_u64[i], &sketches_u64[j]) as f64;
-                    row[j] = d; // (i,j)
-                }
-            });
+        out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+            row[i] = 0.0;
+            for j in (i + 1)..n {
+                // DistHamming<u64> returns (# !=)/k ∈ [0,1]
+                let d = dh.eval(&sketches_u64[i], &sketches_u64[j]) as f64;
+                row[j] = d; // (i,j)
+            }
+        });
 
         // Mirror upper to lower.
         for i in 0..n {
@@ -1011,8 +1066,7 @@ fn main() -> Result<()> {
     if pcoa {
         let n = nsamp;
 
-        let dm = Array2::from_shape_vec((n, n), dist)
-            .expect("distance matrix shape");
+        let dm = Array2::from_shape_vec((n, n), dist).expect("distance matrix shape");
 
         let opts = FpcoaOptions {
             k: 10,
@@ -1021,7 +1075,10 @@ fn main() -> Result<()> {
             symmetrize_input: false,
         };
 
-        info!("Running randomized PCoA: k={}, oversample={}, iters={}", opts.k, opts.oversample, opts.nbiter);
+        info!(
+            "Running randomized PCoA: k={}, oversample={}, iters={}",
+            opts.k, opts.oversample, opts.nbiter
+        );
         let t_pcoa = Instant::now();
         let res = pcoa_randomized(dm.view(), opts);
         info!("PCoA done in {} ms", t_pcoa.elapsed().as_millis());
@@ -1040,8 +1097,16 @@ fn main() -> Result<()> {
             pb.set_file_name("ordination.txt");
             pb
         };
-        write_pcoa(&samples, &res.coordinates, &res.proportion_explained, pcoa_path.to_str().unwrap())?;
-        info!("Writing pcoa and ordination results → {}", ord_path.display());
+        write_pcoa(
+            &samples,
+            &res.coordinates,
+            &res.proportion_explained,
+            pcoa_path.to_str().unwrap(),
+        )?;
+        info!(
+            "Writing pcoa and ordination results → {}",
+            ord_path.display()
+        );
         // ordination results
         write_pcoa_ordination(
             &samples,
