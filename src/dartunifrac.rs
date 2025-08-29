@@ -12,7 +12,7 @@
 //! With constant-time rank/select primitives (rank₁(i) = # of 1-bits up to i, select₁(k) = position of the k-th 1-bit) you get parent, k-th child, next sibling, sub-tree size, depth, all in O(1). every node knows its opening index i. parent(i) = select₁(rank₁(i) - 1), next_sibling(i) = find_close(i) + 1 (where find_close is the matching 0), etc. Those functions are just pointer-arithmetic on the backing Vec<u64>.
 
 //! Input: TSV or BIOM (HDF5) feature tables. BIOM can be used for very sparse dataset to save space
-//! Output: TSV distance matrix
+//! Output: TSV distance matrix and pcoa results (optional)
 
 use std::{
     collections::HashMap,
