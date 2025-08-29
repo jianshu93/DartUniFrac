@@ -107,14 +107,20 @@ Options:
 
 
 ```bash
-### DartMinHash
+### DartMinHash, biom format input
+dartunifrac -t ./ASVs_aligned.tre -b ./ASVs_counts.biom -m dmh -s 2048 -o unifrac_dmh_dist.csv
+
+### tsv/txt tabular input
 dartunifrac -t ./data/ASVs_aligned.tre -i ./data/ASVs_counts.txt -m dmh -s 2048 -o unifrac_dmh_dist.csv
 
 ### Efficient Rejection Sampling
-dartunifrac -t ./data/ASVs_aligned.tre -i ./data/ASVs_counts.txt -m ers -s 2048 -l 4096 -o unifrac_ers_dist.csv
+dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m ers -s 2048 -l 4096 -o unifrac_ers_dist.csv
 
 ### dartMinHash with pcoa and compressed output distance matrix
-dartunifrac -t ./data/ASVs_aligned.tre -i ./data/ASVs_counts.txt -m dmh -s 2048 -o unifrac_dmh_dist.zstd --pcoa --compress
+dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048 -o unifrac_dmh_dist.tsv --pcoa --compress
+
+### Streaming mode (reduce memory requirement) for large number of samples. Block size is normally 1/50 to 1/5 of sample size
+dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048 -o unifrac_dmh_dist.tsv --streaming --block 8192
 
 ```
 
