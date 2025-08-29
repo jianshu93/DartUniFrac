@@ -79,7 +79,9 @@ cargo build --release --features macos-accelerate
 DartUniFrac will use all availble CPU cores/threads via Rayon by default.
 ```bash
 $ ./target/release/dartunifrac -h
-************** initializing logger *****************
+
+
+ ************** initializing logger *****************
 
 DartUniFrac: Approximate unweighted UniFrac via Weighted MinHash 🎯🎯🎯
 
@@ -93,10 +95,11 @@ Options:
   -s, --sketch <sketch-size>  Sketch size for Weighted MinHash (DartMinHash or ERS) [default: 2048]
   -m, --method <method>       Sketching method: dmh (DartMinHash) or ers (Efficient Rejection Sampling) [default: dmh] [possible values: dmh, ers]
   -l, --length <seq-length>   Per-hash independent random sequence length for ERS, must be >= 1024 [default: 4096]
+  -T, --threads <threads>     Number of threads, default all logical cores
       --seed <seed>           Random seed for reproducibility [default: 1337]
-      --compress              Compress output with zstd, .zstd suffix can be added to the output file name
-      --pcoa                  Fast Principle Coordinate Analysis based on Randomized SVD, output saved to pcoa.tsv
-      --stream                Stream the distance matrix while computing (zstd-compressed)
+      --compress              Compress output with zstd, .zst suffix will be added to the output file name
+      --pcoa                  Fast Principle Coordinate Analysis based on Randomized SVD (subspace iteration), output saved to pcoa.txt/ordination.txt
+      --streaming             Streaming the distance matrix while computing (zstd-compressed)
       --block <block>         Number of rows per chunk, streaming mode only
   -h, --help                  Print help
   -V, --version               Print version
