@@ -240,7 +240,7 @@ You will see some log like this:
 [2025-08-21T20:12:38Z INFO  striped_unifrac] Start writing output.
 
 ```
-This is a dense example where $\alpha$ is almost 75% so L can be small. For real-world large-scale datasets, $\alpha$ can be as small as 0.001, so a default L=4096 should cover average sparsity around 0.001
+This is a dense example where $\alpha$ is almost 75% so L can be small. For real-world large-scale datasets, $\alpha$ can be as small as 0.001, so a default L=4096 should cover average sparsity around 0.001. In practice, ERS should not be used for very sparse data because as L increases, it is signigicantly slower than DartMinHash. 
 
 
 ## Acknowledgements
