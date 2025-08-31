@@ -1302,7 +1302,7 @@ fn main() -> Result<()> {
         .unwrap_or("🎯");
 
     let m = Command::new("dartunifrac")
-        .version("0.2.2")
+        .version("0.2.3")
         .about(format!("DartUniFrac: Approximate UniFrac via Weighted MinHash {dart}{dart}{dart}"))
         .arg(
             Arg::new("tree")
