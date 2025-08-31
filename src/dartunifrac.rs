@@ -579,6 +579,10 @@ enum WeightedMode<'a> {
 }
 
 // Weighted, compute per-node per-sample relative masses A_v[s] using stripes
+// Returns:
+//  - node_sums[tid][v][local_sample]
+//  - has_mass[v]  (OR across all stripes)
+//  - edges_touched_per_tid[tid] : list of node ids v that had any mass in that stripe
 fn build_node_sums_weighted(
     post: &[usize],
     kids: &[Vec<usize>],
@@ -586,7 +590,7 @@ fn build_node_sums_weighted(
     row2leaf: &[Option<usize>],
     mode: WeightedMode<'_>,
     nsamp: usize,
-) -> Vec<Vec<Vec<f64>>> {
+) -> (Vec<Vec<Vec<f64>>>, Vec<bool>, Vec<Vec<usize>>) {
     let total = kids.len();
     let n_threads = rayon::current_num_threads().max(1);
     let stripe = (nsamp + n_threads - 1) / n_threads;
@@ -599,104 +603,98 @@ fn build_node_sums_weighted(
                 Vec::new()
             } else {
                 let end = (start + stripe).min(nsamp);
-                vec![vec![0.0; end - start]; total]
+                vec![vec![0.0f64; end - start]; total]
             }
         })
         .collect();
 
+    // any_mass_per_tid[tid][node] — node had any positive mass in this stripe
+    let mut any_mass_per_tid: Vec<Vec<bool>> = (0..n_threads)
+        .map(|tid| {
+            let start = tid * stripe;
+            if start >= nsamp { Vec::new() } else { vec![false; total] }
+        })
+        .collect();
+
+    // IMPORTANT: consume the flags slice one-by-one to give each task a unique &mut
+    let mut flags_slice: &mut [Vec<bool>] = any_mass_per_tid.as_mut_slice();
+
     rayon::scope(|scope| {
         for (tid, sums_t) in node_sums.iter_mut().enumerate() {
             let stripe_start = tid * stripe;
-            if stripe_start >= nsamp {
-                break;
-            }
+            if stripe_start >= nsamp { break; }
             let stripe_end = (stripe_start + stripe).min(nsamp);
             let wloc = stripe_end - stripe_start;
+
+            // unique &mut to this tid's flags (fixes E0499)
+            let (touched_t, rest) = flags_slice.split_first_mut().expect("flags_slice underflow");
+            flags_slice = rest;
 
             match mode {
                 WeightedMode::Dense { counts, col_sums } => {
                     scope.spawn(move |_| {
                         // scatter leaves (relative abundances)
                         for (r, lopt) in row2leaf.iter().enumerate() {
-                            let Some(leaf_pos) = lopt else {
-                                continue;
-                            };
-                            let v = leaf_ids[*leaf_pos];
-                            let sv = &mut sums_t[v];
-                            for s in stripe_start..stripe_end {
-                                let denom = col_sums[s];
-                                if denom > 0.0 {
-                                    let val = counts[r][s] / denom;
-                                    if val > 0.0 {
-                                        sv[s - stripe_start] += val;
+                            if let Some(leaf_pos) = lopt {
+                                let v = leaf_ids[*leaf_pos];
+                                let sv = &mut sums_t[v];
+                                for s in stripe_start..stripe_end {
+                                    let denom = col_sums[s];
+                                    if denom > 0.0 {
+                                        let val = counts[r][s] / denom;
+                                        if val > 0.0 {
+                                            sv[s - stripe_start] += val;
+                                            touched_t[v] = true;
+                                        }
                                     }
                                 }
                             }
                         }
-                        // bottom-up sum within stripe
+                        // bottom-up aggregate within stripe and flag propagation
                         for &v in post {
                             for &c in &kids[v] {
-                                let (left, right) = if c <= v {
-                                    sums_t.split_at_mut(v)
-                                } else {
-                                    sums_t.split_at_mut(c)
-                                };
-                                let (sv, sc) = if c <= v {
-                                    (&mut right[0], &left[c])
-                                } else {
-                                    (&mut left[v], &right[0])
-                                };
-                                for k in 0..wloc {
-                                    sv[k] += sc[k];
-                                }
+                                let (left, right) =
+                                    if c <= v { sums_t.split_at_mut(v) } else { sums_t.split_at_mut(c) };
+                                let (sv, sc) = if c <= v { (&mut right[0], &left[c]) }
+                                               else        { (&mut left[v],  &right[0]) };
+                                for k in 0..wloc { sv[k] += sc[k]; }
+                                if touched_t[c] { touched_t[v] = true; }
                             }
                         }
                     });
                 }
-                WeightedMode::Csr {
-                    indptr,
-                    indices,
-                    data,
-                    col_sums,
-                } => {
+                WeightedMode::Csr { indptr, indices, data, col_sums } => {
                     scope.spawn(move |_| {
+                        // scatter leaves (CSR to relative abundances)
                         for r in 0..row2leaf.len() {
-                            let Some(leaf_pos) = row2leaf[r] else {
-                                continue;
-                            };
-                            let v = leaf_ids[leaf_pos];
-                            let sv = &mut sums_t[v];
-                            let start = indptr[r] as usize;
-                            let stop = indptr[r + 1] as usize;
-                            for k in start..stop {
-                                let s = indices[k] as usize;
-                                if s < stripe_start || s >= stripe_end {
-                                    continue;
-                                }
-                                let denom = col_sums[s];
-                                if denom > 0.0 {
-                                    let val = data[k] / denom;
-                                    if val > 0.0 {
-                                        sv[s - stripe_start] += val;
+                            if let Some(leaf_pos) = row2leaf[r] {
+                                let v = leaf_ids[leaf_pos];
+                                let sv = &mut sums_t[v];
+                                let start = indptr[r] as usize;
+                                let stop  = indptr[r + 1] as usize;
+                                for k in start..stop {
+                                    let s = indices[k] as usize;
+                                    if s < stripe_start || s >= stripe_end { continue; }
+                                    let denom = col_sums[s];
+                                    if denom > 0.0 {
+                                        let val = data[k] / denom;
+                                        if val > 0.0 {
+                                            sv[s - stripe_start] += val;
+                                            touched_t[v] = true;
+                                        }
                                     }
                                 }
                             }
                         }
+                        // bottom-up aggregate within stripe + flag propagation
                         for &v in post {
                             for &c in &kids[v] {
-                                let (left, right) = if c <= v {
-                                    sums_t.split_at_mut(v)
-                                } else {
-                                    sums_t.split_at_mut(c)
-                                };
-                                let (sv, sc) = if c <= v {
-                                    (&mut right[0], &left[c])
-                                } else {
-                                    (&mut left[v], &right[0])
-                                };
-                                for k in 0..wloc {
-                                    sv[k] += sc[k];
-                                }
+                                let (left, right) =
+                                    if c <= v { sums_t.split_at_mut(v) } else { sums_t.split_at_mut(c) };
+                                let (sv, sc) = if c <= v { (&mut right[0], &left[c]) }
+                                               else        { (&mut left[v],  &right[0]) };
+                                for k in 0..wloc { sv[k] += sc[k]; }
+                                if touched_t[c] { touched_t[v] = true; }
                             }
                         }
                     });
@@ -705,7 +703,30 @@ fn build_node_sums_weighted(
         }
     });
 
-    node_sums
+    // OR-reduce to global has_mass
+    let mut has_mass = vec![false; total];
+    for flags in &any_mass_per_tid {
+        for (v, &f) in flags.iter().enumerate() {
+            if f { has_mass[v] = true; }
+        }
+    }
+
+    // Compact per-tid flags → lists of nodes touched in that stripe
+    let mut edges_touched_per_tid: Vec<Vec<usize>> = Vec::with_capacity(n_threads);
+    for flags in any_mass_per_tid.into_iter() {
+        if flags.is_empty() {
+            edges_touched_per_tid.push(Vec::new());
+            continue;
+        }
+        // Heuristic reserve: ~total/64
+        let mut lst = Vec::with_capacity(total >> 6);
+        for (v, f) in flags.into_iter().enumerate() {
+            if f { lst.push(v); }
+        }
+        edges_touched_per_tid.push(lst);
+    }
+
+    (node_sums, has_mass, edges_touched_per_tid)
 }
 
 fn build_sketches(
@@ -974,7 +995,7 @@ fn build_sketches_weighted(
     collect_children::<SparseOneNnd>(&bp.root(), &mut kids, &mut post);
 
     // Read table/biom for counts/values
-    let (_taxa, samples, _row2leaf, node_sums) = if let Some(tsv) = input_tsv {
+    let (_taxa, samples, _row2leaf, node_sums, has_mass, edges_touched_per_tid) = if let Some(tsv) = input_tsv {
         let (taxa, samples, counts) = read_table_counts(tsv)?;
         let nsamp = samples.len();
         let mut col_sums = vec![0.0f64; nsamp];
@@ -989,19 +1010,13 @@ fn build_sketches_weighted(
             .collect();
 
         let t0 = Instant::now();
-        let ns = build_node_sums_weighted(
-            &post,
-            &kids,
-            &leaf_ids,
-            &row2leaf,
-            WeightedMode::Dense {
-                counts: &counts,
-                col_sums: &col_sums,
-            },
-            nsamp,
+        let (ns, has_mass, edges_touched_per_tid) = build_node_sums_weighted(
+            &post, &kids, &leaf_ids, &row2leaf,
+            WeightedMode::Dense { counts: &counts, col_sums: &col_sums },
+            nsamp
         );
         info!("node_sums built in {} ms", t0.elapsed().as_millis());
-        (taxa, samples, row2leaf, ns)
+        (taxa, samples, row2leaf, ns, has_mass, edges_touched_per_tid)
     } else {
         let biom = biom_h5.expect("biom path required when TSV not provided");
         let (taxa, samples, indptr, indices, data) = read_biom_csr_values(biom)?;
@@ -1019,41 +1034,23 @@ fn build_sketches_weighted(
             .map(|n| t2leaf.get(n.as_str()).copied())
             .collect();
         let t0 = Instant::now();
-        let ns = build_node_sums_weighted(
-            &post,
-            &kids,
-            &leaf_ids,
-            &row2leaf,
-            WeightedMode::Csr {
-                indptr: &indptr,
-                indices: &indices,
-                data: &data,
-                col_sums: &col_sums,
-            },
-            nsamp,
+        let (ns, has_mass, edges_touched_per_tid) = build_node_sums_weighted(
+            &post, &kids, &leaf_ids, &row2leaf,
+            WeightedMode::Csr { indptr: &indptr, indices: &indices, data: &data, col_sums: &col_sums },
+            nsamp
         );
         info!("node_sums built in {} ms", t0.elapsed().as_millis());
-        (taxa, samples, row2leaf, ns)
+        (taxa, samples, row2leaf, ns, has_mass, edges_touched_per_tid)
     };
 
     let nsamp = samples.len();
     let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
     info!("nodes = {}  leaves = {}  samples = {}", total, leaf_ids.len(), nsamp);
-    // Determine active edges (ℓ>0 and some mass >0 in any stripe)
-    let mut has_mass = vec![false; total];
-    for sums_t in &node_sums {
-        if sums_t.is_empty() {
-            continue;
-        }
-        for (v, row) in sums_t.iter().enumerate() {
-            if !has_mass[v] && row.iter().any(|&x| x > 0.0) {
-                has_mass[v] = true;
-            }
-        }
-    }
-    let active_edges: Vec<usize> = (0..total)
-        .filter(|&v| lens[v] > 0.0 && has_mass[v])
-        .collect();
+
+    // has_mass already computed in build_node_sums_weighted
+    let active_edges: Vec<usize> =
+        (0..total).filter(|&v| lens[v] > 0.0 && has_mass[v]).collect();
+
     if active_edges.is_empty() {
         anyhow::bail!("No active edges for weighted case.");
     }
@@ -1071,34 +1068,49 @@ fn build_sketches_weighted(
     let n_threads = rayon::current_num_threads().max(1);
     let stripe = (nsamp + n_threads - 1) / n_threads;
     let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
+
     let t1 = Instant::now();
-    for &v in &active_edges {
-        for (tid, sums_t) in node_sums.iter().enumerate() {
-            let stripe_start = tid * stripe;
-            if stripe_start >= nsamp {
-                break;
+
+    wsets
+        .as_mut_slice()
+        .par_chunks_mut(stripe)
+        .enumerate()
+        .for_each(|(tid, target)| {
+            if tid >= node_sums.len() || node_sums[tid].is_empty() { return; }
+            let wloc = target.len(); // local samples in this stripe
+            let touched = &edges_touched_per_tid[tid];
+
+            // optional pre-reserve to reduce reallocations (cheap since touched is small)
+            let mut counts = vec![0usize; wloc];
+            for &v in touched {
+                let id_new = id_map[v];
+                if id_new == usize::MAX { continue; } // not active (ℓ==0 or never mass globally)
+                let row = &node_sums[tid][v];
+                debug_assert_eq!(row.len(), wloc);
+                for (off, &a) in row.iter().enumerate() {
+                    if a > 0.0 { counts[off] += 1; }
+                }
             }
-            if sums_t.is_empty() {
-                continue;
-            }
-            let stripe_end = (stripe_start + stripe).min(nsamp);
-            let row = &sums_t[v];
-            debug_assert_eq!(row.len(), stripe_end - stripe_start);
-            let lw = lens[v];
-            if lw == 0.0 {
-                continue;
+            for (off, c) in counts.into_iter().enumerate() {
+                if c != 0 { target[off].reserve(c); }
             }
 
-            for (off, &a) in row.iter().enumerate() {
-                if a <= 0.0 {
-                    continue;
+            // push only edges that had mass in this stripe
+            for &v in touched {
+                let id_new = id_map[v];
+                if id_new == usize::MAX { continue; } // filter to active_edges
+                let lw = lens[v];
+                let id = id_new as u64;
+                let row = &node_sums[tid][v];
+                for (off, &a) in row.iter().enumerate() {
+                    if a > 0.0 {
+                        target[off].push((id, lw * a));
+                    }
                 }
-                let s = stripe_start + off;
-                wsets[s].push((id_map[v] as u64, lw * a));
             }
-        }
-    }
+        });
     info!("built per-sample weighted sets in {} ms", t1.elapsed().as_millis());
+
     drop(node_sums);
     drop(kids);
     drop(post);
