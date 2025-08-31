@@ -164,7 +164,6 @@ fn collect_children<N: NndOne>(
 }
 
 // TSV/BIOM readers
-
 fn read_table(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<Vec<f64>>)> {
     let f = File::open(p)?;
     let mut lines = BufReader::new(f).lines();
@@ -219,7 +218,6 @@ fn read_biom_csr(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32
 }
 
 // Write TSV matrix (fast, reusing ryu buffer per row)
-
 fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()> {
     // Header
     let header = {
@@ -402,7 +400,6 @@ fn write_matrix_streaming_zstd(
 }
 
 // Build per-node sample bitsets (presence under node)
-
 fn build_node_bits(
     post: &[usize],
     kids: &[Vec<usize>],
@@ -502,7 +499,7 @@ fn build_sketches(
     ers_l: u64,
     seed: u64,
 ) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
-    // ---- Load tree ----
+    // Load tree
     let raw = std::fs::read_to_string(tree_file).context("read newick")?;
     let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
     let t: NwkTree = one_from_string(&sanitized).context("parse newick (sanitized)")?;
@@ -1065,7 +1062,7 @@ fn main() -> Result<()> {
 
     if pcoa {
         let n = nsamp;
-
+        // take the ownership of dist to avoid copy, dist wrote to disk already
         let dm = Array2::from_shape_vec((n, n), dist).expect("distance matrix shape");
 
         let opts = FpcoaOptions {
@@ -1090,7 +1087,7 @@ fn main() -> Result<()> {
             pb_poca.set_file_name("pcoa.txt");
             pb_poca
         };
-        // Write ordination in scikit-bio format
+        // Write ordination in ordination format
         let ord_path = {
             let p = std::path::Path::new(out_file);
             let mut pb = p.to_path_buf();
