@@ -63,7 +63,7 @@ We first created a few libraries for the best performance of DartUniFrac impleme
 
 3.SIMD-aware Hamming similarity for computing hash collision probability of sketches, [anndists](https://github.com/jianshu93/anndists)
 
-4.A fast, in-memory Principle Coordinate Analysis (PCoA) based on randomized SVD, [fpcoa](https://github.com/jianshu93/fpcoa)
+4.A fast, in-memory Principle Coordinate Analysis (PCoA) based on randomized SVD (subspace iteration type SVD), [fpcoa](https://github.com/jianshu93/fpcoa)
 
 ## Install
 ### Pre-compiled on Linux (x86-64)
@@ -111,6 +111,7 @@ Options:
   -i, --input <input>         OTU/Feature table in TSV format
   -b, --biom <biom>           OTU/Feature table in BIOM (HDF5) format
   -o, --output <output>       Output distance matrix in TSV format [default: unifrac.tsv]
+      --weighted              Weighted UniFrac (normalized)
   -s, --sketch <sketch-size>  Sketch size for Weighted MinHash (DartMinHash or ERS) [default: 2048]
   -m, --method <method>       Sketching method: dmh (DartMinHash) or ers (Efficient Rejection Sampling) [default: dmh] [possible values: dmh, ers]
   -l, --length <seq-length>   Per-hash independent random sequence length for ERS, must be >= 1024 [default: 4096]
@@ -126,8 +127,11 @@ Options:
 
 
 ```bash
-### DartMinHash, biom format input
+### DartMinHash, biom format input, unweighted
 dartunifrac -t ./ASVs_aligned.tre -b ./ASVs_counts.biom -m dmh -s 2048 -o unifrac_dmh_dist.csv
+
+### DartMinHash, biom format input, weighted
+dartunifrac -t ./ASVs_aligned.tre -b ./ASVs_counts.biom --weighted -m dmh -s 2048 -o unifrac_dmh_dist.csv
 
 ### tsv/txt tabular input
 dartunifrac -t ./data/ASVs_aligned.tre -i ./data/ASVs_counts.txt -m dmh -s 2048 -o unifrac_dmh_dist.csv
@@ -199,8 +203,8 @@ Site constraints        0       0
 
 ## Benchmark
 We use Striped UniFrac algorithm as the ground truth, which is an exact and efficient algorithm for large number of samples. A pure Rust implementaion, as a supporting crate for this one, can be found [here](https://github.com/jianshu93/unifrac_bp), also included as a binary in this crate.
-
-For the testing data (ASVs_count.tsv and ASV_aligned.tre), the truth from Striped UniFrac is:
+### Unweighted
+For the testing data (ASVs_count.tsv and ASV_aligned.tre), the truth from Striped UniFrac (unweighted) is:
 
 |    | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
 |---|---:|---:|---:|---:|---:|---:|
@@ -211,7 +215,7 @@ For the testing data (ASVs_count.tsv and ASV_aligned.tre), the truth from Stripe
 | Orwoll_BI0215_BI | 0.3484474122524261 | 0.3338068425655365 | 0.4006152451038361 | 0.2608364820480347 | 0 | 0.4572696685791016 |
 | Orwoll_BI0353_BI | 0.5317433476448059 | 0.5172212719917297 | 0.5693299174308777 | 0.4297698140144348 | 0.4572696685791016 | 0 |
 
-DartUniFrac estimation (DartMinHash) is: 
+DartUniFrac estimation (DartMinHash, unweighted) is: 
 
 |    | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
 |:--|---:|---:|---:|---:|---:|---:|
@@ -222,7 +226,7 @@ DartUniFrac estimation (DartMinHash) is:
 | Orwoll_BI0215_BI | 0.35815429687 | 0.3398437 | 0.40014648437 | 0.260742187 | 0.0 | 0.45825195312 |
 | Orwoll_BI0353_BI | 0.530273437 | 0.5209960937 | 0.56860351562 | 0.422851562 | 0.45825195312 | 0.0 |
 
-DartUniFrac estimation (Efficient Rejection Sampling) is: 
+DartUniFrac estimation (Efficient Rejection Sampling, uniweghted) is: 
 |    | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
 |:--|---:|---:|---:|---:|---:|---:|
 | Orwoll_BI0023_BI | 0.0 | 0.4101562 | 0.3657226562 | 0.3618164062 | 0.3569335937 | 0.52539062 |
@@ -232,6 +236,39 @@ DartUniFrac estimation (Efficient Rejection Sampling) is:
 | Orwoll_BI0215_BI | 0.3569335937 | 0.340820312 | 0.4145507812 | 0.264648437 | 0.0 | 0.460937 |
 | Orwoll_BI0353_BI | 0.52539062 | 0.5190429687 | 0.570312 | 0.4311523437 | 0.460937 | 0.0 |
 
+### Weighted
+For the testing data (ASVs_count.tsv and ASV_aligned.tre), the truth from Striped UniFrac (weighted_normalized) is:
+
+|    | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
+|---|---:|---:|---:|---:|---:|---:|
+| Orwoll_BI0023_BI | 0 | 0.3701851367950439 | 0.3719282746315002 | 0.2419339865446091 | 0.235030472278595 | 0.2684231698513031 |
+| Orwoll_BI0056_BI | 0.3701851367950439 | 0 | 0.4768573343753815 | 0.3429801762104034 | 0.2965413630008698 | 0.3132076263427734 |
+| Orwoll_BI0131_BI | 0.3719282746315002 | 0.4768573343753815 | 0 | 0.3818131387233734 | 0.3768087327480316 | 0.4305019080638885 |
+| Orwoll_BI0153_BI | 0.2419339865446091 | 0.3429801762104034 | 0.3818131387233734 | 0 | 0.1378696262836456 | 0.1329282969236374 |
+| Orwoll_BI0215_BI | 0.235030472278595 | 0.2965413630008698 | 0.3768087327480316 | 0.1378696262836456 | 0 | 0.139195516705513 |
+| Orwoll_BI0353_BI | 0.2684231698513031 | 0.3132076263427734 | 0.4305019080638885 | 0.1329282969236374 | 0.139195516705513 | 0 |
+
+DartUniFrac estimation (DartMinHash, weighted) is: 
+
+|    | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
+|---|---:|---:|---:|---:|---:|---:|
+| Orwoll_BI0023_BI | 0 | 0.3726541554959786 | 0.3562913907284768 | 0.2412121212121212 | 0.24878048780487805 | 0.26889714993804215 |
+| Orwoll_BI0056_BI | 0.3726541554959786 | 0 | 0.4566145092460882 | 0.33159947984395316 | 0.2832080200501253 | 0.30612244897959184 |
+| Orwoll_BI0131_BI | 0.3562913907284768 | 0.4566145092460882 | 0 | 0.38565629228687415 | 0.3781965006729475 | 0.4301675977653631 |
+| Orwoll_BI0153_BI | 0.2412121212121212 | 0.33159947984395316 | 0.38565629228687415 | 0 | 0.1265126512651265 | 0.1277533039647577 |
+| Orwoll_BI0215_BI | 0.24878048780487805 | 0.2832080200501253 | 0.3781965006729475 | 0.1265126512651265 | 0 | 0.13399778516057587 |
+| Orwoll_BI0353_BI | 0.26889714993804215 | 0.30612244897959184 | 0.4301675977653631 | 0.1277533039647577 | 0.13399778516057587 | 0 |
+
+
+DartUniFrac estimation (ERS, weighted) is: 
+|    | Orwoll_BI0023_BI | Orwoll_BI0056_BI | Orwoll_BI0131_BI | Orwoll_BI0153_BI | Orwoll_BI0215_BI | Orwoll_BI0353_BI |
+|---|---:|---:|---:|---:|---:|---:|
+| Orwoll_BI0023_BI | 0.0 | 0.37403555853740356 | 0.3540495867768595 | 0.24612108305445696 | 0.2322503008423586 | 0.26929036256585065 |
+| Orwoll_BI0056_BI | 0.37403555853740356 | 0.0 | 0.46810035842293907 | 0.3671562082777036 | 0.31324142353318374 | 0.3333333333333333 |
+| Orwoll_BI0131_BI | 0.3540495867768595 | 0.46810035842293907 | 0.0 | 0.38331644714623436 | 0.3735747820254863 | 0.4301675977653631 |
+| Orwoll_BI0153_BI | 0.24612108305445696 | 0.3671562082777036 | 0.38331644714623436 | 0.0 | 0.14381457693381736 | 0.1265126512651265 |
+| Orwoll_BI0215_BI | 0.2322503008423586 | 0.31324142353318374 | 0.3735747820254863 | 0.14381457693381736 | 0.0 | 0.13936022253129346 |
+| Orwoll_BI0353_BI | 0.26929036256585065 | 0.3333333333333333 | 0.4301675977653631 | 0.1265126512651265 | 0.13936022253129346 | 0.0 |
 
 ## Choosing L for Efficent Rejection Sampling (ERS)
 The best L for achiving a given accuracy is related to the sparsity of the data (see ERS paper [here](https://ojs.aaai.org/index.php/AAAI/article/view/16543)). The author recommended an equation for L: $l=\frac{\alpha}{s}$, where s is the sparsity of the data while $\alpha$ is a constant, normally 0.5 to 5. If you have a large dataset, you can randomly choose several samples to check the sparsity (relevant branches). You can obtain $\alpha$ using the Striped UniFrac binary: 

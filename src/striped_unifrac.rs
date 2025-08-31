@@ -10,9 +10,9 @@
 //!      (works for tens-of-thousands samples)
 use anyhow::{Context, Result};
 use bitvec::{order::Lsb0, vec::BitVec};
+use clap::ArgAction;
 use clap::ArgGroup;
 use clap::{Arg, Command};
-use clap::ArgAction;
 use env_logger;
 use hdf5::{File as H5File, types::VarLenUnicode};
 use log::info;
@@ -209,7 +209,9 @@ fn read_table_counts(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<Vec<f64>>
         let row = l?;
         let mut p = row.split('\t');
         let tax = p.next().unwrap().to_owned();
-        let vals = p.map(|v| v.parse::<f64>().unwrap_or(0.0)).collect::<Vec<f64>>();
+        let vals = p
+            .map(|v| v.parse::<f64>().unwrap_or(0.0))
+            .collect::<Vec<f64>>();
         taxa.push(tax);
         mat.push(vals);
     }
@@ -569,13 +571,18 @@ fn unifrac_striped_par(
     Arc::try_unwrap(dist).unwrap()
 }
 
-
 /// Striped UniFrac (weighted, normalized)
 /// - Expects *relative* abundances per sample to be formed on the fly: val / col_sums[s].
 /// - Supports dense TSV or BIOM CSR via the `mode` argument.
 enum WeightedMode<'a> {
-    Dense { counts: &'a [Vec<f64>] }, // rows x nsamp
-    Csr   { indptr: &'a [u32], indices: &'a [u32], data: &'a [f64] }, // BIOM CSR
+    Dense {
+        counts: &'a [Vec<f64>],
+    }, // rows x nsamp
+    Csr {
+        indptr: &'a [u32],
+        indices: &'a [u32],
+        data: &'a [f64],
+    }, // BIOM CSR
 }
 
 /// Compute weighted UniFrac with the same striped/block skeleton as unweighted.
@@ -611,10 +618,12 @@ fn unifrac_striped_par_weighted(
 
     // Phase-1 : scatter leaves (relative abundances) and bottom-up sum per stripe
     let t0 = Instant::now();
-        rayon::scope(|scope| {
+    rayon::scope(|scope| {
         for (tid, sums_t) in node_sums.iter_mut().enumerate() {
             let stripe_start = tid * stripe;
-            if stripe_start >= nsamp { break; }
+            if stripe_start >= nsamp {
+                break;
+            }
             let stripe_end = (stripe_start + stripe).min(nsamp);
             let wloc = stripe_end - stripe_start;
 
@@ -629,11 +638,15 @@ fn unifrac_striped_par_weighted(
                     scope.spawn(move |_| {
                         // scatter leaves
                         for (r, lopt) in row2leaf.iter().enumerate() {
-                            let Some(leaf_pos) = lopt else { continue; };
+                            let Some(leaf_pos) = lopt else {
+                                continue;
+                            };
                             let v = leaf_ids[*leaf_pos]; // node id
                             for s in stripe_start..stripe_end {
                                 let denom = col_sums[s];
-                                if denom <= 0.0 { continue; }
+                                if denom <= 0.0 {
+                                    continue;
+                                }
                                 let val = counts[r][s] / denom;
                                 if val > 0.0 {
                                     sums_t[v][s - stripe_start] += val;
@@ -643,38 +656,54 @@ fn unifrac_striped_par_weighted(
                         // bottom-up sum within the stripe
                         for &v in post {
                             for &c in &kids[v] {
-                                if c == v { continue; }
+                                if c == v {
+                                    continue;
+                                }
                                 if c < v {
                                     let (left, right) = sums_t.split_at_mut(v);
-                                    let sv = &mut right[0];   // sums_t[v]
-                                    let sc = &left[c];        // sums_t[c]
-                                    for k in 0..wloc { sv[k] += sc[k]; }
+                                    let sv = &mut right[0]; // sums_t[v]
+                                    let sc = &left[c]; // sums_t[c]
+                                    for k in 0..wloc {
+                                        sv[k] += sc[k];
+                                    }
                                 } else {
                                     let (left, right) = sums_t.split_at_mut(c);
-                                    let sv = &mut left[v];    // sums_t[v]
-                                    let sc = &right[0];       // sums_t[c]
-                                    for k in 0..wloc { sv[k] += sc[k]; }
+                                    let sv = &mut left[v]; // sums_t[v]
+                                    let sc = &right[0]; // sums_t[c]
+                                    for k in 0..wloc {
+                                        sv[k] += sc[k];
+                                    }
                                 }
                             }
                         }
                         let _ = lens; // keep signature parity
                     });
                 }
-                WeightedMode::Csr { indptr, indices, data } => {
+                WeightedMode::Csr {
+                    indptr,
+                    indices,
+                    data,
+                } => {
                     let indptr = *indptr;
                     let indices = *indices;
                     let data = *data;
                     scope.spawn(move |_| {
                         for r in 0..row2leaf.len() {
-                            let Some(leaf_pos) = row2leaf[r] else { continue; };
+                            let Some(leaf_pos) = row2leaf[r] else {
+                                continue;
+                            };
                             let v = leaf_ids[leaf_pos];
                             let start = indptr[r] as usize;
-                            let stop  = indptr[r + 1] as usize;
+                            let stop = indptr[r + 1] as usize;
                             for k in start..stop {
                                 let s = indices[k] as usize;
-                                if s < stripe_start || s >= stripe_end { continue; }
+                                if s < stripe_start || s >= stripe_end {
+                                    continue;
+                                }
                                 let denom = col_sums[s];
-                                if denom <= 0.0 { continue; }
+                                if denom <= 0.0 {
+                                    continue;
+                                }
                                 let val = data[k] / denom;
                                 if val > 0.0 {
                                     sums_t[v][s - stripe_start] += val;
@@ -684,17 +713,23 @@ fn unifrac_striped_par_weighted(
                         // bottom-up sum within the stripe
                         for &v in post {
                             for &c in &kids[v] {
-                                if c == v { continue; }
+                                if c == v {
+                                    continue;
+                                }
                                 if c < v {
                                     let (left, right) = sums_t.split_at_mut(v);
                                     let sv = &mut right[0];
                                     let sc = &left[c];
-                                    for k in 0..wloc { sv[k] += sc[k]; }
+                                    for k in 0..wloc {
+                                        sv[k] += sc[k];
+                                    }
                                 } else {
                                     let (left, right) = sums_t.split_at_mut(c);
                                     let sv = &mut left[v];
                                     let sc = &right[0];
-                                    for k in 0..wloc { sv[k] += sc[k]; }
+                                    for k in 0..wloc {
+                                        sv[k] += sc[k];
+                                    }
                                 }
                             }
                         }
@@ -714,9 +749,13 @@ fn unifrac_striped_par_weighted(
         // walk all stripes and set bits where sums>0
         for tid in 0..n_threads {
             let stripe_start = tid * stripe;
-            if stripe_start >= nsamp { break; }
+            if stripe_start >= nsamp {
+                break;
+            }
             let local = &node_sums[tid];
-            if local.is_empty() { continue; }
+            if local.is_empty() {
+                continue;
+            }
             let row = &local[v];
             for (off, &val) in row.iter().enumerate() {
                 if val > 0.0 {
@@ -735,7 +774,9 @@ fn unifrac_striped_par_weighted(
 
     let mut active_per_strip: Vec<Vec<usize>> = vec![Vec::new(); nblk];
     for v in 0..total {
-        if lens[v] <= 0.0 { continue; }
+        if lens[v] <= 0.0 {
+            continue;
+        }
         let raw = node_bits[v].as_raw_slice(); // &[u64]
         for bi in 0..nblk {
             let i0 = bi * blk;
@@ -758,10 +799,16 @@ fn unifrac_striped_par_weighted(
     fn get_av(node_sums: &Vec<Vec<Vec<f64>>>, stripe: usize, s: usize, v: usize) -> f64 {
         let tid = s / stripe;
         let off = s - tid * stripe;
-        if tid >= node_sums.len() { return 0.0; }
+        if tid >= node_sums.len() {
+            return 0.0;
+        }
         let local = &node_sums[tid];
-        if local.is_empty() { return 0.0; }
-        if off >= local[v].len() { return 0.0; }
+        if local.is_empty() {
+            return 0.0;
+        }
+        if off >= local[v].len() {
+            return 0.0;
+        }
         local[v][off]
     }
 
@@ -789,27 +836,47 @@ fn unifrac_striped_par_weighted(
         while ia < list_a.len() || ib < list_b.len() {
             let v = match (list_a.get(ia), list_b.get(ib)) {
                 (Some(&va), Some(&vb)) => {
-                    if va < vb { ia += 1; va }
-                    else if vb < va { ib += 1; vb }
-                    else { ia += 1; ib += 1; va }
+                    if va < vb {
+                        ia += 1;
+                        va
+                    } else if vb < va {
+                        ib += 1;
+                        vb
+                    } else {
+                        ia += 1;
+                        ib += 1;
+                        va
+                    }
                 }
-                (Some(&va), None) => { ia += 1; va }
-                (None, Some(&vb)) => { ib += 1; vb }
+                (Some(&va), None) => {
+                    ia += 1;
+                    va
+                }
+                (None, Some(&vb)) => {
+                    ib += 1;
+                    vb
+                }
                 _ => unreachable!(),
             };
 
             let len = lens[v] as f64;
-            if len == 0.0 { continue; }
+            if len == 0.0 {
+                continue;
+            }
 
             for ii in 0..bw {
                 let si = i0 + ii;
                 for jj in 0..bh {
                     let sj = j0 + jj;
-                    if sj <= si { continue; } // upper triangle only
+                    if sj <= si {
+                        continue;
+                    } // upper triangle only
 
                     let ai = get_av(&node_sums, stripe, si, v);
                     let aj = get_av(&node_sums, stripe, sj, v);
-                    if ai == 0.0 && aj == 0.0 { continue; }
+                    if ai == 0.0 && aj == 0.0 {
+                        continue;
+                    }
 
                     let idx = ii * bh + jj;
                     num[idx] += len * (ai - aj).abs();
@@ -824,9 +891,15 @@ fn unifrac_striped_par_weighted(
                 let i = i0 + ii;
                 for jj in 0..bh {
                     let j = j0 + jj;
-                    if j <= i { continue; }
+                    if j <= i {
+                        continue;
+                    }
                     let idx = ii * bh + jj;
-                    let d = if den[idx] > 0.0 { num[idx] / den[idx] } else { 0.0 };
+                    let d = if den[idx] > 0.0 {
+                        num[idx] / den[idx]
+                    } else {
+                        0.0
+                    };
                     *base.add(i * nsamp + j) = d;
                     *base.add(j * nsamp + i) = d;
                 }
@@ -843,8 +916,6 @@ fn unifrac_striped_par_weighted(
 
     Arc::try_unwrap(dist).unwrap()
 }
-
-
 
 fn read_biom_csr(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32>)> {
     let f = H5File::open(p).with_context(|| format!("open BIOM file {p}"))?;
@@ -879,7 +950,9 @@ fn read_biom_csr(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32
     Ok((taxa, samples, indptr, indices))
 }
 
-fn read_biom_csr_values(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32>, Vec<f64>)> {
+fn read_biom_csr_values(
+    p: &str,
+) -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32>, Vec<f64>)> {
     let f = H5File::open(p).with_context(|| format!("open BIOM file {p}"))?;
 
     fn read_utf8(f: &H5File, path: &str) -> Result<Vec<String>> {
@@ -919,9 +992,9 @@ fn read_biom_csr_values(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<u32>, 
             .with_context(|| format!("missing observation/**/{name}"))
     };
 
-    let indptr  = try_paths_u32("indptr")?;
+    let indptr = try_paths_u32("indptr")?;
     let indices = try_paths_u32("indices")?;
-    let data    = try_paths_f64("data")?;
+    let data = try_paths_f64("data")?;
 
     Ok((taxa, samples, indptr, indices, data))
 }
@@ -985,9 +1058,9 @@ fn main() -> Result<()> {
     let out_file = m.get_one::<String>("output").unwrap();
 
     let threads = m
-    .get_one::<usize>("threads")
-    .copied()
-    .unwrap_or_else(|| num_cpus::get());
+        .get_one::<usize>("threads")
+        .copied()
+        .unwrap_or_else(|| num_cpus::get());
 
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads.max(1))
@@ -1038,7 +1111,7 @@ fn main() -> Result<()> {
         node2leaf[nid] = leaf_pos;
     }
     drop(node2leaf);
-    // Read table (TSV or BIOM) and weighted/unweighted split 
+    // Read table (TSV or BIOM) and weighted/unweighted split
     log::info!("Start parsing input.");
     let weighted = *m.get_one::<bool>("weighted").unwrap_or(&false);
 
@@ -1046,38 +1119,50 @@ fn main() -> Result<()> {
     let mut taxa: Vec<String>;
 
     // Data containers
-    let mut pres: Vec<Vec<f64>> = Vec::new();     // TSV (presence) for unweighted
-    let mut counts: Vec<Vec<f64>> = Vec::new();   // TSV counts for weighted
-    let mut indptr:  Vec<u32> = Vec::new();       // BIOM (both modes)
-    let mut indices: Vec<u32> = Vec::new();       // BIOM (both modes)
-    let mut data:    Vec<f64> = Vec::new();       // BIOM values for weighted
-    let mut pres_dense = false;                   // true, TSV mode
+    let mut pres: Vec<Vec<f64>> = Vec::new(); // TSV (presence) for unweighted
+    let mut counts: Vec<Vec<f64>> = Vec::new(); // TSV counts for weighted
+    let mut indptr: Vec<u32> = Vec::new(); // BIOM (both modes)
+    let mut indices: Vec<u32> = Vec::new(); // BIOM (both modes)
+    let mut data: Vec<f64> = Vec::new(); // BIOM values for weighted
+    let mut pres_dense = false; // true, TSV mode
 
     if let Some(tsv) = m.get_one::<String>("input") {
         pres_dense = true;
         if weighted {
             let (t, s, mat) = read_table_counts(tsv)?;
-            taxa = t; samples = s; counts = mat;
+            taxa = t;
+            samples = s;
+            counts = mat;
         } else {
             let (t, s, mat) = read_table(tsv)?;
-            taxa = t; samples = s; pres = mat;
+            taxa = t;
+            samples = s;
+            pres = mat;
         }
     } else {
         // BIOM
         let biom = m.get_one::<String>("biom").unwrap();
         if weighted {
             let (t, s, ip, idx, vals) = read_biom_csr_values(biom)?;
-            taxa = t; samples = s; indptr = ip; indices = idx; data = vals;
+            taxa = t;
+            samples = s;
+            indptr = ip;
+            indices = idx;
+            data = vals;
         } else {
             let (t, s, ip, idx) = read_biom_csr(biom)?;
-            taxa = t; samples = s; indptr = ip; indices = idx;
+            taxa = t;
+            samples = s;
+            indptr = ip;
+            indices = idx;
         }
     }
 
     let nsamp = samples.len();
 
     // Map each input row (taxon) to a leaf position (if present)
-    let row2leaf: Vec<Option<usize>> = taxa.iter()
+    let row2leaf: Vec<Option<usize>> = taxa
+        .iter()
         .map(|name| t2leaf.get(name.as_str()).copied())
         .collect();
 
@@ -1093,7 +1178,11 @@ fn main() -> Result<()> {
             }
             // compute and go
             unifrac_striped_par_weighted(
-                &post, &kids, &lens, &leaf_ids, &row2leaf,
+                &post,
+                &kids,
+                &lens,
+                &leaf_ids,
+                &row2leaf,
                 WeightedMode::Dense { counts: &counts },
                 nsamp,
                 &col_sums,
@@ -1101,15 +1190,23 @@ fn main() -> Result<()> {
         } else {
             for r in 0..taxa.len() {
                 let start = indptr[r] as usize;
-                let stop  = indptr[r + 1] as usize;
+                let stop = indptr[r + 1] as usize;
                 for k in start..stop {
                     let s = indices[k] as usize;
                     col_sums[s] += data[k];
                 }
             }
             unifrac_striped_par_weighted(
-                &post, &kids, &lens, &leaf_ids, &row2leaf,
-                WeightedMode::Csr { indptr: &indptr, indices: &indices, data: &data },
+                &post,
+                &kids,
+                &lens,
+                &leaf_ids,
+                &row2leaf,
+                WeightedMode::Csr {
+                    indptr: &indptr,
+                    indices: &indices,
+                    data: &data,
+                },
                 nsamp,
                 &col_sums,
             )
@@ -1135,7 +1232,7 @@ fn main() -> Result<()> {
             for r in 0..taxa.len() {
                 if let Some(leaf_pos) = row2leaf[r] {
                     let start = indptr[r] as usize;
-                    let stop  = indptr[r + 1] as usize;
+                    let stop = indptr[r + 1] as usize;
                     for k in start..stop {
                         let s = indices[k] as usize;
                         masks[s].set(leaf_pos, true);
@@ -1148,9 +1245,9 @@ fn main() -> Result<()> {
 
     // Free now-redundant big structures
     drop(t2leaf);
-    leaf_nm.clear(); 
+    leaf_nm.clear();
     leaf_nm.shrink_to_fit();
-    taxa.clear();    
+    taxa.clear();
     taxa.shrink_to_fit();
     pres.clear();
     pres.shrink_to_fit();
