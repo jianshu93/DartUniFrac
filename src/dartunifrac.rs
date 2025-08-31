@@ -891,7 +891,7 @@ fn build_sketches(
             anyhow::bail!("Fewer than 2 non-empty samples after filtering; nothing to compare.");
         }
     }
-
+    info!("sketching starting...");
     // Sketch per sample in parallel
     let mut rng = mt_from_seed(seed);
     let sketches_u64: Vec<Vec<u64>> = if method == "dmh" {
@@ -987,6 +987,8 @@ fn build_sketches_weighted(
             .iter()
             .map(|n| t2leaf.get(n.as_str()).copied())
             .collect();
+
+        let t0 = Instant::now();
         let ns = build_node_sums_weighted(
             &post,
             &kids,
@@ -998,6 +1000,7 @@ fn build_sketches_weighted(
             },
             nsamp,
         );
+        info!("node_sums built in {} ms", t0.elapsed().as_millis());
         (taxa, samples, row2leaf, ns)
     } else {
         let biom = biom_h5.expect("biom path required when TSV not provided");
@@ -1015,6 +1018,7 @@ fn build_sketches_weighted(
             .iter()
             .map(|n| t2leaf.get(n.as_str()).copied())
             .collect();
+        let t0 = Instant::now();
         let ns = build_node_sums_weighted(
             &post,
             &kids,
@@ -1028,12 +1032,13 @@ fn build_sketches_weighted(
             },
             nsamp,
         );
+        info!("node_sums built in {} ms", t0.elapsed().as_millis());
         (taxa, samples, row2leaf, ns)
     };
 
     let nsamp = samples.len();
     let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
-
+    info!("nodes = {}  leaves = {}  samples = {}", total, leaf_ids.len(), nsamp);
     // Determine active edges (ℓ>0 and some mass >0 in any stripe)
     let mut has_mass = vec![false; total];
     for sums_t in &node_sums {
@@ -1058,12 +1063,15 @@ fn build_sketches_weighted(
     for (new_id, &v) in active_edges.iter().enumerate() {
         id_map[v] = new_id;
     }
-
+    info!(
+        "active edges = {} (from {} total, {} leaves)",
+        active_edges.len(), total, leaf_ids.len()
+    );
     // Build weighted sets per sample: z_v(s) = ℓ_v * A_v[s]
     let n_threads = rayon::current_num_threads().max(1);
     let stripe = (nsamp + n_threads - 1) / n_threads;
     let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-
+    let t1 = Instant::now();
     for &v in &active_edges {
         for (tid, sums_t) in node_sums.iter().enumerate() {
             let stripe_start = tid * stripe;
@@ -1090,6 +1098,13 @@ fn build_sketches_weighted(
             }
         }
     }
+    info!("built per-sample weighted sets in {} ms", t1.elapsed().as_millis());
+    drop(node_sums);
+    drop(kids);
+    drop(post);
+    drop(leaf_ids);
+    drop(t2leaf);
+    drop(id_map);
 
     // Drop empty samples (no covered branches)
     let mut kept_ws = Vec::with_capacity(nsamp);
@@ -1105,7 +1120,7 @@ fn build_sketches_weighted(
     if samples.len() < 2 {
         anyhow::bail!("Fewer than 2 non-empty samples; nothing to compare.");
     }
-
+    info!("sketching starting...");
     // Sketch (DMH or ERS).  IMPORTANT: ERS `m_per_dim` must align with *dense* id space.
     let mut rng = mt_from_seed(seed);
     let sketches_u64: Vec<Vec<u64>> = if method == "dmh" {
@@ -1134,7 +1149,7 @@ fn build_sketches_weighted(
             })
             .collect()
     };
-
+    info!("sketching done.");
     Ok((samples, sketches_u64))
 }
 
@@ -1405,19 +1420,20 @@ fn main() -> Result<()> {
 
     info!("{} threads will be used ", rayon::current_num_threads());
 
-    info!("method={method}   k={k}   ers-L={ers_l}   seed={seed}");
+    info!("method={method}   k={k}   seed={seed}");
+    if method == "ers" {
+        info!("ERS L={ers_l}");
+    }
     if weighted {
         info!("Weighted mode");
     } else {
         info!("Unweighted mode");
     };
-    info!("sketching starting...");
     let (samples, sketches_u64) = if weighted {
         build_sketches_weighted(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
     } else {
         build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
     };
-    info!("sketching done");
     let nsamp = samples.len();
     if stream {
         if pcoa {
