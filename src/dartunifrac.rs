@@ -1185,7 +1185,7 @@ fn main() -> Result<()> {
 
     let m = Command::new("dartunifrac")
         .version("0.2.2")
-        .about(format!("DartUniFrac: Approximate unweighted UniFrac via Weighted MinHash {dart}{dart}{dart}"))
+        .about(format!("DartUniFrac: Approximate UniFrac via Weighted MinHash {dart}{dart}{dart}"))
         .arg(
             Arg::new("tree")
                 .short('t')

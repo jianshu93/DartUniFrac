@@ -42,7 +42,7 @@ In summary, unweighted UniFrac distance can be considered as weighted Jaccard di
   <img width="40%" src ="weighted_unifrac_schematic.png">
 </div>
 
-Weighted UniFrac measuers the mass accumulate (taxa weight) over branches. A similar idea can be used to derive that Weighted UniFrac is a simple transformation from weighted Jaccard
+Weighted UniFrac measuers the mass accumulate (taxa weight) over branches(see [here](https://journals.asm.org/doi/full/10.1128/aem.01996-06)). Here, Weighted UniFrac is the normalized weighted UniFrac. A similar idea can be used to derive that Weighted UniFrac is a simple transformation from weighted Jaccard
 $$D_{WUnifrac}=\frac{1-J_w}{1+J_w}$$
 
 where $J_w$ is:
