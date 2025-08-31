@@ -5,7 +5,7 @@
 //!
 //! See LICENSE file for more details
 
-//! DartUniFrac: Approximate unweighted UniFrac via Weighted MinHash
+//! DartUniFrac: Approximate UniFrac via Weighted MinHash
 //! DartMinHash or ERS (Efficient Rejection Sampling) can be used as the underlying algorithm
 //! Tree parsing via optimal balanced parenthesis:
 //! With constant-time rank/select primitives (rank₁(i) = # of 1-bits up to i, select₁(k) = position of the k-th 1-bit) you get parent, k-th child, next sibling, sub-tree size, depth, all in O(1). every node knows its opening index i. parent(i) = select₁(rank₁(i) - 1), next_sibling(i) = find_close(i) + 1 (where find_close is the matching 0), etc. Those functions are just pointer-arithmetic on the backing Vec<u64>.
@@ -163,7 +163,7 @@ fn collect_children<N: NndOne>(
     post.push(pid);
 }
 
-// TSV/BIOM readers
+// TSV unweighted
 fn read_table(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<Vec<f64>>)> {
     let f = File::open(p)?;
     let mut lines = BufReader::new(f).lines();
@@ -192,7 +192,29 @@ fn read_table(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<Vec<f64>>)> {
     }
     Ok((taxa, samples, mat))
 }
+// TSV weighted
+fn read_table_counts(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<Vec<f64>>)> {
+    let f = File::open(p)?;
+    let mut lines = BufReader::new(f).lines();
+    let hdr = lines.next().context("empty table")??;
+    let mut it = hdr.split('\t');
+    it.next();
+    let samples = it.map(|s| s.to_owned()).collect::<Vec<_>>();
 
+    let mut taxa = Vec::new();
+    let mut mat = Vec::new();
+    for l in lines {
+        let row = l?;
+        let mut p = row.split('\t');
+        let tax = p.next().unwrap().to_owned();
+        let vals = p.map(|v| v.parse::<f64>().unwrap_or(0.0)).collect::<Vec<f64>>();
+        taxa.push(tax);
+        mat.push(vals);
+    }
+    Ok((taxa, samples, mat))
+}
+
+// Uweighted BIOM CSR
 fn read_biom_csr(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32>)> {
     let f = H5File::open(p).with_context(|| format!("open BIOM file {p}"))?;
     fn read_utf8(f: &H5File, path: &str) -> Result<Vec<String>> {
@@ -216,6 +238,53 @@ fn read_biom_csr(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32
     let indices = try_paths("indices")?;
     Ok((taxa, samples, indptr, indices))
 }
+
+// Weighted BIOM CSR with values
+fn read_biom_csr_values(p: &str)
+    -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32>, Vec<f64>)>
+{
+    let f = H5File::open(p).with_context(|| format!("open BIOM file {p}"))?;
+
+    fn read_utf8(f: &H5File, path: &str) -> Result<Vec<String>> {
+        Ok(f.dataset(path)?
+            .read_1d::<VarLenUnicode>()?
+            .into_iter()
+            .map(|v| v.as_str().to_owned())
+            .collect())
+    }
+    fn read_u32(f: &H5File, path: &str) -> Result<Vec<u32>> {
+        Ok(f.dataset(path)?.read_raw::<u32>()?.to_vec())
+    }
+    fn read_f64_flex(f: &H5File, path: &str) -> Result<Vec<f64>> {
+        if let Ok(v) = f.dataset(path)?.read_raw::<f64>() {
+            Ok(v.to_vec())
+        } else {
+            let v32 = f.dataset(path)?.read_raw::<f32>()?;
+            Ok(v32.iter().map(|&x| x as f64).collect())
+        }
+    }
+
+    let taxa = read_utf8(&f, "observation/ids").context("missing observation/ids")?;
+    let samples = read_utf8(&f, "sample/ids").context("missing sample/ids")?;
+
+    let try_u32 = |name: &str| -> Result<Vec<u32>> {
+        read_u32(&f, &format!("observation/matrix/{name}"))
+            .or_else(|_| read_u32(&f, &format!("observation/{name}")))
+            .with_context(|| format!("missing observation/**/{name}"))
+    };
+    let try_f64 = |name: &str| -> Result<Vec<f64>> {
+        read_f64_flex(&f, &format!("observation/matrix/{name}"))
+            .or_else(|_| read_f64_flex(&f, &format!("observation/{name}")))
+            .with_context(|| format!("missing observation/**/{name}"))
+    };
+
+    let indptr  = try_u32("indptr")?;
+    let indices = try_u32("indices")?;
+    let data    = try_f64("data")?;
+    Ok((taxa, samples, indptr, indices, data))
+}
+
+
 
 // Write TSV matrix (fast, reusing ryu buffer per row)
 fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()> {
@@ -317,9 +386,8 @@ fn write_matrix_streaming_zstd(
     sketches: &[Vec<u64>],
     path: &str,
     block_size_opt: Option<usize>,
+    weighted_normalized: bool,
 ) -> Result<()> {
-    use std::io::Write;
-
     let n = names.len();
     assert_eq!(sketches.len(), n);
 
@@ -357,11 +425,17 @@ fn write_matrix_streaming_zstd(
         block.par_chunks_mut(bs).enumerate().for_each(|(j, col)| {
             for bi in 0..h {
                 let i = i0 + bi;
-                let d = if i == j {
-                    0.0
-                } else {
-                    dh.eval(&sketches[i], &sketches[j]) as f64
+                let mut d = if i == j { 
+                    0.0 
+                } else { 
+                    dh.eval(&sketches[i], &sketches[j]) as f64 
                 };
+                // d is an unbiased estimate of d_J = 1 - Jw
+                if weighted_normalized {
+                    // Bray–Curtis / normalized weighted UniFrac:
+                    // D = (1 - Jw) / (1 + Jw) = d_J / (2 - d_J)
+                    d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
+                }
                 col[bi] = d; // write into column-major slot (j, bi)
             }
         });
@@ -488,6 +562,109 @@ fn build_node_bits(
     });
 
     node_bits
+}
+
+// Weighted mode switch for dense/CSR input
+enum WeightedMode<'a> {
+    Dense { counts: &'a [Vec<f64>], col_sums: &'a [f64] },                   // rows x nsamp
+    Csr   { indptr: &'a [u32], indices: &'a [u32], data: &'a [f64], col_sums: &'a [f64] }, // BIOM
+}
+
+// Weighted, compute per-node per-sample relative masses A_v[s] using stripes
+fn build_node_sums_weighted(
+    post: &[usize],
+    kids: &[Vec<usize>],
+    leaf_ids: &[usize],
+    row2leaf: &[Option<usize>],
+    mode: WeightedMode<'_>,
+    nsamp: usize,
+) -> Vec<Vec<Vec<f64>>> {
+    let total = kids.len();
+    let n_threads = rayon::current_num_threads().max(1);
+    let stripe = (nsamp + n_threads - 1) / n_threads;
+
+    // node_sums[tid][node][local_sample]
+    let mut node_sums: Vec<Vec<Vec<f64>>> = (0..n_threads)
+        .map(|tid| {
+            let start = tid * stripe;
+            if start >= nsamp {
+                Vec::new()
+            } else {
+                let end = (start + stripe).min(nsamp);
+                vec![vec![0.0; end - start]; total]
+            }
+        })
+        .collect();
+
+    rayon::scope(|scope| {
+        for (tid, sums_t) in node_sums.iter_mut().enumerate() {
+            let stripe_start = tid * stripe;
+            if stripe_start >= nsamp { break; }
+            let stripe_end = (stripe_start + stripe).min(nsamp);
+            let wloc = stripe_end - stripe_start;
+
+            match mode {
+                WeightedMode::Dense { counts, col_sums } => {
+                    scope.spawn(move |_| {
+                        // scatter leaves (relative abundances)
+                        for (r, lopt) in row2leaf.iter().enumerate() {
+                            let Some(leaf_pos) = lopt else { continue; };
+                            let v = leaf_ids[*leaf_pos];
+                            let sv = &mut sums_t[v];
+                            for s in stripe_start..stripe_end {
+                                let denom = col_sums[s];
+                                if denom > 0.0 {
+                                    let val = counts[r][s] / denom;
+                                    if val > 0.0 { sv[s - stripe_start] += val; }
+                                }
+                            }
+                        }
+                        // bottom-up sum within stripe
+                        for &v in post {
+                            for &c in &kids[v] {
+                                let (left, right) =
+                                    if c <= v { sums_t.split_at_mut(v) } else { sums_t.split_at_mut(c) };
+                                let (sv, sc) = if c <= v { (&mut right[0], &left[c]) }
+                                               else        { (&mut left[v],  &right[0]) };
+                                for k in 0..wloc { sv[k] += sc[k]; }
+                            }
+                        }
+                    });
+                }
+                WeightedMode::Csr { indptr, indices, data, col_sums } => {
+                    scope.spawn(move |_| {
+                        for r in 0..row2leaf.len() {
+                            let Some(leaf_pos) = row2leaf[r] else { continue; };
+                            let v = leaf_ids[leaf_pos];
+                            let sv = &mut sums_t[v];
+                            let start = indptr[r] as usize;
+                            let stop  = indptr[r + 1] as usize;
+                            for k in start..stop {
+                                let s = indices[k] as usize;
+                                if s < stripe_start || s >= stripe_end { continue; }
+                                let denom = col_sums[s];
+                                if denom > 0.0 {
+                                    let val = data[k] / denom;
+                                    if val > 0.0 { sv[s - stripe_start] += val; }
+                                }
+                            }
+                        }
+                        for &v in post {
+                            for &c in &kids[v] {
+                                let (left, right) =
+                                    if c <= v { sums_t.split_at_mut(v) } else { sums_t.split_at_mut(c) };
+                                let (sv, sc) = if c <= v { (&mut right[0], &left[c]) }
+                                               else        { (&mut left[v],  &right[0]) };
+                                for k in 0..wloc { sv[k] += sc[k]; }
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    });
+
+    node_sums
 }
 
 fn build_sketches(
@@ -688,18 +865,11 @@ fn build_sketches(
             })
             .collect()
     } else {
-        let mut m_per_dim = vec![0u32; total];
-        for &v in &active_edges {
+        let mut m_per_dim = vec![0u32; active_edges.len()];
+        for (new_id, &v) in active_edges.iter().enumerate() {
             let mut cap = lens[v].ceil();
-            if cap < 1.0 {
-                cap = 1.0;
-            }
-            let cap_u32 = if cap.is_finite() {
-                cap.min(u32::MAX as f64) as u32
-            } else {
-                u32::MAX
-            };
-            m_per_dim[v] = cap_u32;
+            if cap < 1.0 { cap = 1.0; }
+            m_per_dim[new_id] = cap.min(u32::MAX as f64) as u32;
         }
         let ers = ErsWmh::new_mt(&mut rng, &m_per_dim, k as u64);
         wsets
@@ -712,6 +882,168 @@ fn build_sketches(
     };
     info!("sketching done.");
     // Everything heavy (tree structures, masks, node_bits, wsets, etc.) drops here.
+    Ok((samples, sketches_u64))
+}
+
+// Weighted, build sketches for normalized weighted UniFrac
+fn build_sketches_weighted(
+    tree_file: &str,
+    input_tsv: Option<&str>,
+    biom_h5: Option<&str>,
+    k: usize,
+    method: &str,
+    ers_l: u64,
+    seed: u64,
+) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
+    // Load tree/topology (same as unweighted)
+    let raw = std::fs::read_to_string(tree_file).context("read newick")?;
+    let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
+    let t: NwkTree = one_from_string(&sanitized).context("parse newick (sanitized)")?;
+    let mut lens_f32 = Vec::<f32>::new();
+    let trav = SuccTrav::new(&t, &mut lens_f32);
+    let bp: BalancedParensTree<LabelVec<()>, SparseOneNnd> =
+        BalancedParensTree::new_builder(trav, LabelVec::<()>::new()).build_all();
+
+    // Leaves & name→leaf map
+    let mut leaf_ids = Vec::<usize>::new();
+    let mut leaf_nm = Vec::<String>::new();
+    for n in t.nodes() {
+        if t[n].is_leaf() {
+            leaf_ids.push(n);
+            leaf_nm.push(
+                t.name(n)
+                    .map(|s| s.to_owned())
+                    .unwrap_or_else(|| format!("L{n}")),
+            );
+        }
+    }
+    let t2leaf: HashMap<&str, usize> =
+        leaf_nm.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+
+    // children & postorder
+    let total = bp.len() + 1;
+    let mut kids = vec![Vec::<usize>::new(); total];
+    let mut post = Vec::<usize>::with_capacity(total);
+    lens_f32.resize(total, 0.0);
+    collect_children::<SparseOneNnd>(&bp.root(), &mut kids, &mut post);
+
+    // Read table/biom for counts/values
+    let (_taxa, samples, _row2leaf, node_sums) = if let Some(tsv) = input_tsv {
+        let (taxa, samples, counts) = read_table_counts(tsv)?;
+        let nsamp = samples.len();
+        let mut col_sums = vec![0.0f64; nsamp];
+        for r in 0..taxa.len() {
+            for s in 0..nsamp { col_sums[s] += counts[r][s]; }
+        }
+        let row2leaf: Vec<Option<usize>> = taxa.iter().map(|n| t2leaf.get(n.as_str()).copied()).collect();
+        let ns = build_node_sums_weighted(
+            &post, &kids, &leaf_ids, &row2leaf,
+            WeightedMode::Dense { counts: &counts, col_sums: &col_sums },
+            nsamp
+        );
+        (taxa, samples, row2leaf, ns)
+    } else {
+        let biom = biom_h5.expect("biom path required when TSV not provided");
+        let (taxa, samples, indptr, indices, data) = read_biom_csr_values(biom)?;
+        let nsamp = samples.len();
+        let mut col_sums = vec![0.0f64; nsamp];
+        for r in 0..taxa.len() {
+            let a = indptr[r] as usize;
+            let b = indptr[r+1] as usize;
+            for k2 in a..b { col_sums[indices[k2] as usize] += data[k2]; }
+        }
+        let row2leaf: Vec<Option<usize>> = taxa.iter().map(|n| t2leaf.get(n.as_str()).copied()).collect();
+        let ns = build_node_sums_weighted(
+            &post, &kids, &leaf_ids, &row2leaf,
+            WeightedMode::Csr { indptr: &indptr, indices: &indices, data: &data, col_sums: &col_sums },
+            nsamp
+        );
+        (taxa, samples, row2leaf, ns)
+    };
+
+    let nsamp = samples.len();
+    let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
+
+    // Determine active edges (ℓ>0 and some mass >0 in any stripe)
+    let mut has_mass = vec![false; total];
+    for sums_t in &node_sums {
+        if sums_t.is_empty() { continue; }
+        for (v, row) in sums_t.iter().enumerate() {
+            if !has_mass[v] && row.iter().any(|&x| x > 0.0) {
+                has_mass[v] = true;
+            }
+        }
+    }
+    let active_edges: Vec<usize> =
+        (0..total).filter(|&v| lens[v] > 0.0 && has_mass[v]).collect();
+    if active_edges.is_empty() {
+        anyhow::bail!("No active edges for weighted case.");
+    }
+
+    // Dense ID remap  old v -> [0..active)
+    let mut id_map = vec![usize::MAX; total];
+    for (new_id, &v) in active_edges.iter().enumerate() { id_map[v] = new_id; }
+
+    // Build weighted sets per sample: z_v(s) = ℓ_v * A_v[s]
+    let n_threads = rayon::current_num_threads().max(1);
+    let stripe = (nsamp + n_threads - 1) / n_threads;
+    let mut wsets: Vec<Vec<(u64,f64)>> = vec![Vec::new(); nsamp];
+
+    for &v in &active_edges {
+        for (tid, sums_t) in node_sums.iter().enumerate() {
+            let stripe_start = tid * stripe;
+            if stripe_start >= nsamp { break; }
+            if sums_t.is_empty() { continue; }
+            let stripe_end = (stripe_start + stripe).min(nsamp);
+            let row = &sums_t[v];
+            debug_assert_eq!(row.len(), stripe_end - stripe_start);
+            let lw = lens[v];
+            if lw == 0.0 { continue; }
+
+            for (off, &a) in row.iter().enumerate() {
+                if a <= 0.0 { continue; }
+                let s = stripe_start + off;
+                wsets[s].push((id_map[v] as u64, lw * a));
+            }
+        }
+    }
+
+    // Drop empty samples (no covered branches)
+    let mut kept_ws = Vec::with_capacity(nsamp);
+    let mut kept_names = Vec::with_capacity(nsamp);
+    for (i, ws) in wsets.into_iter().enumerate() {
+        if !ws.is_empty() {
+            kept_ws.push(ws);
+            kept_names.push(samples[i].clone());
+        }
+    }
+    let wsets = kept_ws;
+    let samples = kept_names;
+    if samples.len() < 2 {
+        anyhow::bail!("Fewer than 2 non-empty samples; nothing to compare.");
+    }
+
+    // Sketch (DMH or ERS).  IMPORTANT: ERS `m_per_dim` must align with *dense* id space.
+    let mut rng = mt_from_seed(seed);
+    let sketches_u64: Vec<Vec<u64>> = if method == "dmh" {
+        let dmh = DartMinHash::new_mt(&mut rng, k as u64);
+        wsets.par_iter()
+             .map(|ws| dmh.sketch(ws).into_iter().map(|(id,_rank)| id).collect())
+             .collect()
+    } else {
+        let mut m_per_dim = vec![0u32; active_edges.len()];
+        for (&v, new_id) in active_edges.iter().zip(0..) {
+            let mut cap = lens[v].ceil();
+            if cap < 1.0 { cap = 1.0; }
+            m_per_dim[new_id] = cap.min(u32::MAX as f64) as u32;
+        }
+        let ers = ErsWmh::new_mt(&mut rng, &m_per_dim, k as u64);
+        wsets.par_iter()
+             .map(|ws| ers.sketch(ws, Some(ers_l))
+                          .into_iter().map(|(id,_rank)| id).collect())
+             .collect()
+    };
+
     Ok((samples, sketches_u64))
 }
 
@@ -885,6 +1217,12 @@ fn main() -> Result<()> {
                 .default_value("unifrac.tsv"),
         )
         .arg(
+            Arg::new("weighted")
+                .long("weighted")
+                .help("Weighted UniFrac (normalized)")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("sketch-size")
                 .short('s')
                 .long("sketch")
@@ -955,6 +1293,7 @@ fn main() -> Result<()> {
     let biom_path = m.get_one::<String>("biom").map(|s| s.as_str());
     let out_file = m.get_one::<String>("output").unwrap();
     let k = *m.get_one::<usize>("sketch-size").unwrap();
+    let weighted = m.get_flag("weighted");
     let method = m.get_one::<String>("method").unwrap().as_str();
     let ers_l = *m.get_one::<u64>("seq-length").unwrap();
     let seed = *m.get_one::<u64>("seed").unwrap();
@@ -977,8 +1316,11 @@ fn main() -> Result<()> {
 
     info!("method={method}   k={k}   ers-L={ers_l}   seed={seed}");
 
-    let (samples, sketches_u64) =
-        build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?;
+    let (samples, sketches_u64) = if weighted {
+        build_sketches_weighted(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
+    } else {
+        build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
+    };
     let nsamp = samples.len();
     if stream {
         if pcoa {
@@ -1006,7 +1348,7 @@ fn main() -> Result<()> {
             "Streaming zstd-compressed distance matrix → {}",
             out_path_stream_str
         );
-        write_matrix_streaming_zstd(&samples, &sketches_u64, &out_path_stream_str, block)?;
+        write_matrix_streaming_zstd(&samples, &sketches_u64, &out_path_stream_str, block, weighted)?;
         info!("Done → {}", out_path_stream_str);
         return Ok(());
     }
@@ -1021,7 +1363,11 @@ fn main() -> Result<()> {
             row[i] = 0.0;
             for j in (i + 1)..n {
                 // DistHamming<u64> returns (# !=)/k ∈ [0,1]
-                let d = dh.eval(&sketches_u64[i], &sketches_u64[j]) as f64;
+                let mut d = dh.eval(&sketches_u64[i], &sketches_u64[j]) as f64; // d_J ≈ 1 - Jw
+                if weighted {
+                    // normalized weighted UniFrac = Bray–Curtis transform
+                    d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
+                }
                 row[j] = d; // (i,j)
             }
         });
