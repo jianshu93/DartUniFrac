@@ -927,26 +927,22 @@ fn build_sketches(
             })
             .collect()
     } else {
-        // Compute per-dimension max weight: mw[id] = max_s (ℓ_v * A_v[s])
-        let mut max_w = vec![0.0f64; active_edges.len()];
-        for ws in &wsets {
-            for &(id, w) in ws {
-                let idx = id as usize;
-                if w > max_w[idx] { max_w[idx] = w; }
-            }
+        // Tight real-valued caps for ERS: m_i = ℓ_v for each active edge.
+        // (Unweighted presence uses weight ℓ_v when present, so the per-dim max is ℓ_v.)
+        let mut caps = vec![0.0f64; active_edges.len()];
+        for (new_id, &v) in active_edges.iter().enumerate() {
+            caps[new_id] = lens[v]; // tight cap
         }
-        // Build integer caps >= max weight (at least 1 if the dim appears)
-        let mut m_per_dim = vec![0u32; active_edges.len()];
-        for (idx, &mw) in max_w.iter().enumerate() {
-            let cap = if mw > 0.0 { mw.ceil() } else { 0.0 };
-            m_per_dim[idx] = cap.max(1.0).min(u32::MAX as f64) as u32;
-        }
-        let ers = ErsWmh::new_mt(&mut rng, &m_per_dim, k as u64);
+
+        let ers = ErsWmh::new_mt(&mut rng, &caps, k as u64);
+
         wsets
             .par_iter()
             .map(|ws| {
                 ers.sketch(ws, Some(ers_l))
-                .into_iter().map(|(id, _rank)| id).collect()
+                .into_iter()
+                .map(|(id, _rank)| id)
+                .collect::<Vec<u64>>()
             })
             .collect()
 
@@ -1149,7 +1145,7 @@ fn build_sketches_weighted(
             .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
             .collect()
     } else {
-        // Compute per-dimension max weight: mw[id] = max_s (ℓ_v * A_v[s])
+        // Tight real-valued caps: m_i = max_s (ℓ_v * A_v[s]) computed from wsets.
         let mut max_w = vec![0.0f64; active_edges.len()];
         for ws in &wsets {
             for &(id, w) in ws {
@@ -1157,18 +1153,16 @@ fn build_sketches_weighted(
                 if w > max_w[idx] { max_w[idx] = w; }
             }
         }
-        // Build integer caps >= max weight (at least 1 if the dim appears)
-        let mut m_per_dim = vec![0u32; active_edges.len()];
-        for (idx, &mw) in max_w.iter().enumerate() {
-            let cap = if mw > 0.0 { mw.ceil() } else { 0.0 };
-            m_per_dim[idx] = cap.max(1.0).min(u32::MAX as f64) as u32;
-        }
-        let ers = ErsWmh::new_mt(&mut rng, &m_per_dim, k as u64);
+        // Directly use the tight f64 maxima as caps (no ceil, no max(1))
+        let caps = max_w;
+        let ers = ErsWmh::new_mt(&mut rng, &caps, k as u64);
         wsets
             .par_iter()
             .map(|ws| {
                 ers.sketch(ws, Some(ers_l))
-                .into_iter().map(|(id, _rank)| id).collect()
+                .into_iter()
+                .map(|(id, _rank)| id)
+                .collect::<Vec<u64>>()
             })
             .collect()
     };
@@ -1375,7 +1369,7 @@ fn main() -> Result<()> {
                 .value_parser(clap::value_parser!(u64))
                 // See Li and Li 2021 AAAI paper Figure 2. Large L has smaller bias and will be unbiased when L is unlimited (Rejection Sampling)
                 // L should be determined by the sparsity of relevant branches for each sample
-                .default_value("8192"),
+                .default_value("2048"),
         )
         .arg(
             Arg::new("threads")
