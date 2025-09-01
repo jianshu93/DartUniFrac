@@ -1364,7 +1364,7 @@ fn main() -> Result<()> {
                 .value_parser(clap::value_parser!(u64))
                 // See Li and Li 2021 AAAI paper Figure 2. Large L has smaller bias and will be unbiased when L is unlimited (Rejection Sampling)
                 // L should be determined by the sparsity of relevant branches for each sample
-                .default_value("16384"),
+                .default_value("8192"),
         )
         .arg(
             Arg::new("threads")
