@@ -1142,22 +1142,26 @@ fn build_sketches_weighted(
             .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
             .collect()
     } else {
-        let mut m_per_dim = vec![0u32; active_edges.len()];
-        for (&v, new_id) in active_edges.iter().zip(0..) {
-            let mut cap = lens[v].ceil();
-            if cap < 1.0 {
-                cap = 1.0;
+        // Compute per-dimension max weight: mw[id] = max_s (ℓ_v * A_v[s])
+        let mut max_w = vec![0.0f64; active_edges.len()];
+        for ws in &wsets {
+            for &(id, w) in ws {
+                let idx = id as usize;
+                if w > max_w[idx] { max_w[idx] = w; }
             }
-            m_per_dim[new_id] = cap.min(u32::MAX as f64) as u32;
+        }
+        // Build integer caps >= max weight (at least 1 if the dim appears)
+        let mut m_per_dim = vec![0u32; active_edges.len()];
+        for (idx, &mw) in max_w.iter().enumerate() {
+            let cap = if mw > 0.0 { mw.ceil() } else { 0.0 };
+            m_per_dim[idx] = cap.max(1.0).min(u32::MAX as f64) as u32;
         }
         let ers = ErsWmh::new_mt(&mut rng, &m_per_dim, k as u64);
         wsets
             .par_iter()
             .map(|ws| {
                 ers.sketch(ws, Some(ers_l))
-                    .into_iter()
-                    .map(|(id, _rank)| id)
-                    .collect()
+                .into_iter().map(|(id, _rank)| id).collect()
             })
             .collect()
     };
