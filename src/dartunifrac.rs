@@ -22,7 +22,6 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use bitvec::{order::Lsb0, vec::BitVec};
 use clap::{Arg, ArgGroup, Command};
 use env_logger;
 use log::{info, warn};
@@ -473,262 +472,7 @@ fn write_matrix_streaming_zstd(
     Ok(())
 }
 
-// Build per-node sample bitsets (presence under node)
-fn build_node_bits(
-    post: &[usize],
-    kids: &[Vec<usize>],
-    leaf_ids: &[usize],
-    masks: &[bitvec::vec::BitVec<u8, Lsb0>],
-    total_nodes: usize,
-) -> Vec<bitvec::vec::BitVec<u64, Lsb0>> {
-    let nsamp = masks.len();
-    let n_threads = rayon::current_num_threads().max(1);
-    let stripe = (nsamp + n_threads - 1) / n_threads; // ceil
-    let words_str = (stripe + 63) >> 6; // u64 words per stripe
-
-    // node_masks[tid][node][word] – per-thread stripes
-    let mut node_masks: Vec<Vec<Vec<u64>>> = (0..n_threads)
-        .map(|_| vec![vec![0u64; words_str]; total_nodes])
-        .collect();
-
-    // Phase 1: build per-thread stripes bottom-up
-    rayon::scope(|scope| {
-        for (tid, node_masks_t) in node_masks.iter_mut().enumerate() {
-            let stripe_start = tid * stripe;
-            if stripe_start >= nsamp {
-                break;
-            }
-            let stripe_end = (stripe_start + stripe).min(nsamp);
-            let masks_slice = &masks[stripe_start..stripe_end];
-
-            scope.spawn(move |_| {
-                // scatter leaves
-                for (local_s, sm) in masks_slice.iter().enumerate() {
-                    for pos in sm.iter_ones() {
-                        let v = leaf_ids[pos];
-                        let w = local_s >> 6;
-                        let b = local_s & 63;
-                        node_masks_t[v][w] |= 1u64 << b;
-                    }
-                }
-                // bottom-up OR within stripe
-                for &v in post {
-                    for &c in &kids[v] {
-                        for w in 0..words_str {
-                            node_masks_t[v][w] |= node_masks_t[c][w];
-                        }
-                    }
-                }
-            });
-        }
-    });
-
-    // Phase 2: merge stripes to a single BitVec per node
-    let mut node_bits: Vec<bitvec::vec::BitVec<u64, Lsb0>> = (0..total_nodes)
-        .map(|_| bitvec::vec::BitVec::repeat(false, nsamp))
-        .collect();
-
-    node_bits.par_iter_mut().enumerate().for_each(|(v, bv)| {
-        let dst_words = bv.as_raw_mut_slice();
-        for tid in 0..n_threads {
-            let stripe_start = tid * stripe;
-            let stripe_end = (stripe_start + stripe).min(nsamp);
-            if stripe_start >= stripe_end {
-                break;
-            }
-
-            let src_words = &node_masks[tid][v];
-            let word_off = stripe_start >> 6;
-            let bit_off = (stripe_start & 63) as u32;
-
-            let n_src_words = src_words.len();
-            for w in 0..n_src_words {
-                let mut val = src_words[w];
-                if w == n_src_words - 1 {
-                    let tail_bits = (stripe_end - stripe_start) & 63;
-                    if tail_bits != 0 {
-                        val &= (1u64 << tail_bits) - 1;
-                    }
-                }
-                if val == 0 {
-                    continue;
-                }
-                dst_words[word_off + w] |= val << bit_off;
-                if bit_off != 0 && word_off + w + 1 < dst_words.len() {
-                    dst_words[word_off + w + 1] |= val >> (64 - bit_off);
-                }
-            }
-        }
-    });
-
-    node_bits
-}
-
-// Weighted mode switch for dense/CSR input
-enum WeightedMode<'a> {
-    Dense {
-        counts: &'a [Vec<f64>],
-        col_sums: &'a [f64],
-    }, // rows x nsamp
-    Csr {
-        indptr: &'a [u32],
-        indices: &'a [u32],
-        data: &'a [f64],
-        col_sums: &'a [f64],
-    }, // BIOM
-}
-
-// Weighted, compute per-node per-sample relative masses A_v[s] using stripes
-// Returns:
-//  - node_sums[tid][v][local_sample]
-//  - has_mass[v]  (OR across all stripes)
-//  - edges_touched_per_tid[tid] : list of node ids v that had any mass in that stripe
-fn build_node_sums_weighted(
-    post: &[usize],
-    kids: &[Vec<usize>],
-    leaf_ids: &[usize],
-    row2leaf: &[Option<usize>],
-    mode: WeightedMode<'_>,
-    nsamp: usize,
-) -> (Vec<Vec<Vec<f64>>>, Vec<bool>, Vec<Vec<usize>>) {
-    let total = kids.len();
-    let n_threads = rayon::current_num_threads().max(1);
-    let stripe = (nsamp + n_threads - 1) / n_threads;
-
-    // node_sums[tid][node][local_sample]
-    let mut node_sums: Vec<Vec<Vec<f64>>> = (0..n_threads)
-        .map(|tid| {
-            let start = tid * stripe;
-            if start >= nsamp {
-                Vec::new()
-            } else {
-                let end = (start + stripe).min(nsamp);
-                vec![vec![0.0f64; end - start]; total]
-            }
-        })
-        .collect();
-
-    // any_mass_per_tid[tid][node] — node had any positive mass in this stripe
-    let mut any_mass_per_tid: Vec<Vec<bool>> = (0..n_threads)
-        .map(|tid| {
-            let start = tid * stripe;
-            if start >= nsamp { Vec::new() } else { vec![false; total] }
-        })
-        .collect();
-
-    // IMPORTANT: consume the flags slice one-by-one to give each task a unique &mut
-    let mut flags_slice: &mut [Vec<bool>] = any_mass_per_tid.as_mut_slice();
-
-    rayon::scope(|scope| {
-        for (tid, sums_t) in node_sums.iter_mut().enumerate() {
-            let stripe_start = tid * stripe;
-            if stripe_start >= nsamp { break; }
-            let stripe_end = (stripe_start + stripe).min(nsamp);
-            let wloc = stripe_end - stripe_start;
-
-            // unique &mut to this tid's flags (fixes E0499)
-            let (touched_t, rest) = flags_slice.split_first_mut().expect("flags_slice underflow");
-            flags_slice = rest;
-
-            match mode {
-                WeightedMode::Dense { counts, col_sums } => {
-                    scope.spawn(move |_| {
-                        // scatter leaves (relative abundances)
-                        for (r, lopt) in row2leaf.iter().enumerate() {
-                            if let Some(leaf_pos) = lopt {
-                                let v = leaf_ids[*leaf_pos];
-                                let sv = &mut sums_t[v];
-                                for s in stripe_start..stripe_end {
-                                    let denom = col_sums[s];
-                                    if denom > 0.0 {
-                                        let val = counts[r][s] / denom;
-                                        if val > 0.0 {
-                                            sv[s - stripe_start] += val;
-                                            touched_t[v] = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // bottom-up aggregate within stripe and flag propagation
-                        for &v in post {
-                            for &c in &kids[v] {
-                                let (left, right) =
-                                    if c <= v { sums_t.split_at_mut(v) } else { sums_t.split_at_mut(c) };
-                                let (sv, sc) = if c <= v { (&mut right[0], &left[c]) }
-                                               else        { (&mut left[v],  &right[0]) };
-                                for k in 0..wloc { sv[k] += sc[k]; }
-                                if touched_t[c] { touched_t[v] = true; }
-                            }
-                        }
-                    });
-                }
-                WeightedMode::Csr { indptr, indices, data, col_sums } => {
-                    scope.spawn(move |_| {
-                        // scatter leaves (CSR to relative abundances)
-                        for r in 0..row2leaf.len() {
-                            if let Some(leaf_pos) = row2leaf[r] {
-                                let v = leaf_ids[leaf_pos];
-                                let sv = &mut sums_t[v];
-                                let start = indptr[r] as usize;
-                                let stop  = indptr[r + 1] as usize;
-                                for k in start..stop {
-                                    let s = indices[k] as usize;
-                                    if s < stripe_start || s >= stripe_end { continue; }
-                                    let denom = col_sums[s];
-                                    if denom > 0.0 {
-                                        let val = data[k] / denom;
-                                        if val > 0.0 {
-                                            sv[s - stripe_start] += val;
-                                            touched_t[v] = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // bottom-up aggregate within stripe + flag propagation
-                        for &v in post {
-                            for &c in &kids[v] {
-                                let (left, right) =
-                                    if c <= v { sums_t.split_at_mut(v) } else { sums_t.split_at_mut(c) };
-                                let (sv, sc) = if c <= v { (&mut right[0], &left[c]) }
-                                               else        { (&mut left[v],  &right[0]) };
-                                for k in 0..wloc { sv[k] += sc[k]; }
-                                if touched_t[c] { touched_t[v] = true; }
-                            }
-                        }
-                    });
-                }
-            }
-        }
-    });
-
-    // OR-reduce to global has_mass
-    let mut has_mass = vec![false; total];
-    for flags in &any_mass_per_tid {
-        for (v, &f) in flags.iter().enumerate() {
-            if f { has_mass[v] = true; }
-        }
-    }
-
-    // Compact per-tid flags → lists of nodes touched in that stripe
-    let mut edges_touched_per_tid: Vec<Vec<usize>> = Vec::with_capacity(n_threads);
-    for flags in any_mass_per_tid.into_iter() {
-        if flags.is_empty() {
-            edges_touched_per_tid.push(Vec::new());
-            continue;
-        }
-        // Heuristic reserve: ~total/64
-        let mut lst = Vec::with_capacity(total >> 6);
-        for (v, f) in flags.into_iter().enumerate() {
-            if f { lst.push(v); }
-        }
-        edges_touched_per_tid.push(lst);
-    }
-
-    (node_sums, has_mass, edges_touched_per_tid)
-}
-
+// Unweighted, build sketches without node_bits (leaf→root OR per sample)
 fn build_sketches(
     tree_file: &str,
     input_tsv: Option<&str>,
@@ -738,7 +482,7 @@ fn build_sketches(
     ers_l: u64,
     seed: u64,
 ) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
-    // Load tree
+    // Load tree & balanced parens
     let raw = std::fs::read_to_string(tree_file).context("read newick")?;
     let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
     let t: NwkTree = one_from_string(&sanitized).context("parse newick (sanitized)")?;
@@ -747,7 +491,7 @@ fn build_sketches(
     let bp: BalancedParensTree<LabelVec<()>, SparseOneNnd> =
         BalancedParensTree::new_builder(trav, LabelVec::<()>::new()).build_all();
 
-    // Leaves and mapping name to leaf index
+    // Leaves & mapping name→leaf
     let mut leaf_ids = Vec::<usize>::new();
     let mut leaf_nm = Vec::<String>::new();
     for n in t.nodes() {
@@ -766,81 +510,181 @@ fn build_sketches(
         .map(|(i, n)| (n.as_str(), i))
         .collect();
 
-    // children & postorder
+    // children, post (unused here but harmless), parents, lengths
     let total = bp.len() + 1;
-    lens_f32.resize(total, 0.0);
     let mut kids = vec![Vec::<usize>::new(); total];
     let mut post = Vec::<usize>::with_capacity(total);
+    lens_f32.resize(total, 0.0);
     collect_children::<SparseOneNnd>(&bp.root(), &mut kids, &mut post);
+    let parent = compute_parent(total, &kids);
+    let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
 
-    // Read table/biom and build leaf masks
-    let (_taxa, mut samples, masks) = if let Some(tsv) = input_tsv {
+    // Build per-sample presence sets (emit (edge_id, ℓ_v) when present)
+    let (samples, wsets_by_vid): (Vec<String>, Vec<Vec<(u64, f64)>>) = if let Some(tsv) = input_tsv
+    {
+        // TSV dense (presence/absence)
         let (taxa, samples, mat) = read_table(tsv)?;
         let nsamp = samples.len();
-        let mut masks: Vec<BitVec<u8, Lsb0>> = (0..nsamp)
-            .map(|_| BitVec::repeat(false, leaf_ids.len()))
+        let row2leaf: Vec<Option<usize>> = taxa
+            .iter()
+            .map(|n| t2leaf.get(n.as_str()).copied())
             .collect();
-        for (ti, tax) in taxa.iter().enumerate() {
-            if let Some(&leaf) = t2leaf.get(tax.as_str()) {
-                for (s, bits) in masks.iter_mut().enumerate() {
-                    if mat[ti][s] > 0.0 {
-                        bits.set(leaf, true);
+
+        let total_usize = total;
+        let lens_ref = &lens;
+        let leaf_ids_ref = &leaf_ids;
+
+        info!("building per-sample presence sets from TSV …");
+        let t0 = Instant::now();
+
+        let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
+        wsets.par_iter_mut().enumerate().for_each(|(s, out)| {
+            // per-sample scratch: 0/1 presence over nodes + list of touched nodes
+            let mut seen = vec![0u8; total_usize];
+            let mut touched: Vec<usize> = Vec::new();
+
+            // scan taxa rows for this sample
+            for (r, lopt) in row2leaf.iter().enumerate() {
+                if mat[r][s] <= 0.0 {
+                    continue;
+                }
+                let lp = match lopt {
+                    Some(v) => *v,
+                    None => continue,
+                };
+                let mut v = leaf_ids_ref[lp];
+
+                // walk to root until we hit an already-seen node
+                loop {
+                    if seen[v] != 0 {
+                        break;
                     }
+                    seen[v] = 1;
+                    touched.push(v);
+                    let p = parent[v];
+                    if p == usize::MAX {
+                        break;
+                    }
+                    v = p;
                 }
             }
-        }
-        (taxa, samples, masks)
+
+            out.reserve(touched.len());
+            for &v in &touched {
+                let lw = lens_ref[v];
+                if lw > 0.0 {
+                    out.push((v as u64, lw));
+                } // unweighted: weight = branch length
+            }
+        });
+
+        info!("built presence sets in {} ms", t0.elapsed().as_millis());
+        (samples, wsets)
     } else {
+        // BIOM (CSR) → CSC for fast per-sample traversal
         let biom = biom_h5.expect("biom path required when TSV not provided");
         let (taxa, samples, indptr, indices) = read_biom_csr(biom)?;
         let nsamp = samples.len();
-        let mut masks: Vec<BitVec<u8, Lsb0>> = (0..nsamp)
-            .map(|_| BitVec::repeat(false, leaf_ids.len()))
+        let row2leaf: Vec<Option<usize>> = taxa
+            .iter()
+            .map(|n| t2leaf.get(n.as_str()).copied())
             .collect();
-        for row in 0..taxa.len() {
-            if let Some(&leaf) = t2leaf.get(taxa[row].as_str()) {
-                let start = indptr[row] as usize;
-                let stop = indptr[row + 1] as usize;
-                for k in start..stop {
-                    let s = indices[k] as usize;
-                    masks[s].set(leaf, true);
+
+        // synthesize a data[] of ones (presence) and transpose
+        info!("transposing BIOM CSR→CSC …");
+        let ones: Vec<f64> = vec![1.0; indices.len()];
+        let (colptr, rowind, _vals) = csr_to_csc(&indptr, &indices, &ones, nsamp);
+
+        let total_usize = total;
+        let lens_ref = &lens;
+        let leaf_ids_ref = &leaf_ids;
+
+        info!("building per-sample presence sets from BIOM (CSC) …");
+        let t0 = Instant::now();
+
+        let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
+        wsets.par_iter_mut().enumerate().for_each(|(s, out)| {
+            let mut seen = vec![0u8; total_usize];
+            let mut touched: Vec<usize> = Vec::new();
+
+            // iterate only the nonzeros in column s
+            for kk in colptr[s]..colptr[s + 1] {
+                let r = rowind[kk];
+                let lp = match row2leaf[r] {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let mut v = leaf_ids_ref[lp];
+
+                loop {
+                    if seen[v] != 0 {
+                        break;
+                    }
+                    seen[v] = 1;
+                    touched.push(v);
+                    let p = parent[v];
+                    if p == usize::MAX {
+                        break;
+                    }
+                    v = p;
                 }
             }
-        }
-        (taxa, samples, masks)
+
+            out.reserve(touched.len());
+            for &v in &touched {
+                let lw = lens_ref[v];
+                if lw > 0.0 {
+                    out.push((v as u64, lw));
+                }
+            }
+        });
+
+        info!("built presence sets in {} ms", t0.elapsed().as_millis());
+        (samples, wsets)
     };
 
-    let nsamp0 = samples.len();
-    info!(
-        "nodes = {}  leaves = {}  samples = {}",
-        total,
-        leaf_ids.len(),
-        nsamp0
-    );
-
-    // node_bits[v]: bitset over samples
-    let t0 = Instant::now();
-    let node_bits = build_node_bits(&post, &kids, &leaf_ids, &masks, total);
-    info!("node_bits built in {} ms", t0.elapsed().as_millis());
-    // masks is not need after obtaining node_bits
-    drop(masks);
-    // Positive-length edges and weights
-    let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
-
-    // Keep only edges with ℓ_e > 0 and present in at least one sample
-    let active_edges: Vec<usize> = (0..total)
-        .filter(|&v| lens[v] > 0.0 && node_bits[v].any())
-        .collect();
-
-    if active_edges.is_empty() {
-        anyhow::bail!("No active edges: no positive-length branch is present in any sample.");
+    let nsamp = samples.len();
+    if nsamp < 2 {
+        anyhow::bail!("Fewer than 2 samples; nothing to compare.");
     }
 
-    // Dense remap old edge id -> [0..active_edges.len())
+    // Drop empty samples
+    let mut kept_ws = Vec::with_capacity(nsamp);
+    let mut kept_names = Vec::with_capacity(nsamp);
+    for (i, ws) in wsets_by_vid.into_iter().enumerate() {
+        if !ws.is_empty() {
+            kept_ws.push(ws);
+            kept_names.push(samples[i].clone());
+        }
+    }
+    let mut wsets = kept_ws;
+    let samples = kept_names;
+    if samples.len() < 2 {
+        anyhow::bail!("Fewer than 2 non-empty samples after filtering; nothing to compare.");
+    }
+
+    // Compact to active edge id space
+    let mut used = vec![false; total];
+    for ws in &wsets {
+        for &(vid, _) in ws {
+            used[vid as usize] = true;
+        }
+    }
+    let active_edges: Vec<usize> = (0..total).filter(|&v| used[v] && lens[v] > 0.0).collect();
+    if active_edges.is_empty() {
+        anyhow::bail!("No active edges after presence accumulation.");
+    }
+
     let mut id_map = vec![usize::MAX; total];
     for (new_id, &v) in active_edges.iter().enumerate() {
         id_map[v] = new_id;
     }
+    for ws in &mut wsets {
+        for (id, _) in ws.iter_mut() {
+            *id = id_map[*id as usize] as u64;
+        }
+    }
+
     info!(
         "active edges = {} (from {} total, {} leaves)",
         active_edges.len(),
@@ -848,108 +692,80 @@ fn build_sketches(
         leaf_ids.len()
     );
 
-    // Build weighted sets per sample on active edges
-    let t1 = Instant::now();
-    let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); samples.len()];
-    for &v in &active_edges {
-        let w = lens[v];
-        let words = node_bits[v].as_raw_slice();
-        for (wi, &w0) in words.iter().enumerate() {
-            let mut word = w0;
-            while word != 0 {
-                let b = word.trailing_zeros() as usize;
-                let s = (wi << 6) + b;
-                if s < wsets.len() {
-                    wsets[s].push((id_map[v] as u64, w));
-                }
-                word &= word - 1;
-            }
-        }
-    }
-    info!(
-        "built per-sample weighted sets in {} ms",
-        t1.elapsed().as_millis()
-    );
-    // keep memory tight
-    drop(node_bits);
-    drop(kids);
-    drop(post);
-    drop(leaf_ids);
-    drop(t2leaf);
-    drop(id_map);
-
-    // Drop empty samples
-    let empty_idx: Vec<usize> = wsets
-        .iter()
-        .enumerate()
-        .filter_map(|(i, ws)| if ws.is_empty() { Some(i) } else { None })
-        .collect();
-
-    if !empty_idx.is_empty() {
-        let show = empty_idx.len().min(20);
-        for &s in empty_idx.iter().take(show) {
-            warn!(
-                "Dropping sample '{}' (no covered branches; all zeros).",
-                samples[s]
-            );
-        }
-        if empty_idx.len() > show {
-            warn!("... and {} more empty samples.", empty_idx.len() - show);
-        }
-        // Filter wsets and sample names in lockstep
-        let mut kept_ws = Vec::with_capacity(wsets.len() - empty_idx.len());
-        let mut kept_names = Vec::with_capacity(samples.len() - empty_idx.len());
-        for (i, ws) in wsets.into_iter().enumerate() {
-            if !ws.is_empty() {
-                kept_ws.push(ws);
-                kept_names.push(samples[i].clone());
-            }
-        }
-        wsets = kept_ws;
-        samples = kept_names;
-        info!("Kept {} non-empty samples.", samples.len());
-        if samples.len() < 2 {
-            anyhow::bail!("Fewer than 2 non-empty samples after filtering; nothing to compare.");
-        }
-    }
+    // Sketch (DMH or ERS with tight f64 caps)
     info!("sketching starting...");
-    // Sketch per sample in parallel
     let mut rng = mt_from_seed(seed);
     let sketches_u64: Vec<Vec<u64>> = if method == "dmh" {
         let dmh = DartMinHash::new_mt(&mut rng, k as u64);
         wsets
             .par_iter()
-            .map(|ws| {
-                dmh.sketch(ws)
-                    .into_iter()
-                    .map(|(id, _rank)| id)
-                    .collect::<Vec<u64>>()
-            })
+            .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
             .collect()
     } else {
-        // Tight real-valued caps for ERS: m_i = ℓ_v for each active edge.
-        // (Unweighted presence uses weight ℓ_v when present, so the per-dim max is ℓ_v.)
-        let mut caps = vec![0.0f64; active_edges.len()];
-        for (new_id, &v) in active_edges.iter().enumerate() {
-            caps[new_id] = lens[v]; // tight cap
-        }
-
+        // For unweighted presence, per-dim max weight is exactly ℓ_v
+        let caps: Vec<f64> = active_edges.iter().map(|&v| lens[v]).collect();
         let ers = ErsWmh::new_mt(&mut rng, &caps, k as u64);
-
         wsets
             .par_iter()
             .map(|ws| {
                 ers.sketch(ws, Some(ers_l))
-                .into_iter()
-                .map(|(id, _rank)| id)
-                .collect::<Vec<u64>>()
+                    .into_iter()
+                    .map(|(id, _rank)| id)
+                    .collect()
             })
             .collect()
-
     };
     info!("sketching done.");
-    // Everything heavy (tree structures, masks, node_bits, wsets, etc.) drops here.
+
     Ok((samples, sketches_u64))
+}
+
+/// Build parent pointers from children lists. Root will have usize::MAX.
+fn compute_parent(total: usize, kids: &[Vec<usize>]) -> Vec<usize> {
+    let mut parent = vec![usize::MAX; total];
+    for v in 0..total {
+        for &c in &kids[v] {
+            parent[c] = v;
+        }
+    }
+    parent
+}
+
+/// CSR (rows=features, cols=samples)to CSC (cols=samples) for fast per-sample scans.
+/// Returns (colptr, rowind, vals) with colptr.len()==nsamp+1, rowind/vals.len()==nnz.
+fn csr_to_csc(
+    indptr: &[u32],
+    indices: &[u32],
+    data: &[f64],
+    nsamp: usize,
+) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+    let nnz = data.len();
+    let mut col_counts = vec![0usize; nsamp];
+    for &sidx in indices {
+        col_counts[sidx as usize] += 1;
+    }
+
+    let mut colptr = vec![0usize; nsamp + 1];
+    for i in 0..nsamp {
+        colptr[i + 1] = colptr[i] + col_counts[i];
+    }
+
+    let mut cur = colptr.clone();
+    let mut rowind = vec![0usize; nnz];
+    let mut vals = vec![0f64; nnz];
+
+    for r in 0..(indptr.len() - 1) {
+        let a = indptr[r] as usize;
+        let b = indptr[r + 1] as usize;
+        for k in a..b {
+            let s = indices[k] as usize;
+            let dst = cur[s];
+            rowind[dst] = r;
+            vals[dst] = data[k];
+            cur[s] += 1;
+        }
+    }
+    (colptr, rowind, vals)
 }
 
 // Weighted, build sketches for normalized weighted UniFrac
@@ -962,7 +778,7 @@ fn build_sketches_weighted(
     ers_l: u64,
     seed: u64,
 ) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
-    // Load tree/topology (same as unweighted)
+    // Load tree & balanced parens
     let raw = std::fs::read_to_string(tree_file).context("read newick")?;
     let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
     let t: NwkTree = one_from_string(&sanitized).context("parse newick (sanitized)")?;
@@ -971,7 +787,7 @@ fn build_sketches_weighted(
     let bp: BalancedParensTree<LabelVec<()>, SparseOneNnd> =
         BalancedParensTree::new_builder(trav, LabelVec::<()>::new()).build_all();
 
-    // Leaves & name→leaf map
+    // Leaves & mapping name→leaf-ordinal, and leaf node ids
     let mut leaf_ids = Vec::<usize>::new();
     let mut leaf_nm = Vec::<String>::new();
     for n in t.nodes() {
@@ -997,8 +813,15 @@ fn build_sketches_weighted(
     lens_f32.resize(total, 0.0);
     collect_children::<SparseOneNnd>(&bp.root(), &mut kids, &mut post);
 
-    // Read table/biom for counts/values
-    let (_taxa, samples, _row2leaf, node_sums, has_mass, edges_touched_per_tid) = if let Some(tsv) = input_tsv {
+    // parent pointers for leaf→root accumulation
+    let parent = compute_parent(total, &kids);
+    let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
+    info!("nodes = {}  leaves = {}", total, leaf_ids.len());
+
+    // Build per-sample weighted sets
+    let (samples, wsets_by_vid): (Vec<String>, Vec<Vec<(u64, f64)>>) = if let Some(tsv) = input_tsv
+    {
+        // TSV (dense)
         let (taxa, samples, counts) = read_table_counts(tsv)?;
         let nsamp = samples.len();
         let mut col_sums = vec![0.0f64; nsamp];
@@ -1012,131 +835,208 @@ fn build_sketches_weighted(
             .map(|n| t2leaf.get(n.as_str()).copied())
             .collect();
 
+        let total_usize = total;
+        let lens_ref = &lens;
+        let leaf_ids_ref = &leaf_ids;
+        info!("building per-sample weighted sets from TSV (dense) …");
         let t0 = Instant::now();
-        let (ns, has_mass, edges_touched_per_tid) = build_node_sums_weighted(
-            &post, &kids, &leaf_ids, &row2leaf,
-            WeightedMode::Dense { counts: &counts, col_sums: &col_sums },
-            nsamp
-        );
-        info!("node_sums built in {} ms", t0.elapsed().as_millis());
-        (taxa, samples, row2leaf, ns, has_mass, edges_touched_per_tid)
-    } else {
-        let biom = biom_h5.expect("biom path required when TSV not provided");
-        let (taxa, samples, indptr, indices, data) = read_biom_csr_values(biom)?;
-        let nsamp = samples.len();
-        let mut col_sums = vec![0.0f64; nsamp];
-        for r in 0..taxa.len() {
-            let a = indptr[r] as usize;
-            let b = indptr[r + 1] as usize;
-            for k2 in a..b {
-                col_sums[indices[k2] as usize] += data[k2];
+
+        // One sparse weighted set per sample
+        let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
+        wsets.par_iter_mut().enumerate().for_each(|(s, out)| {
+            let denom = col_sums[s];
+            if denom == 0.0 {
+                return;
             }
-        }
-        let row2leaf: Vec<Option<usize>> = taxa
-            .iter()
-            .map(|n| t2leaf.get(n.as_str()).copied())
-            .collect();
-        let t0 = Instant::now();
-        let (ns, has_mass, edges_touched_per_tid) = build_node_sums_weighted(
-            &post, &kids, &leaf_ids, &row2leaf,
-            WeightedMode::Csr { indptr: &indptr, indices: &indices, data: &data, col_sums: &col_sums },
-            nsamp
-        );
-        info!("node_sums built in {} ms", t0.elapsed().as_millis());
-        (taxa, samples, row2leaf, ns, has_mass, edges_touched_per_tid)
-    };
 
-    let nsamp = samples.len();
-    let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
-    info!("nodes = {}  leaves = {}  samples = {}", total, leaf_ids.len(), nsamp);
+            // per-worker scratch: accumulator over nodes + touched list
+            let mut acc = vec![0f32; total_usize];
+            let mut touched: Vec<usize> = Vec::new();
 
-    // has_mass already computed in build_node_sums_weighted
-    let active_edges: Vec<usize> =
-        (0..total).filter(|&v| lens[v] > 0.0 && has_mass[v]).collect();
+            // scatter this sample’s rows at leaves, then climb to root
+            for (r, lopt) in row2leaf.iter().enumerate() {
+                let lp = match lopt {
+                    Some(v) => *v,
+                    None => continue,
+                };
+                let val = counts[r][s];
+                if val <= 0.0 {
+                    continue;
+                }
+                let inc = (val / denom) as f32;
+                if inc == 0.0 {
+                    continue;
+                }
 
-    if active_edges.is_empty() {
-        anyhow::bail!("No active edges for weighted case.");
-    }
+                // leaf node id
+                let mut v = leaf_ids_ref[lp];
 
-    // Dense ID remap  old v -> [0..active)
-    let mut id_map = vec![usize::MAX; total];
-    for (new_id, &v) in active_edges.iter().enumerate() {
-        id_map[v] = new_id;
-    }
-    info!(
-        "active edges = {} (from {} total, {} leaves)",
-        active_edges.len(), total, leaf_ids.len()
-    );
-    // Build weighted sets per sample: z_v(s) = ℓ_v * A_v[s]
-    let n_threads = rayon::current_num_threads().max(1);
-    let stripe = (nsamp + n_threads - 1) / n_threads;
-    let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-
-    let t1 = Instant::now();
-
-    wsets
-        .as_mut_slice()
-        .par_chunks_mut(stripe)
-        .enumerate()
-        .for_each(|(tid, target)| {
-            if tid >= node_sums.len() || node_sums[tid].is_empty() { return; }
-            let wloc = target.len(); // local samples in this stripe
-            let touched = &edges_touched_per_tid[tid];
-
-            // optional pre-reserve to reduce reallocations (cheap since touched is small)
-            let mut counts = vec![0usize; wloc];
-            for &v in touched {
-                let id_new = id_map[v];
-                if id_new == usize::MAX { continue; } // not active (ℓ==0 or never mass globally)
-                let row = &node_sums[tid][v];
-                debug_assert_eq!(row.len(), wloc);
-                for (off, &a) in row.iter().enumerate() {
-                    if a > 0.0 { counts[off] += 1; }
+                loop {
+                    if acc[v] == 0.0 {
+                        touched.push(v);
+                    }
+                    acc[v] += inc;
+                    let p = parent[v];
+                    if p == usize::MAX {
+                        break;
+                    }
+                    v = p;
                 }
             }
-            for (off, c) in counts.into_iter().enumerate() {
-                if c != 0 { target[off].reserve(c); }
-            }
 
-            // push only edges that had mass in this stripe
-            for &v in touched {
-                let id_new = id_map[v];
-                if id_new == usize::MAX { continue; } // filter to active_edges
-                let lw = lens[v];
-                let id = id_new as u64;
-                let row = &node_sums[tid][v];
-                for (off, &a) in row.iter().enumerate() {
-                    if a > 0.0 {
-                        target[off].push((id, lw * a));
+            // Emit (edge_id=vid, weight = ℓ_v * A_v[s]) using original node ids
+            out.reserve(touched.len());
+            for &v in &touched {
+                let a = acc[v] as f64;
+                if a > 0.0 {
+                    let lw = lens_ref[v];
+                    if lw > 0.0 {
+                        out.push((v as u64, lw * a));
                     }
                 }
             }
         });
-    info!("built per-sample weighted sets in {} ms", t1.elapsed().as_millis());
 
-    drop(node_sums);
-    drop(kids);
-    drop(post);
-    drop(leaf_ids);
-    drop(t2leaf);
-    drop(id_map);
+        info!("built weighted sets in {} ms", t0.elapsed().as_millis());
+        (samples, wsets)
+    } else {
+        // BIOM (CSR) to CSC then per-sample scatter
+        let biom = biom_h5.expect("biom path required when TSV not provided");
+        let (taxa, samples, indptr, indices, data) = read_biom_csr_values(biom)?;
+        let nsamp = samples.len();
 
-    // Drop empty samples (no covered branches)
+        // column sums
+        let mut col_sums = vec![0.0f64; nsamp];
+        for r in 0..taxa.len() {
+            let a = indptr[r] as usize;
+            let b = indptr[r + 1] as usize;
+            for k in a..b {
+                col_sums[indices[k] as usize] += data[k];
+            }
+        }
+        // row to leaf-ordinal
+        let row2leaf: Vec<Option<usize>> = taxa
+            .iter()
+            .map(|n| t2leaf.get(n.as_str()).copied())
+            .collect();
+
+        // transpose to CSC for fast per-sample scans
+        info!("transposing BIOM CSR→CSC …");
+        let (colptr, rowind, vals) = csr_to_csc(&indptr, &indices, &data, nsamp);
+
+        let total_usize = total;
+        let lens_ref = &lens;
+        let leaf_ids_ref = &leaf_ids;
+
+        info!("building per-sample weighted sets from BIOM (CSC) …");
+        let t0 = Instant::now();
+
+        let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
+        wsets.par_iter_mut().enumerate().for_each(|(s, out)| {
+            let denom = col_sums[s];
+            if denom == 0.0 {
+                return;
+            }
+
+            // per-worker scratch
+            let mut acc = vec![0f32; total_usize];
+            let mut touched: Vec<usize> = Vec::new();
+
+            // iterate only nnz in column s
+            for kk in colptr[s]..colptr[s + 1] {
+                let r = rowind[kk];
+                let lp = match row2leaf[r] {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let mut v = leaf_ids_ref[lp];
+
+                let inc = (vals[kk] / denom) as f32;
+                if inc == 0.0 {
+                    continue;
+                }
+
+                loop {
+                    if acc[v] == 0.0 {
+                        touched.push(v);
+                    }
+                    acc[v] += inc;
+                    let p = parent[v];
+                    if p == usize::MAX {
+                        break;
+                    }
+                    v = p;
+                }
+            }
+
+            out.reserve(touched.len());
+            for &v in &touched {
+                let a = acc[v] as f64;
+                if a > 0.0 {
+                    let lw = lens_ref[v];
+                    if lw > 0.0 {
+                        out.push((v as u64, lw * a));
+                    }
+                }
+            }
+        });
+
+        info!("built weighted sets in {} ms", t0.elapsed().as_millis());
+        (samples, wsets)
+    };
+
+    let nsamp = samples.len();
+    if nsamp < 2 {
+        anyhow::bail!("Fewer than 2 samples; nothing to compare.");
+    }
+
+    // Drop empty samples
     let mut kept_ws = Vec::with_capacity(nsamp);
     let mut kept_names = Vec::with_capacity(nsamp);
-    for (i, ws) in wsets.into_iter().enumerate() {
+    for (i, ws) in wsets_by_vid.into_iter().enumerate() {
         if !ws.is_empty() {
             kept_ws.push(ws);
             kept_names.push(samples[i].clone());
         }
     }
-    let wsets = kept_ws;
+    let mut wsets = kept_ws;
     let samples = kept_names;
     if samples.len() < 2 {
         anyhow::bail!("Fewer than 2 non-empty samples; nothing to compare.");
     }
+
+    // Compact to active edge id space
+    let mut used = vec![false; total];
+    for ws in &wsets {
+        for &(vid, _) in ws {
+            used[vid as usize] = true;
+        }
+    }
+    let active_edges: Vec<usize> = (0..total).filter(|&v| used[v] && lens[v] > 0.0).collect();
+
+    if active_edges.is_empty() {
+        anyhow::bail!("No active edges for weighted case.");
+    }
+
+    let mut id_map = vec![usize::MAX; total];
+    for (new_id, &v) in active_edges.iter().enumerate() {
+        id_map[v] = new_id;
+    }
+    for ws in &mut wsets {
+        for (id, _) in ws.iter_mut() {
+            *id = id_map[*id as usize] as u64;
+        }
+    }
+
+    info!(
+        "active edges = {} (from {} total, {} leaves)",
+        active_edges.len(),
+        total,
+        leaf_ids.len()
+    );
+
+    // Sketch (DMH or ERS)
     info!("sketching starting...");
-    // Sketch (DMH or ERS).  IMPORTANT: ERS `m_per_dim` must align with *dense* id space.
     let mut rng = mt_from_seed(seed);
     let sketches_u64: Vec<Vec<u64>> = if method == "dmh" {
         let dmh = DartMinHash::new_mt(&mut rng, k as u64);
@@ -1145,28 +1045,30 @@ fn build_sketches_weighted(
             .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
             .collect()
     } else {
-        // Tight real-valued caps: m_i = max_s (ℓ_v * A_v[s]) computed from wsets.
+        // tight caps: m_i = max_s (ℓ_v * A_v[s]) over samples for that edge
         let mut max_w = vec![0.0f64; active_edges.len()];
         for ws in &wsets {
             for &(id, w) in ws {
                 let idx = id as usize;
-                if w > max_w[idx] { max_w[idx] = w; }
+                if w > max_w[idx] {
+                    max_w[idx] = w;
+                }
             }
         }
-        // Directly use the tight f64 maxima as caps (no ceil, no max(1))
         let caps = max_w;
         let ers = ErsWmh::new_mt(&mut rng, &caps, k as u64);
         wsets
             .par_iter()
             .map(|ws| {
                 ers.sketch(ws, Some(ers_l))
-                .into_iter()
-                .map(|(id, _rank)| id)
-                .collect::<Vec<u64>>()
+                    .into_iter()
+                    .map(|(id, _rank)| id)
+                    .collect()
             })
             .collect()
     };
     info!("sketching done.");
+
     Ok((samples, sketches_u64))
 }
 
