@@ -14,7 +14,7 @@ This crate provides an efficient implementation of the newly invented ***DartUni
 
 
 ## Quick install and usage
-
+On Linux or MacOS
 ```bash
 conda install -c bioconda -c conda-forge dartunifrac
 ```
