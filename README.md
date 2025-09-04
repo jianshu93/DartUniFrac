@@ -1,9 +1,31 @@
+[![install with bioconda](https://img.shields.io/badge/install%20with-bioconda-brightgreen.svg?style=flat)](http://bioconda.github.io/recipes/dartunifrac/README.html)
+![](https://anaconda.org/bioconda/dartunifrac/badges/license.svg)
+![](https://anaconda.org/bioconda/dartunifrac/badges/version.svg)
+![](https://anaconda.org/bioconda/dartunifrac/badges/latest_release_relative_date.svg)
+![](https://anaconda.org/bioconda/gsearch/badges/platforms.svg)
+[![install with conda](https://anaconda.org/bioconda/dartunifrac/badges/downloads.svg)](https://anaconda.org/bioconda/dartunifrac)
+
 <div align="center">
   <img width="30%" src ="DartUniFrac_logo.png">
 </div>
 
 # DartUniFrac: Approximate UniFrac via Weighted MinHash
 This crate provides an efficient implementation of the newly invented ***DartUniFrac*** algorithm for large-scale [UniFrac](https://en.wikipedia.org/wiki/UniFrac) computation (weighted and unweighted). We named this new algorithm DartUniFrac because the key step is to use DartMinHash or Efficient Rejection Sampling (or ERS) on branches and the DartMinHash/ERS is about "Among the first r darts thrown, return those hitting $x_i$". 
+
+
+## Quick install and usage
+
+```bash
+conda install -c bioconda -c conda-forge dartunifrac
+```
+Run on example data
+```bash
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/GWMC_16S_otutab.biom
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/GWMC_rep_seqs_all.tre
+dartunifrac -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom -m dmh -s 3072 -o unifrac_unweighted.tsv
+dartunifrac -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted -m dmh -s 3072 -o unifrac_weighted.tsv
+
+```
 
 ## Overview
 
@@ -200,6 +222,14 @@ Site constraints        0       0
 
 ```
 
+the ordination.txt file can be imported into qiime2 like this:
+
+
+```bash
+qiime tools import --input-path ordination.txt --type 'PCoAResults' --output-path pcoa.qza
+
+```
+You can then visulize it via qiime emperor plot. 
 
 ## Benchmark
 We use Striped UniFrac algorithm as the ground truth, which is an exact and efficient algorithm for large number of samples. A pure Rust implementaion, as a supporting crate for this one, can be found [here](https://github.com/jianshu93/unifrac_bp), also included as a binary in this crate.
