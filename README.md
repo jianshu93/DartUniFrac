@@ -33,7 +33,7 @@ dartunifrac -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted -m d
 UniFrac (unweighted) can be simply described as unique branches that differ two samples over shared branches (see original UniFrac paper [here](https://journals.asm.org/doi/full/10.1128/aem.71.12.8228-8235.2005)). Here, each sample has some taxa (or features) that are in the phylogenetic tree. 
 
 <div align="center">
-  <img width="70%" src ="unweighted_unifrac_schematic.png">
+  <img width="30%" src ="unweighted_unifrac_schematic.png">
 </div>
 
 If we reformulate UniFrac in math, it can be descriped below:
@@ -61,7 +61,7 @@ In summary, unweighted UniFrac distance can be considered as weighted Jaccard di
 
 ### Weighted Unifrac
 <div align="center">
-  <img width="40%" src ="weighted_unifrac_schematic.png">
+  <img width="60%" src ="weighted_unifrac_schematic.png">
 </div>
 
 Weighted UniFrac measuers the mass accumulate (taxa weight) over branches(see [here](https://journals.asm.org/doi/full/10.1128/aem.01996-06)). Here, Weighted UniFrac is the normalized weighted UniFrac. A similar idea can be used to derive that Weighted UniFrac is a simple transformation from weighted Jaccard
