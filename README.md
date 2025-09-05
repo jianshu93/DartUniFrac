@@ -25,6 +25,10 @@ wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/GWMC_rep_
 dartunifrac -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom -m dmh -s 3072 -o unifrac_unweighted.tsv
 dartunifrac -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted -m dmh -s 3072 -o unifrac_weighted.tsv
 
+
+### obtain the truth via striped unifrac algorithm, extremely slow at million-sample scale
+striped_unifrac -t ./GWMC_rep_seqs_all.tre -m ./GWMC_16S_otutab.biom --weighted -o unifrac_weighted_striped.tsv
+
 ```
 
 ## Overview
@@ -111,9 +115,9 @@ git clone https://github.com/jianshu93/DartUniFrac.git
 cd DartUniFrac
 #### You must have CMake installed to compile HDF5 from source. This is for BIOM format input. You also need zstd installed and library files in system path for compression.
 ### Linux
-cargo build --release --features intel-mkl-static
+cargo build --release --features intel-mkl-static,stdsimd
 ### macos
-cargo build --release --features macos-accelerate
+cargo build --release --features macos-accelerate,stdsimd
 ```
 
 ## Usage

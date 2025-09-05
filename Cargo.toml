@@ -46,3 +46,4 @@ openblas-system = ["fpcoa/openblas-system"]
 openblas-static = ["fpcoa/openblas-static"]
 macos-accelerate = ["fpcoa/macos-accelerate"]
 
+stdsimd = []
