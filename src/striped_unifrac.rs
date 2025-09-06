@@ -750,7 +750,7 @@ fn build_stripe_csr(
 }
 
 #[cfg(feature = "stdsimd")]
-fn simd_accum_block_rows_f32<const LANES: usize>(
+fn simd_accum_block_rows<const LANES: usize>(
     num: &mut [f64],
     den: &mut [f64],
     bw: usize,
@@ -809,7 +809,7 @@ fn simd_accum_block_rows_f32<const LANES: usize>(
 
 /// Scalar accumulation (used when stdsimd disabled).
 #[cfg(not(feature = "stdsimd"))]
-fn simd_accum_block_rows_f32<const LANES: usize>(
+fn simd_accum_block_rows<const LANES: usize>(
     num: &mut [f64],
     den: &mut [f64],
     bw: usize,
@@ -967,7 +967,7 @@ fn unifrac_striped_par_weighted(
                 };
 
                 const LANES: usize = 16;
-                simd_accum_block_rows_f32::<LANES>(
+                simd_accum_block_rows::<LANES>(
                     &mut num,
                     &mut den,
                     bw,
@@ -993,7 +993,7 @@ fn unifrac_striped_par_weighted(
                 let aj = &stripe_j.rows[idx_j as usize];
 
                 const LANES: usize = 16;
-                simd_accum_block_rows_f32::<LANES>(
+                simd_accum_block_rows::<LANES>(
                     &mut num,
                     &mut den,
                     bw,
