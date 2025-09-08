@@ -185,7 +185,10 @@ RUST_LOG=info ./dartunifrac-cuda -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab
 ```
 A better way is to compile from source. 
 ```bash
-
+git clone --branch DartUniFrac-GPU https://github.com/jianshu93/DartUniFrac.git
+cd DartUniFrac
+cargo build --release --features intel-mkl-static,stdsimd,cuda
+./target/release/dartunifrac -h
 
 ```
 
