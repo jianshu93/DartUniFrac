@@ -44,10 +44,8 @@ use succparen::{
 use fpcoa::{FpcoaOptions, pcoa_randomized};
 use ndarray::{Array1, Array2};
 
-
 #[cfg(feature = "cuda")]
 mod disthamming_gpu;
-
 
 type NwkTree = newick::NewickTree;
 
@@ -1354,7 +1352,7 @@ fn main() -> Result<()> {
 
     #[cfg(feature = "cuda")]
     let tile_cols = *m.get_one::<usize>("tile-cols").unwrap();
-    
+
     let threads = m
         .get_one::<usize>("threads")
         .copied()
@@ -1424,7 +1422,9 @@ fn main() -> Result<()> {
             warn!("--pcoa is incompatible with --stream; skipping PCoA in streaming mode.");
         }
         if compress {
-            warn!("--compress is ignored with --stream; streaming output is already zstd-compressed.");
+            warn!(
+                "--compress is ignored with --stream; streaming output is already zstd-compressed."
+            );
         }
         let out_path_stream: PathBuf = if stream {
             let p_stream = Path::new(out_file);
@@ -1437,8 +1437,17 @@ fn main() -> Result<()> {
         };
         let out_path_stream_str = out_path_stream.to_string_lossy();
 
-        info!("Streaming zstd-compressed distance matrix → {}", out_path_stream_str);
-        write_matrix_streaming_zstd(&samples, &sketches_u64, &out_path_stream_str, block, weighted)?;
+        info!(
+            "Streaming zstd-compressed distance matrix → {}",
+            out_path_stream_str
+        );
+        write_matrix_streaming_zstd(
+            &samples,
+            &sketches_u64,
+            &out_path_stream_str,
+            block,
+            weighted,
+        )?;
         info!("Done → {}", out_path_stream_str);
         return Ok(());
     }
@@ -1455,7 +1464,9 @@ fn main() -> Result<()> {
 
         let ng = disthamming_gpu::device_count().unwrap_or(0);
         if ng == 0 {
-            warn!("--gpu-streaming requested but no CUDA device found; falling back to normal path.");
+            warn!(
+                "--gpu-streaming requested but no CUDA device found; falling back to normal path."
+            );
         } else {
             // pick/path with .zst suffix if none provided
             let out_path_stream: PathBuf = {
@@ -1478,20 +1489,23 @@ fn main() -> Result<()> {
 
             info!(
                 "GPU streaming with {} GPU{} → {} (tile_cols={})",
-                ng, if ng > 1 { "s" } else { "" }, out_path_stream_str, tile_cols
+                ng,
+                if ng > 1 { "s" } else { "" },
+                out_path_stream_str,
+                tile_cols
             );
 
             // This function should *internally* use all GPUs if ng>1, otherwise the single GPU,
             // and stream rows to a zstd writer so host RAM stays small.
             disthamming_gpu::write_matrix_streaming_gpu_auto(
-                &samples,            // names
-                &flat,               // sketches_flat_u64
-                n,                   // n
-                ksk,                 // k
-                &out_path_stream_str,// path
-                true,                // compress (zstd)
-                weighted,            // weighted_normalized
-                tile_cols,           // tile width
+                &samples,             // names
+                &flat,                // sketches_flat_u64
+                n,                    // n
+                ksk,                  // k
+                &out_path_stream_str, // path
+                true,                 // compress (zstd)
+                weighted,             // weighted_normalized
+                tile_cols,            // tile width
             )?;
 
             info!("Done → {}", out_path_stream_str);
@@ -1509,7 +1523,9 @@ fn main() -> Result<()> {
                 Ok(ng) if ng >= 1 => {
                     log::info!(
                         "CUDA detected ({} device{}). Computing pairwise distances on GPU{} …",
-                        ng, if ng > 1 { "s" } else { "" }, if ng > 1 { "s" } else { "" }
+                        ng,
+                        if ng > 1 { "s" } else { "" },
+                        if ng > 1 { "s" } else { "" }
                     );
                     let t2 = Instant::now();
 
@@ -1523,14 +1539,12 @@ fn main() -> Result<()> {
                     let mut out = vec![0.0f64; n * n];
                     // 8192 works well; feel free to tune (4096..16384)
                     disthamming_gpu::pairwise_hamming_multi_gpu(
-                        &flat,
-                        n,
-                        k,
-                        &mut out,
-                        8192,
-                        weighted,
+                        &flat, n, k, &mut out, 8192, weighted,
                     )?;
-                    log::info!("pairwise distances (GPU) in {} ms", t2.elapsed().as_millis());
+                    log::info!(
+                        "pairwise distances (GPU) in {} ms",
+                        t2.elapsed().as_millis()
+                    );
                     out
                 }
                 _ => {
@@ -1555,7 +1569,10 @@ fn main() -> Result<()> {
                             out[j * n + i] = v;
                         }
                     }
-                    log::info!("pairwise distances (CPU) in {} ms", t2.elapsed().as_millis());
+                    log::info!(
+                        "pairwise distances (CPU) in {} ms",
+                        t2.elapsed().as_millis()
+                    );
                     out
                 }
             }
@@ -1583,7 +1600,10 @@ fn main() -> Result<()> {
                     out[j * n + i] = v;
                 }
             }
-            log::info!("pairwise distances (CPU) in {} ms", t2.elapsed().as_millis());
+            log::info!(
+                "pairwise distances (CPU) in {} ms",
+                t2.elapsed().as_millis()
+            );
             out
         }
     };

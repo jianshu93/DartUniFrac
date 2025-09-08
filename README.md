@@ -174,7 +174,7 @@ dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048
 ```
 
 ## GPU support
-We provide Nvidia GPU support via CUDA (CUDA v0.12.0 or later must be installed and in system library path) on Linux (x86-64 tested). It will fall back to CPU if GPU device is detected. On the Hamming distance computation step benefits from GPU. 
+We provide Nvidia GPU support via CUDA (CUDA v0.12.0 or later must be installed and in system library path) on Linux (x86-64 tested). It will fall back to CPU if GPU device is detected. Only the Hamming distance computation step benefits from GPU. 
 ```bash
 ### get the binary
 wegt https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/dartunifrac-cuda_Linux_x86-64_v0.2.3.zip
@@ -353,7 +353,7 @@ This is a dense example where $\alpha$ is almost 75% so L can be small. For real
 
 
 ## Acknowledgements
-We want to thank [Otmar Ertl](https://www.dynatrace.com/engineering/persons/otmar-ertl/) and [Xiaoyun Li](https://lixiaoyun0239.github.io/cv/) for their helpful comments on DartMinHash and Efficient Rejection Sampling, respectively. We want to thank Yuhan(Sherlyn) Weng for helping with DartUniFrac logo design.
+We want to thank  [Otmar Ertl](https://www.dynatrace.com/engineering/persons/otmar-ertl/) and [Xiaoyun Li](https://lixiaoyun0239.github.io/cv/) for their helpful comments on DartMinHash and Efficient Rejection Sampling, respectively. We want to thank Yuhan(Sherlyn) Weng for helping with DartUniFrac logo design.
 
 ## References
 
