@@ -98,6 +98,12 @@ wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/dartunifr
 unzip dartunifrac_Linux_x86-64_v0.2.3.zip
 chmod a+x ./dartunifrac
 ./dartunifrac -h
+
+### Rust implementation of striped UniFrac algorithm
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/striped_unifrac_Linux_v0.2.3.zip
+unzip striped_unifrac_Linux_v0.2.3.zip
+chmod a+x ./striped_unifrac
+./striped_unifrac -h
 ```
 
 ### macOS via Homebrew: 
@@ -174,7 +180,7 @@ dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048
 ```
 
 ## GPU support
-We provide Nvidia GPU support via CUDA (CUDA v0.12.0 or later must be installed and in system library path) on Linux (x86-64 tested). It will fall back to CPU if GPU device is detected. On the Hamming distance computation step benefits from GPU. 
+We provide Nvidia GPU support via CUDA (CUDA v0.12.0 or later must be installed and in system library path) on Linux (x86-64 tested). It will fall back to CPU if GPU device is detected. Only the Hamming distance computation step benefits from GPU. 
 ```bash
 ### get the binary
 wegt https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/dartunifrac-cuda_Linux_x86-64_v0.2.3.zip
