@@ -1296,7 +1296,7 @@ fn main() -> Result<()> {
         .arg(
             Arg::new("pcoa")
                 .long("pcoa")
-                .help("Fast Principle Coordinate Analysis based on Randomized SVD (subspace iteration), output saved to pcoa.txt/ordination.txt")
+                .help("Fast Principal Coordinate Analysis based on Randomized SVD (subspace iteration), output saved to pcoa.txt/ordination.txt")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
