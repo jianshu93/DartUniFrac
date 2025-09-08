@@ -44,6 +44,11 @@ use succparen::{
 use fpcoa::{FpcoaOptions, pcoa_randomized};
 use ndarray::{Array1, Array2};
 
+
+#[cfg(feature = "cuda")]
+mod disthamming_gpu;
+
+
 type NwkTree = newick::NewickTree;
 
 // Tree traversal to collect branch lengths
@@ -1208,7 +1213,7 @@ fn main() -> Result<()> {
         .map(|e| e.as_str())
         .unwrap_or("🎯");
 
-    let m = Command::new("dartunifrac")
+    let mut cmd = Command::new("dartunifrac")
         .version("0.2.3")
         .about(format!("DartUniFrac: Approximate UniFrac via Weighted MinHash {dart}{dart}{dart}"))
         .arg(
@@ -1231,9 +1236,10 @@ fn main() -> Result<()> {
                 .help("OTU/Feature table in BIOM (HDF5) format"),
         )
         .group(
-            ArgGroup::new("table").
-            args(["input", "biom"]).
-            required(true))
+            ArgGroup::new("table")
+                .args(["input", "biom"])
+                .required(true),
+        )
         .arg(
             Arg::new("output")
                 .short('o')
@@ -1269,8 +1275,6 @@ fn main() -> Result<()> {
                 .short('l')
                 .help("Per-hash independent random sequence length for ERS, must be >= 512")
                 .value_parser(clap::value_parser!(u64))
-                // See Li and Li 2021 AAAI paper Figure 2. Large L has smaller bias and will be unbiased when L goes unlimited (Rejection Sampling)
-                // L should be determined by the sparsity of relevant branches for each sample
                 .default_value("2048"),
         )
         .arg(
@@ -1310,8 +1314,26 @@ fn main() -> Result<()> {
                 .long("block")
                 .help("Number of rows per chunk, streaming mode only")
                 .value_parser(clap::value_parser!(usize)),
-        )
-        .get_matches();
+        );
+    #[cfg(feature = "cuda")]
+    {
+        cmd = cmd
+            .arg(
+                Arg::new("gpu-streaming")
+                    .long("gpu-streaming")
+                    .help("Streaming the distance matrix to disk block by block (multi-GPU support); available only with the 'cuda' feature")
+                    .action(clap::ArgAction::SetTrue),
+            )
+            .arg(
+                Arg::new("tile-cols")
+                    .long("tile-cols")
+                    .help("Number of columns per GPU tile in gpu-streaming mode")
+                    .value_parser(clap::value_parser!(usize))
+                    .default_value("8192"),
+            );
+    }
+
+    let m = cmd.get_matches();
 
     let tree_file = m.get_one::<String>("tree").unwrap();
     let input_tsv = m.get_one::<String>("input").map(|s| s.as_str());
@@ -1327,6 +1349,12 @@ fn main() -> Result<()> {
     let stream = m.get_flag("streaming");
     let block = m.get_one::<usize>("block").copied();
 
+    #[cfg(feature = "cuda")]
+    let gpu_streaming = m.get_flag("gpu-streaming");
+
+    #[cfg(feature = "cuda")]
+    let tile_cols = *m.get_one::<usize>("tile-cols").unwrap();
+    
     let threads = m
         .get_one::<usize>("threads")
         .copied()
@@ -1390,36 +1418,175 @@ fn main() -> Result<()> {
         info!("Done → {}", out_path_stream_str);
         return Ok(());
     }
+    // CPU streaming block
+    if stream {
+        if pcoa {
+            warn!("--pcoa is incompatible with --stream; skipping PCoA in streaming mode.");
+        }
+        if compress {
+            warn!("--compress is ignored with --stream; streaming output is already zstd-compressed.");
+        }
+        let out_path_stream: PathBuf = if stream {
+            let p_stream = Path::new(out_file);
+            match p_stream.extension().and_then(|e| e.to_str()) {
+                Some("zst") => p_stream.to_path_buf(),
+                _ => PathBuf::from(format!("{out_file}.zst")),
+            }
+        } else {
+            PathBuf::from(out_file)
+        };
+        let out_path_stream_str = out_path_stream.to_string_lossy();
+
+        info!("Streaming zstd-compressed distance matrix → {}", out_path_stream_str);
+        write_matrix_streaming_zstd(&samples, &sketches_u64, &out_path_stream_str, block, weighted)?;
+        info!("Done → {}", out_path_stream_str);
+        return Ok(());
+    }
+
+    // GPU streaming block
+    #[cfg(feature = "cuda")]
+    if gpu_streaming {
+        if pcoa {
+            warn!("--pcoa is incompatible with --gpu-streaming; skipping PCoA.");
+        }
+        if compress {
+            warn!("--compress is ignored with --gpu-streaming; output is written as zstd already.");
+        }
+
+        let ng = disthamming_gpu::device_count().unwrap_or(0);
+        if ng == 0 {
+            warn!("--gpu-streaming requested but no CUDA device found; falling back to normal path.");
+        } else {
+            // pick/path with .zst suffix if none provided
+            let out_path_stream: PathBuf = {
+                let p = Path::new(out_file);
+                match p.extension().and_then(|e| e.to_str()) {
+                    Some("zst") => p.to_path_buf(),
+                    _ => PathBuf::from(format!("{out_file}.zst")),
+                }
+            };
+            let out_path_stream_str = out_path_stream.to_string_lossy();
+
+            // flatten sketches to row-major [n*k]
+            let n = nsamp;
+            let ksk = sketches_u64[0].len();
+            let mut flat: Vec<u64> = Vec::with_capacity(n * ksk);
+            for row in &sketches_u64 {
+                debug_assert_eq!(row.len(), ksk);
+                flat.extend_from_slice(row);
+            }
+
+            info!(
+                "GPU streaming with {} GPU{} → {} (tile_cols={})",
+                ng, if ng > 1 { "s" } else { "" }, out_path_stream_str, tile_cols
+            );
+
+            // This function should *internally* use all GPUs if ng>1, otherwise the single GPU,
+            // and stream rows to a zstd writer so host RAM stays small.
+            disthamming_gpu::write_matrix_streaming_gpu_auto(
+                &samples,            // names
+                &flat,               // sketches_flat_u64
+                n,                   // n
+                ksk,                 // k
+                &out_path_stream_str,// path
+                true,                // compress (zstd)
+                weighted,            // weighted_normalized
+                tile_cols,           // tile width
+            )?;
+
+            info!("Done → {}", out_path_stream_str);
+            return Ok(());
+        }
+    }
+
     // Pairwise UniFrac (≈ 1 - Jaccard) via normalized Hamming on ID arrays.
-    let t2 = Instant::now();
     let dist = {
         let n = nsamp;
-        let dh = DistHamming;
-        let mut out = vec![0.0f64; n * n];
-        // this is the most computational expensive part (N^2/2 hamming similarity computation)
-        out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
-            row[i] = 0.0;
-            for j in (i + 1)..n {
-                // DistHamming<u64> returns (# !=)/k ∈ [0,1]
-                let mut d = dh.eval(&sketches_u64[i], &sketches_u64[j]) as f64; // d_J ≈ 1 - Jw
-                if weighted {
-                    // normalized weighted UniFrac = Bray–Curtis transform
-                    d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
-                }
-                row[j] = d; // (i,j)
-            }
-        });
+        #[cfg(feature = "cuda")]
+        {
+            let k = sketches_u64[0].len();
+            match disthamming_gpu::device_count() {
+                Ok(ng) if ng >= 1 => {
+                    log::info!(
+                        "CUDA detected ({} device{}). Computing pairwise distances on GPU{} …",
+                        ng, if ng > 1 { "s" } else { "" }, if ng > 1 { "s" } else { "" }
+                    );
+                    let t2 = Instant::now();
 
-        // Mirror upper to lower.
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let v = out[i * n + j];
-                out[j * n + i] = v;
+                    // Flatten sketches: row-major [n*k]
+                    let mut flat: Vec<u64> = Vec::with_capacity(n * k);
+                    for row in &sketches_u64 {
+                        debug_assert_eq!(row.len(), k);
+                        flat.extend_from_slice(row);
+                    }
+
+                    let mut out = vec![0.0f64; n * n];
+                    // 8192 works well; feel free to tune (4096..16384)
+                    disthamming_gpu::pairwise_hamming_multi_gpu(
+                        &flat,
+                        n,
+                        k,
+                        &mut out,
+                        8192,
+                        weighted,
+                    )?;
+                    log::info!("pairwise distances (GPU) in {} ms", t2.elapsed().as_millis());
+                    out
+                }
+                _ => {
+                    log::info!("CUDA not available (or not enabled). Falling back to CPU.");
+                    // --- CPU fallback path (original code) ---
+                    let t2 = Instant::now();
+                    let dh = DistHamming;
+                    let mut out = vec![0.0f64; n * n];
+                    out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+                        row[i] = 0.0;
+                        for j in (i + 1)..n {
+                            let mut d = dh.eval(&sketches_u64[i], &sketches_u64[j]) as f64;
+                            if weighted {
+                                d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
+                            }
+                            row[j] = d;
+                        }
+                    });
+                    for i in 0..n {
+                        for j in (i + 1)..n {
+                            let v = out[i * n + j];
+                            out[j * n + i] = v;
+                        }
+                    }
+                    log::info!("pairwise distances (CPU) in {} ms", t2.elapsed().as_millis());
+                    out
+                }
             }
         }
-        out
+
+        // If compiled without the "cuda" feature, this block is the only one:
+        #[cfg(not(feature = "cuda"))]
+        {
+            let t2 = Instant::now();
+            let dh = DistHamming;
+            let mut out = vec![0.0f64; n * n];
+            out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+                row[i] = 0.0;
+                for j in (i + 1)..n {
+                    let mut d = dh.eval(&sketches_u64[i], &sketches_u64[j]) as f64;
+                    if weighted {
+                        d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
+                    }
+                    row[j] = d;
+                }
+            });
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    let v = out[i * n + j];
+                    out[j * n + i] = v;
+                }
+            }
+            log::info!("pairwise distances (CPU) in {} ms", t2.elapsed().as_millis());
+            out
+        }
     };
-    info!("pairwise distances in {} ms", t2.elapsed().as_millis());
 
     // Write output (fast ryu formatting) with compression (.zst)
     let out_path: PathBuf = if compress {

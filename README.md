@@ -173,6 +173,22 @@ dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048
 
 ```
 
+## GPU support
+We provide Nvidia GPU support via CUDA (CUDA v0.12.0 or later must be installed and in system library path) on Linux (x86-64 tested). It will fall back to CPU if GPU device is detected. On the Hamming distance computation step benefits from GPU. 
+```bash
+### get the binary
+wegt https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/dartunifrac-cuda_Linux_x86-64_v0.2.3.zip
+unzip dartunifrac-cuda_Linux_x86-64_v0.2.3.zip
+chmod a+x ./dartunifrac-cuda
+RUST_LOG=info ./dartunifrac-cuda -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom -m dmh -s 3072 --weighted -o unifrac_weighted.cuda.tsv
+
+```
+A better way is to compile from source. 
+```bash
+
+
+```
+
 ## Output
 1.A distance matrix (see also benchmark section) and pcoa stype output.
 Distance matrix:
