@@ -341,9 +341,7 @@ fn unifrac_striped_par(
         .map(|_| vec![vec![0u64; words_str]; total])
         .collect();
 
-    // -------------------------
-    // Phase-1 : build stripes
-    // -------------------------
+    // Phase 1 : build stripes
     let t0 = Instant::now();
     rayon::scope(|scope| {
         for (tid, node_masks_t) in node_masks.iter_mut().enumerate() {
@@ -389,9 +387,7 @@ fn unifrac_striped_par(
     masks.clear();
     masks.shrink_to_fit();
 
-    // -----------------------------------------------
     // Merge stripes into one BitVec per node (node_bits)
-    // -----------------------------------------------
     let mut node_bits: Vec<BitVec<u64, Lsb0>> =
         (0..total).map(|_| BitVec::repeat(false, nsamp)).collect();
 
@@ -440,9 +436,7 @@ fn unifrac_striped_par(
         log_relevant_branch_counts_from_bits(&node_bits, lens);
     }
 
-    // -----------------------------------------
-    // Phase-2 : active nodes per matrix strip
-    // -----------------------------------------
+    // Phase 2 : active nodes per matrix strip
     let est_blk = ((nsamp as f64 / (2.0 * n_threads as f64)).sqrt()) as usize;
     let blk = est_blk.clamp(64, 512).next_power_of_two();
     let nblk = (nsamp + blk - 1) / blk;
@@ -463,9 +457,7 @@ fn unifrac_striped_par(
     }
     log::info!("phase-2 sparse lists built ({} strips)", nblk);
 
-    // -----------------------------------------
-    // Phase-3 : block sweep (upper triangle)
-    // -----------------------------------------
+    // Phase 3 : block sweep (upper triangle)
     let dist = Arc::new(vec![0.0f64; nsamp * nsamp]);
     let ptr = DistPtr(unsafe { NonNull::new_unchecked(dist.as_ptr() as *mut f64) });
 
@@ -581,8 +573,8 @@ fn unifrac_striped_par(
 }
 
 /// Striped UniFrac (weighted, normalized)
-/// - Expects *relative* abundances per sample to be formed on the fly: val / col_sums[s].
-/// - Supports dense TSV or BIOM CSR via the `mode` argument.
+/// Expects *relative* abundances per sample to be formed on the fly: val / col_sums[s].
+/// Supports dense TSV or BIOM CSR via the `mode` argument.
 #[derive(Clone, Copy)]
 enum WeightedMode<'a> {
     Dense {
@@ -634,8 +626,7 @@ fn build_stripe_dense(
     total: usize, // #nodes
 ) -> Stripe {
     let bw = s1 - s0;
-
-    // v -> row index; start all empty
+    // v to row index; start all empty
     let mut idx_of = vec![u32::MAX; total];
     let mut nodes: Vec<usize> = Vec::new();
     let mut rows: Vec<Vec<f32>> = Vec::new();
@@ -655,7 +646,7 @@ fn build_stripe_dense(
             }
             let inc = (val / denom) as f32;
 
-            // leaf → root accumulation
+            // leaf to root accumulation
             let mut v = v_leaf;
             loop {
                 let row = ensure_row_slot(v, &mut idx_of, &mut nodes, &mut rows, bw);
