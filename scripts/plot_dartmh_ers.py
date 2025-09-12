@@ -1,16 +1,30 @@
 #!/usr/bin/env python3
 import sys
 import argparse
-import matplotlib
+import matplotlib as mpl
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 from matplotlib.lines import Line2D
 
-matplotlib.rcParams['pdf.fonttype'] = 42
-matplotlib.rcParams['ps.fonttype'] = 42
-matplotlib.rcParams['font.family'] = 'sans-serif'
-matplotlib.rcParams['font.sans-serif'] = ['Helvetica']
+mpl.rcParams.update({
+    # font
+    "font.family"     : "sans-serif",
+    "font.sans-serif" : ["Helvetica"],   # fall-back handled automatically
+    "text.color"      : "black",
+    # axes & ticks
+    "axes.labelcolor" : "black",
+    "axes.edgecolor"  : "black",
+    "xtick.color"     : "black",
+    "ytick.color"     : "black",
+    "axes.facecolor"  : "white",
+    "figure.facecolor": "white",
+    # grid (light grey, thin, dashed - similar to ggplot2::theme_bw)
+    "axes.grid"       : False,
+    "grid.color"      : "0.7",
+    "grid.linestyle"  : "--",
+    "grid.linewidth"  : 0.1,
+})
 
 def main():
     p = argparse.ArgumentParser(description='Plot DartMH vs ERS runtime vs sparsity for different sketch sizes.')

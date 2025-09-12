@@ -1,14 +1,28 @@
 import sys
-import matplotlib
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import gaussian_kde
 
-matplotlib.rcParams['pdf.fonttype'] = 42
-matplotlib.rcParams['ps.fonttype'] = 42
-matplotlib.rcParams['font.family'] = 'sans-serif'
-matplotlib.rcParams['font.sans-serif'] = ['Helvetica']
+import matplotlib as mpl
 
+mpl.rcParams.update({
+    # font
+    "font.family"     : "sans-serif",
+    "font.sans-serif" : ["Helvetica"],   # fall-back handled automatically
+    "text.color"      : "black",
+    # axes & ticks
+    "axes.labelcolor" : "black",
+    "axes.edgecolor"  : "black",
+    "xtick.color"     : "black",
+    "ytick.color"     : "black",
+    "axes.facecolor"  : "white",
+    "figure.facecolor": "white",
+    # grid (light grey, thin, dashed - similar to ggplot2::theme_bw)
+    "axes.grid"       : False,
+    "grid.color"      : "0.7",
+    "grid.linestyle"  : "--",
+    "grid.linewidth"  : 0.1,
+})
 
 if len(sys.argv) < 2:
     print(f"Usage: python {sys.argv[0]} <values.txt>")
