@@ -4,9 +4,10 @@ authors = ["jianshuzhao@yahoo.com"]
 repository = "https://github.com/jianshu93/dartunifrac.git"
 version = "0.2.3"
 edition = "2024"
-description = "Ultra-fast approximate UniFrac via Weighted MinHash"
-license = "MIT OR Apache-2.0"
+license = "BSD-3-Clause"
 keywords = ["unifrac", "phylogenetic", "MinHash", "succint", "Jaccard"]
+description = "Ultra-fast Approximate UniFrac via Weighted MinHash"
+
 
 [[bin]]
 
