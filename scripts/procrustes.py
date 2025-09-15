@@ -187,11 +187,11 @@ def main():
     out_prefix = Path(args.out)
     out_prefix.parent.mkdir(parents=True, exist_ok=True)
 
-    # 1) Read DMs
+    # Read DMs
     dm1 = read_distance_matrix(args.dm1)
     dm2 = read_distance_matrix(args.dm2)
 
-    # 2) PCoA on both
+    # PCoA on both
     ord1 = run_pcoa(dm1)
     ord2 = run_pcoa(dm2)
 
@@ -200,14 +200,14 @@ def main():
         pe = ord_res.proportion_explained.iloc[:k] * 100
         return ", ".join([f"Axis{i+1}: {pe.iloc[i]:.2f}%" for i in range(len(pe))])
 
-    # 3) Get matched coords and chosen axis count
+    # Get matched coords and chosen axis count
     coords1, coords2, shared_ids, k_use = intersect_and_extract(ord1, ord2, args.axes)
 
     print(f"[INFO] Using {len(shared_ids)} shared samples and {k_use} PCoA axis/axes.")
     print(f"[INFO] Method 1 variance explained (first {k_use}): {var_str(ord1, k_use)}")
     print(f"[INFO] Method 2 variance explained (first {k_use}): {var_str(ord2, k_use)}")
 
-    # 4) Procrustes + optional permutation test
+    # Procrustes and optional permutation test
     res = procrustes_with_perm(coords1, coords2, n_perm=args.permutations, seed=args.seed)
     disparity = res["disparity"]
     r2 = 1.0 - disparity  # often reported as Procrustes R^2 (heuristic with SciPy's normalization)
@@ -219,7 +219,7 @@ def main():
         print(f"Permutation test (n={args.permutations}) p-value: {res['pval']:.6f}")
     print("==========================\n")
 
-    # 5) Save aligned coordinates and residuals
+    # Save aligned coordinates and residuals
     m1_df = pd.DataFrame(res["mtx1"], index=shared_ids, columns=[f"A{i+1}" for i in range(res["mtx1"].shape[1])])
     m2_df = pd.DataFrame(res["mtx2"], index=shared_ids, columns=[f"A{i+1}" for i in range(res["mtx2"].shape[1])])
     resid_df = pd.DataFrame({"sample_id": shared_ids, "residual_distance": res["resid"]})
@@ -228,7 +228,7 @@ def main():
     m2_df.to_csv(f"{out_prefix}.aligned_method2.tsv", sep="\t")
     resid_df.to_csv(f"{out_prefix}.residuals.tsv", sep="\t", index=False)
 
-    # 6) (Optional) also provide the explicit orthogonal map for reproducibility/debugging
+    # the explicit orthogonal map for reproducibility/debugging
     try:
         mean1, scale1, mean2, scale2, R = orthogonal_map(coords1, coords2)
         np.savetxt(f"{out_prefix}.R.txt", R, fmt="%.8f")
@@ -239,13 +239,13 @@ def main():
     except Exception as e:
         print(f"[WARN] Could not compute/export explicit orthogonal map: {e}", file=sys.stderr)
 
-    # 7) Optional plot (first two axes)
+    # plot (first two axes)
     if args.plot:
         png = f"{out_prefix}.aligned_plot.png"
         make_plot(res["mtx1"], res["mtx2"], shared_ids, png)
         print(f"[INFO] Saved diagnostic plot to {png}")
 
-    # 8) Write a short text summary
+    # text summary
     with open(f"{out_prefix}.summary.txt", "w") as fh:
         fh.write(f"Shared samples: {len(shared_ids)}\n")
         fh.write(f"Axes used: {k_use}\n")
