@@ -326,7 +326,7 @@ fn unifrac_striped_par(
     kids: &[Vec<usize>],
     lens: &[f32],
     leaf_ids: &[usize],
-    mut masks: Vec<BitVec<u8, Lsb0>>, // <-- take ownership
+    mut masks: Vec<BitVec<u8, Lsb0>>, // take ownership
 ) -> Vec<f64> {
     // constants
     let nsamp = masks.len();
