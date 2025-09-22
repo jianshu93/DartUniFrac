@@ -7,19 +7,24 @@ import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 from matplotlib.lines import Line2D
 
+
+# ---- Font/theme per your snippet ----
 mpl.rcParams.update({
-    # font
     "font.family"     : "sans-serif",
-    "font.sans-serif" : ["Helvetica"],   # fall-back handled automatically
+    "font.sans-serif" : ["Helvetica"],   # system fallback handled automatically
+    "font.size"       : 20,              # <--- main control for larger text
+    "axes.titlesize"  : 20,              # axes title size
+    "axes.labelsize"  : 20,              # x/y label size
+    "xtick.labelsize" : 20,              # x tick label size
+    "ytick.labelsize" : 20,              # y tick label size
+    "legend.fontsize" : 20, 
     "text.color"      : "black",
-    # axes & ticks
     "axes.labelcolor" : "black",
     "axes.edgecolor"  : "black",
     "xtick.color"     : "black",
     "ytick.color"     : "black",
     "axes.facecolor"  : "white",
     "figure.facecolor": "white",
-    # grid (light grey, thin, dashed - similar to ggplot2::theme_bw)
     "axes.grid"       : False,
     "grid.color"      : "0.7",
     "grid.linestyle"  : "--",

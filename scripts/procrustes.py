@@ -31,6 +31,12 @@ mpl.rcParams.update({
     # font
     "font.family"     : "sans-serif",
     "font.sans-serif" : ["Helvetica"],   # fall-back handled automatically
+    "font.size"       : 20,              # <--- main control for larger text
+    "axes.titlesize"  : 20,              # axes title size
+    "axes.labelsize"  : 20,              # x/y label size
+    "xtick.labelsize" : 20,              # x tick label size
+    "ytick.labelsize" : 20,              # y tick label size
+    "legend.fontsize" : 20, 
     "text.color"      : "black",
     # axes & ticks
     "axes.labelcolor" : "black",
