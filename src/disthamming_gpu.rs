@@ -8,41 +8,97 @@ use cudarc::nvrtc::compile_ptx;
 use log::debug;
 use log::info;
 use log::warn;
+
 /// Kernel: computes a (bw×bh) tile of normalized Hamming distances
 /// sketches: [n*k] row-major u64 IDs
+/// Kernel: shared-memory–tiled Hamming for u64 IDs
 const KERNEL_SRC: &str = r#"
+#ifndef BK
+#define BK 64   // k-slab per iteration (tune: 32, 64, 128)
+#endif
+
 extern "C" __global__
 void hamming_tile_u64(
-    const unsigned long long* __restrict__ sketches, // [n*k]
+    const unsigned long long* __restrict__ sketches, // [n*k], row-major
     int n, int k,
     int i0, int j0,
     int bw, int bh,
     double* __restrict__ out, // [bw*bh], row-major, ldo = bh
     int only_upper // 1 => only write j>i, 0 => write full tile
 ){
-    int jj = blockIdx.x * blockDim.x + threadIdx.x; // 0..bh-1
-    int ii = blockIdx.y * blockDim.y + threadIdx.y; // 0..bw-1
-    if (ii >= bw || jj >= bh) return;
+    // Thread's local coords within the logical tile
+    const int jj = blockIdx.x * blockDim.x + threadIdx.x; // 0..bh-1
+    const int ii = blockIdx.y * blockDim.y + threadIdx.y; // 0..bw-1
 
-    int i = i0 + ii;
-    int j = j0 + jj;
-    if (i == j) {
-        // diagonal stays 0.0 because host/device buffer is zero-initialized
-        return;
+    const int i = i0 + ii;
+    const int j = j0 + jj;
+
+    // Dynamic shared memory layout:
+    //   As: blockDim.y rows × BK
+    //   Bs: blockDim.x cols × BK
+    extern __shared__ unsigned long long smem[];
+    unsigned long long* As = smem;
+    unsigned long long* Bs = As + (size_t)blockDim.y * (size_t)BK;
+
+    unsigned int diff = 0u;
+
+    // Flattened thread id in the block for cooperative loads
+    const int tpb = blockDim.x * blockDim.y;
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+
+    for (int t0 = 0; t0 < k; t0 += BK) {
+        const int bk = min(BK, k - t0);
+
+        // --- Load A-slab: (blockDim.y × bk) ---
+        const int totalA = blockDim.y * bk;
+        for (int idx = tid; idx < totalA; idx += tpb) {
+            const int r   = idx / bk;   // local row in [0, blockDim.y)
+            const int t   = idx - r*bk; // 0..bk-1
+            const int gi  = i0 + r;
+            unsigned long long val = 0ULL;
+            if (r < bw && (t0 + t) < k && gi < n) {
+                val = sketches[(size_t)gi * (size_t)k + (size_t)(t0 + t)];
+            }
+            As[(size_t)r * (size_t)BK + (size_t)t] = val;
+        }
+
+        // --- Load B-slab: (blockDim.x × bk) ---
+        const int totalB = blockDim.x * bk;
+        for (int idx = tid; idx < totalB; idx += tpb) {
+            const int c   = idx / bk;   // local col in [0, blockDim.x)
+            const int t   = idx - c*bk; // 0..bk-1
+            const int gj  = j0 + c;
+            unsigned long long val = 0ULL;
+            if (c < bh && (t0 + t) < k && gj < n) {
+                val = sketches[(size_t)gj * (size_t)k + (size_t)(t0 + t)];
+            }
+            Bs[(size_t)c * (size_t)BK + (size_t)t] = val;
+        }
+
+        __syncthreads();
+
+        // --- Consume this k-slab for our (ii,jj) if valid ---
+        if (ii < bw && jj < bh) {
+            if (!(i == j || (only_upper && j <= i))) {
+                // rows map along blockDim.y; cols along blockDim.x
+                const size_t arow = (size_t)threadIdx.y * (size_t)BK;
+                const size_t brow = (size_t)threadIdx.x * (size_t)BK;
+                #pragma unroll
+                for (int t = 0; t < bk; ++t) {
+                    diff += (As[arow + (size_t)t] != Bs[brow + (size_t)t]);
+                }
+            }
+        }
+
+        __syncthreads();
     }
-    if (only_upper && j <= i) return;
 
-    const unsigned long long* a = sketches + ((size_t)i) * k;
-    const unsigned long long* b = sketches + ((size_t)j) * k;
-
-    unsigned int diff = 0;
-    #pragma unroll 4
-    for (int t = 0; t < k; ++t) {
-        diff += (a[t] != b[t]);
+    // Write result (normalize in host if you need weighted transform)
+    if (ii < bw && jj < bh) {
+        if (!(i == j || (only_upper && j <= i))) {
+            out[(size_t)ii * (size_t)bh + (size_t)jj] = (double)diff / (double)k;
+        }
     }
-    double d = (double)diff / (double)k;
-
-    out[ii * bh + jj] = d; // ldo = bh
 }
 "#;
 
@@ -150,6 +206,13 @@ pub fn pairwise_hamming_single_gpu(
             let j1 = (j0 + block_rows).min(n);
             let bh = j1 - j0;
 
+            let blk_x = 32usize; // threads along columns (j)
+            let blk_y = 8usize;  // threads along rows (i)
+            let bk    = 64usize; // must match BK in kernel (see #define above)
+
+            // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(u64)
+            let smem_bytes = ((bk * (blk_y + blk_x)) * std::mem::size_of::<u64>()) as u32;
+
             let cfg = LaunchConfig {
                 grid_dim: (
                     ((bh + blk_x - 1) / blk_x) as u32,
@@ -157,7 +220,7 @@ pub fn pairwise_hamming_single_gpu(
                     1,
                 ),
                 block_dim: (blk_x as u32, blk_y as u32, 1),
-                shared_mem_bytes: 0,
+                shared_mem_bytes: smem_bytes,
             };
 
             let i0_i32 = i0 as i32;
@@ -330,6 +393,13 @@ pub fn pairwise_hamming_multi_gpu(
                         let j1 = (j0 + br_arc).min(n_arc);
                         let bh = j1 - j0;
 
+                        let blk_x = 32usize; // threads along columns (j)
+                        let blk_y = 8usize;  // threads along rows (i)
+                        let bk    = 64usize; // must match BK in kernel (see #define above)
+
+                        // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(u64)
+                        let smem_bytes = ((bk * (blk_y + blk_x)) * std::mem::size_of::<u64>()) as u32;
+
                         let cfg = LaunchConfig {
                             grid_dim: (
                                 ((bh + blk_x - 1) / blk_x) as u32,
@@ -337,7 +407,7 @@ pub fn pairwise_hamming_multi_gpu(
                                 1,
                             ),
                             block_dim: (blk_x as u32, blk_y as u32, 1),
-                            shared_mem_bytes: 0,
+                            shared_mem_bytes: smem_bytes,
                         };
 
                         let i0_i32 = i0 as i32;
@@ -488,6 +558,13 @@ fn write_matrix_streaming_gpu_single(
         while j0 < n {
             let bh = (n - j0).min(tile_cols);
 
+            let blk_x = 32usize; // threads along columns (j)
+            let blk_y = 8usize;  // threads along rows (i)
+            let bk    = 64usize; // must match BK in kernel (see #define above)
+
+            // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(u64)
+            let smem_bytes = ((bk * (blk_y + blk_x)) * std::mem::size_of::<u64>()) as u32;
+
             let cfg = LaunchConfig {
                 grid_dim: (
                     ((bh + blk_x - 1) / blk_x) as u32,
@@ -495,7 +572,7 @@ fn write_matrix_streaming_gpu_single(
                     1,
                 ),
                 block_dim: (blk_x as u32, blk_y as u32, 1),
-                shared_mem_bytes: 0,
+                shared_mem_bytes: smem_bytes,
             };
 
             let i0_i32 = i0 as i32;
@@ -676,6 +753,13 @@ fn write_matrix_streaming_gpu_multi(
                         while j0 < n {
                             let bh = (n - j0).min(tile_cols);
 
+                            let blk_x = 32usize; // threads along columns (j)
+                            let blk_y = 8usize;  // threads along rows (i)
+                            let bk    = 64usize; // must match BK in kernel (see #define above)
+
+                            // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(u64)
+                            let smem_bytes = ((bk * (blk_y + blk_x)) * std::mem::size_of::<u64>()) as u32;
+
                             let cfg = LaunchConfig {
                                 grid_dim: (
                                     ((bh + blk_x - 1) / blk_x) as u32,
@@ -683,7 +767,7 @@ fn write_matrix_streaming_gpu_multi(
                                     1,
                                 ),
                                 block_dim: (blk_x as u32, blk_y as u32, 1),
-                                shared_mem_bytes: 0,
+                                shared_mem_bytes: smem_bytes,
                             };
 
                             let i0_i32 = i0 as i32;
