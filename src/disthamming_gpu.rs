@@ -204,9 +204,9 @@ pub fn pairwise_hamming_single_gpu(
             let j1 = (j0 + block_rows).min(n);
             let bh = j1 - j0;
 
-            let blk_x = 32usize; // threads along columns (j)
+            let blk_x = 64usize; // threads along columns (j)
             let blk_y = 8usize;  // threads along rows (i)
-            let bk    = 64usize; // must match BK in kernel (see #define above)
+            let bk    = 128usize; // must match BK in kernel (see #define above)
 
             // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(u64)
             let smem_bytes = ((bk * (blk_y + blk_x)) * std::mem::size_of::<u64>()) as u32;
@@ -388,9 +388,9 @@ pub fn pairwise_hamming_multi_gpu(
                         let j1 = (j0 + br_arc).min(n_arc);
                         let bh = j1 - j0;
 
-                        let blk_x = 32usize; // threads along columns (j)
+                        let blk_x = 64usize; // threads along columns (j)
                         let blk_y = 8usize;  // threads along rows (i)
-                        let bk    = 64usize; // must match BK in kernel (see #define above)
+                        let bk    = 128usize; // must match BK in kernel (see #define above)
 
                         // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(u64)
                         let smem_bytes = ((bk * (blk_y + blk_x)) * std::mem::size_of::<u64>()) as u32;
@@ -549,9 +549,9 @@ fn write_matrix_streaming_gpu_single(
         while j0 < n {
             let bh = (n - j0).min(tile_cols);
 
-            let blk_x = 32usize; // threads along columns (j)
+            let blk_x = 64usize; // threads along columns (j)
             let blk_y = 8usize;  // threads along rows (i)
-            let bk    = 64usize; // must match BK in kernel (see #define above)
+            let bk    = 128usize; // must match BK in kernel (see #define above)
 
             // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(u64)
             let smem_bytes = ((bk * (blk_y + blk_x)) * std::mem::size_of::<u64>()) as u32;
@@ -740,9 +740,9 @@ fn write_matrix_streaming_gpu_multi(
                         while j0 < n {
                             let bh = (n - j0).min(tile_cols);
 
-                            let blk_x = 32usize; // threads along columns (j)
+                            let blk_x = 64usize; // threads along columns (j)
                             let blk_y = 8usize;  // threads along rows (i)
-                            let bk    = 64usize; // must match BK in kernel (see #define above)
+                            let bk    = 128usize; // must match BK in kernel (see #define above)
 
                             // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(u64)
                             let smem_bytes = ((bk * (blk_y + blk_x)) * std::mem::size_of::<u64>()) as u32;
