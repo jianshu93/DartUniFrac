@@ -189,8 +189,6 @@ pub fn pairwise_hamming_single_gpu(
     );
 
     // Launch cfg & consts
-    let blk_x = 16usize;
-    let blk_y = 16usize;
     let n_i32 = n as i32;
     let k_i32 = k as i32;
     let only_upper_i32 = 1i32;
@@ -372,9 +370,6 @@ pub fn pairwise_hamming_multi_gpu(
                     let mut d_tile: CudaSlice<f64> = stream.alloc_zeros(max_t * max_t)?;
                     let mut h_tile = vec![0.0f64; max_t * max_t];
 
-                    let blk_x = 16usize;
-                    let blk_y = 16usize;
-
                     // kernel constants as locals
                     let n_i32 = n_arc as i32;
                     let k_i32 = k_arc as i32;
@@ -531,10 +526,6 @@ fn write_matrix_streaming_gpu_single(
     // NOTE: device writes only the first (bw*bh) entries; we copy bw*bh_max then use needed part.
     let mut d_tile: CudaSlice<f64> = stream.alloc_zeros(tile_rows * bh_max)?;
     let mut h_tile = vec![0.0f64; tile_rows * bh_max];
-
-    // Launch dims
-    let blk_x = 16usize;
-    let blk_y = 16usize;
 
     // For formatting
     let mut fmt = ryu::Buffer::new();
@@ -726,10 +717,6 @@ fn write_matrix_streaming_gpu_multi(
                     // Scratch for bw × bh_max
                     let mut d_tile: CudaSlice<f64> = stream.alloc_zeros(tile_rows * bh_max)?;
                     let mut h_tile = vec![0.0f64; tile_rows * bh_max];
-
-                    // Launch dims
-                    let blk_x = 16usize;
-                    let blk_y = 16usize;
 
                     let devs = devices.len();
                     let mut fmt = ryu::Buffer::new();
