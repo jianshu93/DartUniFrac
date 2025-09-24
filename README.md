@@ -12,7 +12,7 @@
 This is the GPU branch of DartUniFrac.
 
 ## GPU support
-We provide Nvidia GPU support via CUDA (CUDA v0.12.0 or later must be installed and in system library path) on Linux (x86-64 tested). It will fall back to CPU if no GPU device is detected. Only the Hamming distance computation step benefits from GPU. 
+We provide Nvidia GPU support via CUDA (CUDA v0.12.0 or later must be installed and in system library path) on Linux (x86-64 tested). It will fall back to CPU if no GPU device is detected. Only the Hamming distance computation step benefits from GPU. Optimized for Nvidia A100 but also works for RTX
 ```bash
 ### get the binary
 wegt https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/dartunifrac-cuda_Linux_x86-64_v0.2.3.zip
