@@ -10,7 +10,7 @@
 </div>
 
 
-# DartUniFrac: Approximate UniFrac via Weighted MinHash
+# DartUniFrac: Approximate UniFrac via Weighted MinHash 🦀
 This crate provides an efficient implementation of the newly invented ***DartUniFrac*** algorithm for large-scale [UniFrac](https://en.wikipedia.org/wiki/UniFrac) computation (weighted and unweighted). We named this new algorithm DartUniFrac because the key step is to use DartMinHash or Efficient Rejection Sampling (or ERS) on branches and the DartMinHash/ERS is about "Among the first r darts thrown, return those hitting $x_i$". 
 
 
