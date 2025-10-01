@@ -43,9 +43,9 @@ use succparen::{
 use std::simd::{LaneCount, Simd, SupportedLaneCount};
 
 #[cfg(feature = "stdsimd")]
-use std::simd::prelude::*;
-#[cfg(feature = "stdsimd")]
 use std::simd::StdFloat;
+#[cfg(feature = "stdsimd")]
+use std::simd::prelude::*;
 // Plain new-type – automatically `Copy`.
 #[derive(Clone, Copy)]
 struct DistPtr(NonNull<f64>);
@@ -1028,7 +1028,6 @@ fn unifrac_striped_par_weighted(
     std::sync::Arc::try_unwrap(dist).unwrap()
 }
 
-
 #[cfg(feature = "stdsimd")]
 fn simd_accum_block_rows_generalized<const LANES: usize>(
     num: &mut [f64],
@@ -1094,7 +1093,7 @@ fn simd_accum_block_rows_generalized<const LANES: usize>(
                     let s = s_arr[k];
                     if s > 0.0 {
                         let s_a1 = (s as f64).powf((alpha - 1.0) as f64);
-                        let s_a  = (s as f64).powf(alpha as f64);
+                        let s_a = (s as f64).powf(alpha as f64);
                         let add_num = (len as f64) * s_a1 * (d_arr[k] as f64);
                         let add_den = (len as f64) * s_a;
                         num[idx0 + k] += add_num;
@@ -1184,7 +1183,9 @@ fn unifrac_striped_par_generalized(
     let parent: Vec<usize> = {
         let mut p = vec![usize::MAX; total];
         for v in 0..total {
-            for &c in &kids[v] { p[c] = v; }
+            for &c in &kids[v] {
+                p[c] = v;
+            }
         }
         p
     };
@@ -1202,7 +1203,9 @@ fn unifrac_striped_par_generalized(
     // Precompute constant denominator for alpha == 0 (sum of positive branch lengths)
     let lsum_alpha0: f64 = if (alpha).abs() <= 1e-12 {
         lens.iter().filter(|&&l| l > 0.0).map(|&l| l as f64).sum()
-    } else { 0.0 };
+    } else {
+        0.0
+    };
 
     for bi in 0..nblk {
         let i0 = bi * blk;
@@ -1210,10 +1213,16 @@ fn unifrac_striped_par_generalized(
         let bw = i1 - i0;
 
         let stripe_i = match &mode {
-            WeightedMode::Dense { counts } => build_stripe_dense(
-                counts, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total),
-            WeightedMode::Csr { indptr, indices, data } => build_stripe_csr(
-                indptr, indices, data, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total),
+            WeightedMode::Dense { counts } => {
+                build_stripe_dense(counts, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total)
+            }
+            WeightedMode::Csr {
+                indptr,
+                indices,
+                data,
+            } => build_stripe_csr(
+                indptr, indices, data, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total,
+            ),
         };
 
         let parent_ref = &parent;
@@ -1235,9 +1244,31 @@ fn unifrac_striped_par_generalized(
             } else {
                 match mode {
                     WeightedMode::Dense { counts } => build_stripe_dense(
-                        counts, row2leaf_ref, leaf_ids_ref, parent_ref, col_sums_ref, j0, j1, total),
-                    WeightedMode::Csr { indptr, indices, data } => build_stripe_csr(
-                        indptr, indices, data, row2leaf_ref, leaf_ids_ref, parent_ref, col_sums_ref, j0, j1, total),
+                        counts,
+                        row2leaf_ref,
+                        leaf_ids_ref,
+                        parent_ref,
+                        col_sums_ref,
+                        j0,
+                        j1,
+                        total,
+                    ),
+                    WeightedMode::Csr {
+                        indptr,
+                        indices,
+                        data,
+                    } => build_stripe_csr(
+                        indptr,
+                        indices,
+                        data,
+                        row2leaf_ref,
+                        leaf_ids_ref,
+                        parent_ref,
+                        col_sums_ref,
+                        j0,
+                        j1,
+                        total,
+                    ),
                 }
             };
 
@@ -1248,7 +1279,9 @@ fn unifrac_striped_par_generalized(
             // If alpha == 1.0, this is identical to weighted; we could call
             // the weighted kernel, but we keep the code unified here by using the same helper.
             for &v in &stripe_i_ref.nodes {
-                if lens[v] <= 0.0 { continue; }
+                if lens[v] <= 0.0 {
+                    continue;
+                }
                 let len = lens[v] as f32;
 
                 let idx_i = stripe_i_ref.index[v];
@@ -1264,12 +1297,25 @@ fn unifrac_striped_par_generalized(
 
                 const LANES: usize = 16;
                 simd_accum_block_rows_generalized::<LANES>(
-                    &mut num, &mut den, bw, bh, Some(ai), aj_opt, len, diagonal_block, alpha);
+                    &mut num,
+                    &mut den,
+                    bw,
+                    bh,
+                    Some(ai),
+                    aj_opt,
+                    len,
+                    diagonal_block,
+                    alpha,
+                );
             }
 
             for &v in &stripe_j.nodes {
-                if lens[v] <= 0.0 { continue; }
-                if stripe_i_ref.index[v] != u32::MAX { continue; }
+                if lens[v] <= 0.0 {
+                    continue;
+                }
+                if stripe_i_ref.index[v] != u32::MAX {
+                    continue;
+                }
                 let len = lens[v] as f32;
 
                 let idx_j = stripe_j.index[v];
@@ -1278,7 +1324,16 @@ fn unifrac_striped_par_generalized(
 
                 const LANES: usize = 16;
                 simd_accum_block_rows_generalized::<LANES>(
-                    &mut num, &mut den, bw, bh, None, Some(aj), len, diagonal_block, alpha);
+                    &mut num,
+                    &mut den,
+                    bw,
+                    bh,
+                    None,
+                    Some(aj),
+                    len,
+                    diagonal_block,
+                    alpha,
+                );
             }
 
             // Write-back
@@ -1288,16 +1343,30 @@ fn unifrac_striped_par_generalized(
                     let i = i0 + ii;
                     for jj in 0..bh {
                         let j = j0 + jj;
-                        if j <= i { continue; }
+                        if j <= i {
+                            continue;
+                        }
 
                         let idx = ii * bh + jj;
                         let d = if (alpha).abs() <= 1e-12 {
                             // alpha == 0: denominator is constant lsum_alpha0
-                            if lsum_alpha0 > 0.0 { num[idx] / lsum_alpha0 } else { 0.0 }
+                            if lsum_alpha0 > 0.0 {
+                                num[idx] / lsum_alpha0
+                            } else {
+                                0.0
+                            }
                         } else if (alpha - 1.0).abs() <= 1e-12 {
-                            if den[idx] > 0.0 { num[idx] / den[idx] } else { 0.0 }
+                            if den[idx] > 0.0 {
+                                num[idx] / den[idx]
+                            } else {
+                                0.0
+                            }
                         } else {
-                            if den[idx] > 0.0 { num[idx] / den[idx] } else { 0.0 }
+                            if den[idx] > 0.0 {
+                                num[idx] / den[idx]
+                            } else {
+                                0.0
+                            }
                         };
 
                         *base.add(i * nsamp + j) = d;
@@ -1310,7 +1379,8 @@ fn unifrac_striped_par_generalized(
 
     log::info!(
         "generalized (alpha={}) striped pass done in {} ms",
-        alpha, t_all.elapsed().as_millis()
+        alpha,
+        t_all.elapsed().as_millis()
     );
     std::sync::Arc::try_unwrap(dist).unwrap()
 }
@@ -1540,23 +1610,23 @@ fn main() -> Result<()> {
     // Data containers
     let mut pres: Vec<Vec<f64>> = Vec::new(); // TSV presence for unweighted
     let mut counts: Vec<Vec<f64>> = Vec::new(); // TSV counts for weighted/generalized
-    let mut indptr: Vec<u32> = Vec::new();     // BIOM (both modes)
-    let mut indices: Vec<u32> = Vec::new();    // BIOM (both modes)
-    let mut data: Vec<f64> = Vec::new();       // BIOM values for weighted/generalized
-    let mut pres_dense = false;                 // true => TSV mode
+    let mut indptr: Vec<u32> = Vec::new(); // BIOM (both modes)
+    let mut indices: Vec<u32> = Vec::new(); // BIOM (both modes)
+    let mut data: Vec<f64> = Vec::new(); // BIOM values for weighted/generalized
+    let mut pres_dense = false; // true => TSV mode
 
     if let Some(tsv) = m.get_one::<String>("input") {
         pres_dense = true;
         if weighted || generalized {
             // GUniFrac needs counts (not binarized presence)
             let (t, s, mat) = read_table_counts(tsv)?;
-            taxa = t; 
-            samples = s; 
+            taxa = t;
+            samples = s;
             counts = mat;
         } else {
             let (t, s, mat) = read_table(tsv)?;
-            taxa = t; 
-            samples = s; 
+            taxa = t;
+            samples = s;
             pres = mat;
         }
     } else {
@@ -1565,16 +1635,16 @@ fn main() -> Result<()> {
         if weighted || generalized {
             // GUniFrac needs values
             let (t, s, ip, idx, vals) = read_biom_csr_values(biom)?;
-            taxa = t; 
-            samples = s; 
-            indptr = ip; 
-            indices = idx; 
+            taxa = t;
+            samples = s;
+            indptr = ip;
+            indices = idx;
             data = vals;
         } else {
             let (t, s, ip, idx) = read_biom_csr(biom)?;
-            taxa = t; 
-            samples = s; 
-            indptr = ip; 
+            taxa = t;
+            samples = s;
+            indptr = ip;
             indices = idx;
         }
     }
@@ -1599,16 +1669,33 @@ fn main() -> Result<()> {
                 }
             }
             if col_sums.iter().all(|&x| x == 0.0) {
-                log::warn!("All column sums are zero in TSV generalized run; check that input is counts, not presence/absence.");
+                log::warn!(
+                    "All column sums are zero in TSV generalized run; check that input is counts, not presence/absence."
+                );
             }
             if (alpha - 1.0).abs() == 0.0 {
                 unifrac_striped_par_weighted(
-                    &post, &kids, &lens, &leaf_ids, &row2leaf,
-                    WeightedMode::Dense { counts: &counts }, nsamp, &col_sums)
+                    &post,
+                    &kids,
+                    &lens,
+                    &leaf_ids,
+                    &row2leaf,
+                    WeightedMode::Dense { counts: &counts },
+                    nsamp,
+                    &col_sums,
+                )
             } else {
                 unifrac_striped_par_generalized(
-                    &post, &kids, &lens, &leaf_ids, &row2leaf,
-                    WeightedMode::Dense { counts: &counts }, nsamp, &col_sums, alpha)
+                    &post,
+                    &kids,
+                    &lens,
+                    &leaf_ids,
+                    &row2leaf,
+                    WeightedMode::Dense { counts: &counts },
+                    nsamp,
+                    &col_sums,
+                    alpha,
+                )
             }
         } else {
             // BIOM CSR
@@ -1621,18 +1708,41 @@ fn main() -> Result<()> {
                 }
             }
             if col_sums.iter().all(|&x| x == 0.0) {
-                log::warn!("All column sums are zero in BIOM generalized run; check BIOM matrix data.");
+                log::warn!(
+                    "All column sums are zero in BIOM generalized run; check BIOM matrix data."
+                );
             }
             if (alpha - 1.0).abs() == 0.0 {
                 unifrac_striped_par_weighted(
-                    &post, &kids, &lens, &leaf_ids, &row2leaf,
-                    WeightedMode::Csr { indptr: &indptr, indices: &indices, data: &data },
-                    nsamp, &col_sums)
+                    &post,
+                    &kids,
+                    &lens,
+                    &leaf_ids,
+                    &row2leaf,
+                    WeightedMode::Csr {
+                        indptr: &indptr,
+                        indices: &indices,
+                        data: &data,
+                    },
+                    nsamp,
+                    &col_sums,
+                )
             } else {
                 unifrac_striped_par_generalized(
-                    &post, &kids, &lens, &leaf_ids, &row2leaf,
-                    WeightedMode::Csr { indptr: &indptr, indices: &indices, data: &data },
-                    nsamp, &col_sums, alpha)
+                    &post,
+                    &kids,
+                    &lens,
+                    &leaf_ids,
+                    &row2leaf,
+                    WeightedMode::Csr {
+                        indptr: &indptr,
+                        indices: &indices,
+                        data: &data,
+                    },
+                    nsamp,
+                    &col_sums,
+                    alpha,
+                )
             }
         }
     } else if weighted {
@@ -1645,8 +1755,15 @@ fn main() -> Result<()> {
                 }
             }
             unifrac_striped_par_weighted(
-                &post, &kids, &lens, &leaf_ids, &row2leaf,
-                WeightedMode::Dense { counts: &counts }, nsamp, &col_sums)
+                &post,
+                &kids,
+                &lens,
+                &leaf_ids,
+                &row2leaf,
+                WeightedMode::Dense { counts: &counts },
+                nsamp,
+                &col_sums,
+            )
         } else {
             for r in 0..taxa.len() {
                 let start = indptr[r] as usize;
@@ -1657,9 +1774,19 @@ fn main() -> Result<()> {
                 }
             }
             unifrac_striped_par_weighted(
-                &post, &kids, &lens, &leaf_ids, &row2leaf,
-                WeightedMode::Csr { indptr: &indptr, indices: &indices, data: &data },
-                nsamp, &col_sums)
+                &post,
+                &kids,
+                &lens,
+                &leaf_ids,
+                &row2leaf,
+                WeightedMode::Csr {
+                    indptr: &indptr,
+                    indices: &indices,
+                    data: &data,
+                },
+                nsamp,
+                &col_sums,
+            )
         }
     } else {
         // Unweighted
