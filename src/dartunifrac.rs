@@ -530,6 +530,19 @@ fn build_sketches(
             .map(|n| t2leaf.get(n.as_str()).copied())
             .collect();
 
+        let total_taxa = taxa.len();
+        let unmapped_taxa = row2leaf.iter().filter(|x| x.is_none()).count();
+        // presence across any sample
+        let taxa_nonzero_any = (0..total_taxa)
+            .filter(|&r| mat[r].iter().any(|&v| v > 0.0))
+            .count();
+        let mapped_taxa = total_taxa - unmapped_taxa;
+        let taxa_zero_all = total_taxa - taxa_nonzero_any;
+        info!(
+            "taxa (unweighted TSV): total={} mapped={} unmapped={} any_presence={} zero_all={}",
+            total_taxa, mapped_taxa, unmapped_taxa, taxa_nonzero_any, taxa_zero_all
+        );
+
         let total_usize = total;
         let lens_ref = &lens;
         let leaf_ids_ref = &leaf_ids;
@@ -590,6 +603,19 @@ fn build_sketches(
             .map(|n| t2leaf.get(n.as_str()).copied())
             .collect();
 
+        let total_taxa = taxa.len();
+        let unmapped_taxa = row2leaf.iter().filter(|x| x.is_none()).count();
+        // presence across any sample = nnz per row > 0
+        let taxa_nonzero_any = (0..total_taxa)
+            .filter(|&r| (indptr[r + 1] - indptr[r]) > 0)
+            .count();
+        let mapped_taxa = total_taxa - unmapped_taxa;
+        let taxa_zero_all = total_taxa - taxa_nonzero_any;
+        info!(
+            "taxa (unweighted BIOM): total={} mapped={} unmapped={} any_presence={} zero_all={}",
+            total_taxa, mapped_taxa, unmapped_taxa, taxa_nonzero_any, taxa_zero_all
+        );
+
         // synthesize a data[] of ones (presence) and transpose
         info!("transposing BIOM CSR→CSC …");
         let ones: Vec<f64> = vec![1.0; indices.len()];
@@ -648,6 +674,7 @@ fn build_sketches(
         anyhow::bail!("Fewer than 2 samples; nothing to compare.");
     }
 
+    info!("samples: total (pre-filter) = {}", nsamp);
     // Drop empty samples
     let mut kept_ws = Vec::with_capacity(nsamp);
     let mut kept_names = Vec::with_capacity(nsamp);
@@ -659,7 +686,15 @@ fn build_sketches(
     }
     let mut wsets = kept_ws;
     let samples = kept_names;
-    if samples.len() < 2 {
+    
+    let kept = samples.len();
+    let filtered_samples = nsamp.saturating_sub(kept);
+    info!(
+        "samples: kept = {}, filtered(empty) = {}",
+        kept, filtered_samples
+    );
+
+    if kept < 2 {
         anyhow::bail!("Fewer than 2 non-empty samples after filtering; nothing to compare.");
     }
 
@@ -835,6 +870,19 @@ fn build_sketches_weighted(
             .map(|n| t2leaf.get(n.as_str()).copied())
             .collect();
 
+        let total_taxa = taxa.len();
+        let unmapped_taxa = row2leaf.iter().filter(|x| x.is_none()).count();
+        // positive weight across any sample
+        let taxa_pos_any = (0..total_taxa)
+            .filter(|&r| counts[r].iter().any(|&v| v > 0.0))
+            .count();
+        let mapped_taxa = total_taxa - unmapped_taxa;
+        let taxa_zero_all = total_taxa - taxa_pos_any;
+        info!(
+            "taxa (weighted TSV): total={} mapped={} unmapped={} any_positive={} zero_all={}",
+            total_taxa, mapped_taxa, unmapped_taxa, taxa_pos_any, taxa_zero_all
+        );
+
         let total_usize = total;
         let lens_ref = &lens;
         let leaf_ids_ref = &leaf_ids;
@@ -920,6 +968,23 @@ fn build_sketches_weighted(
             .map(|n| t2leaf.get(n.as_str()).copied())
             .collect();
 
+        let total_taxa = taxa.len();
+        let unmapped_taxa = row2leaf.iter().filter(|x| x.is_none()).count();
+        // positive weight across any sample using CSR row slices
+        let mut taxa_pos_any = 0usize;
+        for r in 0..total_taxa {
+            let a = indptr[r] as usize;
+            let b = indptr[r + 1] as usize;
+            let any_pos = data[a..b].iter().any(|&v| v > 0.0);
+            if any_pos { taxa_pos_any += 1; }
+        }
+        let mapped_taxa = total_taxa - unmapped_taxa;
+        let taxa_zero_all = total_taxa - taxa_pos_any;
+        info!(
+            "taxa (weighted BIOM): total={} mapped={} unmapped={} any_positive={} zero_all={}",
+            total_taxa, mapped_taxa, unmapped_taxa, taxa_pos_any, taxa_zero_all
+        );
+
         // transpose to CSC for fast per-sample scans
         info!("transposing BIOM CSR→CSC …");
         let (colptr, rowind, vals) = csr_to_csc(&indptr, &indices, &data, nsamp);
@@ -1001,7 +1066,15 @@ fn build_sketches_weighted(
     }
     let mut wsets = kept_ws;
     let samples = kept_names;
-    if samples.len() < 2 {
+        
+    let kept = samples.len();
+    let filtered_samples = nsamp.saturating_sub(kept);
+    info!(
+        "samples: kept = {}, filtered(empty) = {}",
+        kept, filtered_samples
+    );
+
+    if kept < 2 {
         anyhow::bail!("Fewer than 2 non-empty samples; nothing to compare.");
     }
 
@@ -1209,7 +1282,7 @@ fn main() -> Result<()> {
         .unwrap_or("🎯");
 
     let m = Command::new("dartunifrac")
-        .version("0.2.4")
+        .version("0.2.5")
         .about(format!("DartUniFrac: Approximate UniFrac via Weighted MinHash {dart}{dart}{dart}"))
         .arg(
             Arg::new("tree")
