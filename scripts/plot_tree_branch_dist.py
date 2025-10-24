@@ -43,7 +43,7 @@ with open(filename, "r") as f:
 arr = np.array(data)
 
 # Histogram
-plt.hist(arr, bins=10, edgecolor="black", alpha=0.7, density=True, label="Histogram")
+plt.hist(arr, bins=20, edgecolor="black", alpha=0.7, density=True, label="Histogram")
 
 # Kernel Density Estimate (smooth curve)
 kde = gaussian_kde(arr)
