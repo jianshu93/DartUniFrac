@@ -582,6 +582,7 @@ fn build_stripe_dense(
     s0: usize,
     s1: usize,
     total: usize,
+    raw_counts: bool,
 ) -> Stripe {
     let bw = s1 - s0;
     let mut idx_of = vec![u32::MAX; total];
@@ -594,20 +595,27 @@ fn build_stripe_dense(
         let v_leaf = leaf_ids[lp];
 
         for s in s0..s1 {
-            let denom = col_sums[s];
-            if denom <= 0.0 {
-                continue;
-            }
             let val = counts[r][s];
             if val <= 0.0 {
                 continue;
             }
-            let inc = (val / denom) as f32;
+
+            // choose between raw counts and normalized
+            let inc: f32 = if raw_counts {
+                val as f32
+            } else {
+                let denom = col_sums[s];
+                if denom <= 0.0 {
+                    continue;
+                }
+                (val / denom) as f32
+            };
 
             // leaf to root accumulation
             let mut v = v_leaf;
             loop {
-                let (row_idx, row) = ensure_row_slot(v, &mut idx_of, &mut nodes, &mut rows, &mut nz, bw);
+                let (row_idx, row) =
+                    ensure_row_slot(v, &mut idx_of, &mut nodes, &mut rows, &mut nz, bw);
                 let off = s - s0;
                 if row[off] == 0.0 {
                     nz[row_idx].push(off);
@@ -635,6 +643,7 @@ fn build_stripe_csr(
     s0: usize,
     s1: usize,
     total: usize,
+    raw_counts: bool,
 ) -> Stripe {
     let bw = s1 - s0;
     let mut idx_of = vec![u32::MAX; total];
@@ -653,19 +662,27 @@ fn build_stripe_csr(
             if s < s0 || s >= s1 {
                 continue;
             }
-            let denom = col_sums[s];
-            if denom <= 0.0 {
-                continue;
-            }
+
             let val = data[k];
             if val <= 0.0 {
                 continue;
             }
-            let inc = (val / denom) as f32;
+
+            // choose between raw counts and normalized
+            let inc: f32 = if raw_counts {
+                val as f32
+            } else {
+                let denom = col_sums[s];
+                if denom <= 0.0 {
+                    continue;
+                }
+                (val / denom) as f32
+            };
 
             let mut v = v_leaf;
             loop {
-                let (row_idx, row) = ensure_row_slot(v, &mut idx_of, &mut nodes, &mut rows, &mut nz, bw);
+                let (row_idx, row) =
+                    ensure_row_slot(v, &mut idx_of, &mut nodes, &mut rows, &mut nz, bw);
                 let off = s - s0;
                 if row[off] == 0.0 {
                     nz[row_idx].push(off);
@@ -720,6 +737,7 @@ fn unifrac_striped_par_weighted(
     mode: WeightedMode,
     nsamp: usize,
     col_sums: &[f64],
+    raw_counts: bool,
 ) -> Vec<f64> {
     // parent[]
     let total = lens.len();
@@ -748,11 +766,11 @@ fn unifrac_striped_par_weighted(
         let bw = i1 - i0;
 
         let stripe_i = match &mode {
-            WeightedMode::Dense { counts } => {
-                build_stripe_dense(counts, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total)
-            }
+            WeightedMode::Dense { counts } => build_stripe_dense(
+                counts, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total, raw_counts // NEW
+            ),
             WeightedMode::Csr { indptr, indices, data } => build_stripe_csr(
-                indptr, indices, data, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total
+                indptr, indices, data, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total, raw_counts // NEW
             ),
         };
 
@@ -778,10 +796,10 @@ fn unifrac_striped_par_weighted(
             } else {
                 match mode_c {
                     WeightedMode::Dense { counts } => build_stripe_dense(
-                        counts, row2leaf_ref, leaf_ids_ref, parent_ref, col_sums_ref, j0, j1, total
+                        counts, row2leaf_ref, leaf_ids_ref, parent_ref, col_sums_ref, j0, j1, total, raw_counts
                     ),
                     WeightedMode::Csr { indptr, indices, data } => build_stripe_csr(
-                        indptr, indices, data, row2leaf_ref, leaf_ids_ref, parent_ref, col_sums_ref, j0, j1, total
+                        indptr, indices, data, row2leaf_ref, leaf_ids_ref, parent_ref, col_sums_ref, j0, j1, total, raw_counts
                     ),
                 }
             };
@@ -887,8 +905,6 @@ fn unifrac_striped_par_generalized(
     col_sums: &[f64],
     alpha: f64,
 ) -> Vec<f64> {
-    use std::sync::Arc;
-
     let total = lens.len();
     let parent: Vec<usize> = {
         let mut p = vec![usize::MAX; total];
@@ -922,10 +938,10 @@ fn unifrac_striped_par_generalized(
 
         let stripe_i = match &mode {
             WeightedMode::Dense { counts } => {
-                build_stripe_dense(counts, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total)
+                build_stripe_dense(counts, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total, false)
             }
             WeightedMode::Csr { indptr, indices, data } => build_stripe_csr(
-                indptr, indices, data, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total
+                indptr, indices, data, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total, false
             ),
         };
 
@@ -951,10 +967,10 @@ fn unifrac_striped_par_generalized(
             } else {
                 match mode_c {
                     WeightedMode::Dense { counts } => build_stripe_dense(
-                        counts, row2leaf_ref, leaf_ids_ref, parent_ref, col_sums_ref, j0, j1, total
+                        counts, row2leaf_ref, leaf_ids_ref, parent_ref, col_sums_ref, j0, j1, total, false
                     ),
                     WeightedMode::Csr { indptr, indices, data } => build_stripe_csr(
-                        indptr, indices, data, row2leaf_ref, leaf_ids_ref, parent_ref, col_sums_ref, j0, j1, total
+                        indptr, indices, data, row2leaf_ref, leaf_ids_ref, parent_ref, col_sums_ref, j0, j1, total, false
                     ),
                 }
             };
@@ -1200,6 +1216,12 @@ fn main() -> Result<()> {
                 .action(ArgAction::SetTrue),
         )
         .arg(
+            Arg::new("raw_sample_counts")
+                .long("raw-sample-counts")
+                .help("Weighted UniFrac using raw sample counts. Applies only with --weighted. Ignored for --generalized and unweighted.")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("threads")
                 .long("threads")
                 .short('T')
@@ -1239,6 +1261,7 @@ fn main() -> Result<()> {
     let generalized = *m.get_one::<bool>("generalized").unwrap_or(&false);
     let alpha = *m.get_one::<f64>("alpha").unwrap_or(&0.5);
     let weighted = *m.get_one::<bool>("weighted").unwrap_or(&false);
+    let raw_counts = *m.get_one::<bool>("raw_sample_counts").unwrap_or(&false);
 
     let threads = m
         .get_one::<usize>("threads")
@@ -1367,6 +1390,7 @@ fn main() -> Result<()> {
                     WeightedMode::Dense { counts: &counts },
                     nsamp,
                     &col_sums,
+                    raw_counts,
                 )
             } else {
                 unifrac_striped_par_generalized(
@@ -1407,6 +1431,7 @@ fn main() -> Result<()> {
                     },
                     nsamp,
                     &col_sums,
+                    raw_counts,
                 )
             } else {
                 unifrac_striped_par_generalized(
@@ -1427,13 +1452,18 @@ fn main() -> Result<()> {
             }
         }
     } else if weighted {
-        let mut col_sums = vec![0.0f64; nsamp];
+        let _col_sums = vec![0.0f64; nsamp];
         if pres_dense {
-            for r in 0..counts.len() {
-                for s in 0..nsamp {
-                    col_sums[s] += counts[r][s];
+            let col_sums = if raw_counts {
+                vec![1.0f64; nsamp] // dummy; unused when raw_counts==true
+            } else {
+                let mut v = vec![0.0f64; nsamp];
+                for r in 0..counts.len() {
+                    for s in 0..nsamp { v[s] += counts[r][s]; }
                 }
-            }
+                v
+            };
+
             unifrac_striped_par_weighted(
                 &post,
                 &kids,
@@ -1443,16 +1473,21 @@ fn main() -> Result<()> {
                 WeightedMode::Dense { counts: &counts },
                 nsamp,
                 &col_sums,
+                raw_counts,
             )
         } else {
-            for r in 0..taxa.len() {
-                let start = indptr[r] as usize;
-                let stop = indptr[r + 1] as usize;
-                for k in start..stop {
-                    let s = indices[k] as usize;
-                    col_sums[s] += data[k];
+            let col_sums = if raw_counts {
+                vec![1.0f64; nsamp] // dummy; unused when raw_counts==true
+            } else {
+                let mut v = vec![0.0f64; nsamp];
+                for r in 0..taxa.len() {
+                    let a = indptr[r] as usize;
+                    let b = indptr[r + 1] as usize;
+                    for k in a..b { v[indices[k] as usize] += data[k]; }
                 }
-            }
+                v
+            };
+
             unifrac_striped_par_weighted(
                 &post,
                 &kids,
@@ -1466,6 +1501,7 @@ fn main() -> Result<()> {
                 },
                 nsamp,
                 &col_sums,
+                raw_counts,
             )
         }
     } else {
