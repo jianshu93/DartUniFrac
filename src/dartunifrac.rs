@@ -1635,8 +1635,8 @@ fn main() -> Result<()> {
         let n = nsamp;
         // take the ownership of dist to avoid copy, dist wrote to disk already
         // convert f32 -> f64 for PCoA
-+       let dm_f64: Vec<f64> = dist.iter().map(|&x| x as f64).collect();
-+       let dm = Array2::from_shape_vec((n, n), dm_f64).expect("distance matrix shape");
+        let dm_f64: Vec<f64> = dist.iter().map(|&x| x as f64).collect();
+        let dm = Array2::from_shape_vec((n, n), dm_f64).expect("distance matrix shape");
 
         let opts = FpcoaOptions {
             k: 10,
