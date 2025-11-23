@@ -290,43 +290,39 @@ fn read_biom_csr_values(
 
 // Write TSV matrix (fast, reusing ryu buffer per row)
 fn write_matrix(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()> {
-    // Header
-    let header = {
-        let mut s = String::with_capacity(n * 16);
-        s.push_str("");
-        for name in names {
-            s.push('\t');
-            s.push_str(name);
-        }
-        s.push('\n');
-        s
-    };
+    use std::fs::File;
+    use std::io::{BufWriter, Write};
 
-    // Build all rows in parallel; reuse a single ryu buffer per row
-    let mut rows: Vec<String> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let mut line = String::with_capacity(8 + n * 12);
-            line.push_str(&names[i]);
-            let base = i * n;
-            // Adams, U., 2018, June. Ryū: fast float-to-string conversion. In Proceedings of the 39th ACM SIGPLAN Conference on Programming Language Design and Implementation (pp. 270-282).
-            let mut buf = ryu::Buffer::new();
-            for j in 0..n {
-                let val: f32 = unsafe { *d.get_unchecked(base + j) };
-                line.push('\t');
-                line.push_str(buf.format_finite(val));
-            }
-            line.push('\n');
-            line
-        })
-        .collect();
+    // Open output file with a big buffered writer
+    let file = File::create(path)?;
+    let mut out = BufWriter::with_capacity(16 << 20, file);
 
-    let mut out = BufWriter::with_capacity(16 << 20, File::create(path)?);
-    out.write_all(header.as_bytes())?;
-    for line in &mut rows {
-        out.write_all(line.as_bytes())?;
-        line.clear();
+    // Header: "", <sample1> <sample2> ... <sampleN>
+    out.write_all(b"")?;
+    for name in names {
+        out.write_all(b"\t")?;
+        out.write_all(name.as_bytes())?;
     }
+    out.write_all(b"\n")?;
+
+    // Single ryu buffer reused for all values (still very fast)
+    let mut buf = ryu::Buffer::new();
+    let nn = n;
+
+    // Stream rows one by one; no extra O(n²) memory
+    for i in 0..nn {
+        // Row label
+        out.write_all(names[i].as_bytes())?;
+
+        let base = i * nn;
+        for j in 0..nn {
+            let val = unsafe { *d.get_unchecked(base + j) };
+            out.write_all(b"\t")?;
+            out.write_all(buf.format_finite(val).as_bytes())?;
+        }
+        out.write_all(b"\n")?;
+    }
+
     out.flush()?;
     Ok(())
 }
@@ -335,7 +331,7 @@ fn write_matrix_zstd(names: &[String], d: &[f32], n: usize, path: &str) -> Resul
     use std::fs::File;
     use std::io::{BufWriter, Write};
 
-    // zstd multi-threading
+    // zstd encoder (multi-threaded) + big buffer
     let file = File::create(path)?;
     let mut enc = zstd::Encoder::new(file, 0)?;
     let zstd_threads = rayon::current_num_threads() as u32;
@@ -344,42 +340,33 @@ fn write_matrix_zstd(names: &[String], d: &[f32], n: usize, path: &str) -> Resul
     }
     let mut out = BufWriter::with_capacity(16 << 20, enc.auto_finish());
 
-    // Header
-    let header = {
-        let mut s = String::with_capacity(n * 16);
-        s.push_str("");
-        for name in names {
-            s.push('\t');
-            s.push_str(name);
-        }
-        s.push('\n');
-        s
-    };
-    out.write_all(header.as_bytes())?;
-
-    let mut rows: Vec<String> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let mut line = String::with_capacity(8 + n * 12);
-            line.push_str(&names[i]);
-            let base = i * n;
-            let mut buf = ryu::Buffer::new();
-            for j in 0..n {
-                let val: f32 = unsafe { *d.get_unchecked(base + j) };
-                line.push('\t');
-                line.push_str(buf.format_finite(val));
-            }
-            line.push('\n');
-            line
-        })
-        .collect();
-
-    for line in &mut rows {
-        out.write_all(line.as_bytes())?;
-        line.clear();
+    // Header: "", <sample1> <sample2> ... <sampleN>
+    out.write_all(b"")?;
+    for name in names {
+        out.write_all(b"\t")?;
+        out.write_all(name.as_bytes())?;
     }
-    out.flush()?;
+    out.write_all(b"\n")?;
 
+    // Single ryu buffer reused for all values
+    let mut buf = ryu::Buffer::new();
+    let nn = n;
+
+    // Stream rows one by one to the compressed writer
+    for i in 0..nn {
+        // Row label
+        out.write_all(names[i].as_bytes())?;
+
+        let base = i * nn;
+        for j in 0..nn {
+            let val = unsafe { *d.get_unchecked(base + j) };
+            out.write_all(b"\t")?;
+            out.write_all(buf.format_finite(val).as_bytes())?;
+        }
+        out.write_all(b"\n")?;
+    }
+
+    out.flush()?;
     Ok(())
 }
 
