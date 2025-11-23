@@ -44,6 +44,9 @@ use succparen::{
 use fpcoa::{FpcoaOptions, pcoa_randomized};
 use ndarray::{Array1, Array2};
 
+#[cfg(feature = "cuda")]
+mod disthamming_gpu;
+
 type NwkTree = newick::NewickTree;
 
 // Tree traversal to collect branch lengths
@@ -309,7 +312,7 @@ fn write_matrix(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()>
             // Adams, U., 2018, June. Ryū: fast float-to-string conversion. In Proceedings of the 39th ACM SIGPLAN Conference on Programming Language Design and Implementation (pp. 270-282).
             let mut buf = ryu::Buffer::new();
             for j in 0..n {
-                let val = unsafe { *d.get_unchecked(base + j) } as f64;
+                let val: f32 = unsafe { *d.get_unchecked(base + j) };
                 line.push('\t');
                 line.push_str(buf.format_finite(val));
             }
@@ -362,7 +365,7 @@ fn write_matrix_zstd(names: &[String], d: &[f32], n: usize, path: &str) -> Resul
             let base = i * n;
             let mut buf = ryu::Buffer::new();
             for j in 0..n {
-                let val = unsafe { *d.get_unchecked(base + j) } as f64;
+                let val: f32 = unsafe { *d.get_unchecked(base + j) };
                 line.push('\t');
                 line.push_str(buf.format_finite(val));
             }
@@ -424,18 +427,18 @@ fn write_matrix_streaming_zstd(
         block.par_chunks_mut(bs).enumerate().for_each(|(j, col)| {
             for bi in 0..h {
                 let i = i0 + bi;
-                let mut d = if i == j {
-                    0.0
+                let mut d: f32 = if i == j {
+                     0.0f32
                 } else {
-                    dh.eval(&sketches[i], &sketches[j]) as f64
+                    dh.eval(&sketches[i], &sketches[j]) as f32
                 };
                 // d is an unbiased estimate of d_J = 1 - Jw
                 if weighted_normalized {
                     // Bray–Curtis / normalized weighted UniFrac:
                     // D = (1 - Jw) / (1 + Jw) = d_J / (2 - d_J)
-                    d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
+                    d = if d < 2.0f32 { d / (2.0f32 - d) } else { 1.0f32 };
                 }
-                col[bi] = d as f32; // write into column-major slot (j, bi)
+                col[bi] = d; // write into column-major slot (j, bi)
             }
         });
 
@@ -452,7 +455,7 @@ fn write_matrix_streaming_zstd(
                 let mut fmt = ryu::Buffer::new();
                 for j in 0..n {
                     line.push('\t');
-                    let v = block[j * bs + bi] as f64; // column-major index (j, bi)
+                    let v: f32 = block[j * bs + bi]; // column-major index (j, bi)
                     line.push_str(fmt.format_finite(v));
                 }
                 line.push('\n');
@@ -530,19 +533,6 @@ fn build_sketches(
             .map(|n| t2leaf.get(n.as_str()).copied())
             .collect();
 
-        let total_taxa = taxa.len();
-        let unmapped_taxa = row2leaf.iter().filter(|x| x.is_none()).count();
-        // presence across any sample
-        let taxa_nonzero_any = (0..total_taxa)
-            .filter(|&r| mat[r].iter().any(|&v| v > 0.0))
-            .count();
-        let mapped_taxa = total_taxa - unmapped_taxa;
-        let taxa_zero_all = total_taxa - taxa_nonzero_any;
-        info!(
-            "taxa (unweighted TSV): total={} mapped={} unmapped={} any_presence={} zero_all={}",
-            total_taxa, mapped_taxa, unmapped_taxa, taxa_nonzero_any, taxa_zero_all
-        );
-
         let total_usize = total;
         let lens_ref = &lens;
         let leaf_ids_ref = &leaf_ids;
@@ -603,19 +593,6 @@ fn build_sketches(
             .map(|n| t2leaf.get(n.as_str()).copied())
             .collect();
 
-        let total_taxa = taxa.len();
-        let unmapped_taxa = row2leaf.iter().filter(|x| x.is_none()).count();
-        // presence across any sample = nnz per row > 0
-        let taxa_nonzero_any = (0..total_taxa)
-            .filter(|&r| (indptr[r + 1] - indptr[r]) > 0)
-            .count();
-        let mapped_taxa = total_taxa - unmapped_taxa;
-        let taxa_zero_all = total_taxa - taxa_nonzero_any;
-        info!(
-            "taxa (unweighted BIOM): total={} mapped={} unmapped={} any_presence={} zero_all={}",
-            total_taxa, mapped_taxa, unmapped_taxa, taxa_nonzero_any, taxa_zero_all
-        );
-
         // synthesize a data[] of ones (presence) and transpose
         info!("transposing BIOM CSR→CSC …");
         let ones: Vec<f64> = vec![1.0; indices.len()];
@@ -674,7 +651,6 @@ fn build_sketches(
         anyhow::bail!("Fewer than 2 samples; nothing to compare.");
     }
 
-    info!("samples: total (pre-filter) = {}", nsamp);
     // Drop empty samples
     let mut kept_ws = Vec::with_capacity(nsamp);
     let mut kept_names = Vec::with_capacity(nsamp);
@@ -686,15 +662,7 @@ fn build_sketches(
     }
     let mut wsets = kept_ws;
     let samples = kept_names;
-    
-    let kept = samples.len();
-    let filtered_samples = nsamp.saturating_sub(kept);
-    info!(
-        "samples: kept = {}, filtered(empty) = {}",
-        kept, filtered_samples
-    );
-
-    if kept < 2 {
+    if samples.len() < 2 {
         anyhow::bail!("Fewer than 2 non-empty samples after filtering; nothing to compare.");
     }
 
@@ -870,19 +838,6 @@ fn build_sketches_weighted(
             .map(|n| t2leaf.get(n.as_str()).copied())
             .collect();
 
-        let total_taxa = taxa.len();
-        let unmapped_taxa = row2leaf.iter().filter(|x| x.is_none()).count();
-        // positive weight across any sample
-        let taxa_pos_any = (0..total_taxa)
-            .filter(|&r| counts[r].iter().any(|&v| v > 0.0))
-            .count();
-        let mapped_taxa = total_taxa - unmapped_taxa;
-        let taxa_zero_all = total_taxa - taxa_pos_any;
-        info!(
-            "taxa (weighted TSV): total={} mapped={} unmapped={} any_positive={} zero_all={}",
-            total_taxa, mapped_taxa, unmapped_taxa, taxa_pos_any, taxa_zero_all
-        );
-
         let total_usize = total;
         let lens_ref = &lens;
         let leaf_ids_ref = &leaf_ids;
@@ -968,23 +923,6 @@ fn build_sketches_weighted(
             .map(|n| t2leaf.get(n.as_str()).copied())
             .collect();
 
-        let total_taxa = taxa.len();
-        let unmapped_taxa = row2leaf.iter().filter(|x| x.is_none()).count();
-        // positive weight across any sample using CSR row slices
-        let mut taxa_pos_any = 0usize;
-        for r in 0..total_taxa {
-            let a = indptr[r] as usize;
-            let b = indptr[r + 1] as usize;
-            let any_pos = data[a..b].iter().any(|&v| v > 0.0);
-            if any_pos { taxa_pos_any += 1; }
-        }
-        let mapped_taxa = total_taxa - unmapped_taxa;
-        let taxa_zero_all = total_taxa - taxa_pos_any;
-        info!(
-            "taxa (weighted BIOM): total={} mapped={} unmapped={} any_positive={} zero_all={}",
-            total_taxa, mapped_taxa, unmapped_taxa, taxa_pos_any, taxa_zero_all
-        );
-
         // transpose to CSC for fast per-sample scans
         info!("transposing BIOM CSR→CSC …");
         let (colptr, rowind, vals) = csr_to_csc(&indptr, &indices, &data, nsamp);
@@ -1066,15 +1004,7 @@ fn build_sketches_weighted(
     }
     let mut wsets = kept_ws;
     let samples = kept_names;
-        
-    let kept = samples.len();
-    let filtered_samples = nsamp.saturating_sub(kept);
-    info!(
-        "samples: kept = {}, filtered(empty) = {}",
-        kept, filtered_samples
-    );
-
-    if kept < 2 {
+    if samples.len() < 2 {
         anyhow::bail!("Fewer than 2 non-empty samples; nothing to compare.");
     }
 
@@ -1281,8 +1211,8 @@ fn main() -> Result<()> {
         .map(|e| e.as_str())
         .unwrap_or("🎯");
 
-    let m = Command::new("dartunifrac")
-        .version("0.2.6")
+    let mut cmd = Command::new("dartunifrac")
+        .version("0.2.4")
         .about(format!("DartUniFrac: Approximate UniFrac via Weighted MinHash {dart}{dart}{dart}"))
         .arg(
             Arg::new("tree")
@@ -1304,9 +1234,10 @@ fn main() -> Result<()> {
                 .help("OTU/Feature table in BIOM (HDF5) format"),
         )
         .group(
-            ArgGroup::new("table").
-            args(["input", "biom"]).
-            required(true))
+            ArgGroup::new("table")
+                .args(["input", "biom"])
+                .required(true),
+        )
         .arg(
             Arg::new("output")
                 .short('o')
@@ -1342,8 +1273,6 @@ fn main() -> Result<()> {
                 .short('l')
                 .help("Per-hash independent random sequence length for ERS, must be >= 512")
                 .value_parser(clap::value_parser!(u64))
-                // See Li and Li 2021 AAAI paper Figure 2. Large L has smaller bias and will be unbiased when L goes unlimited (Rejection Sampling)
-                // L should be determined by the sparsity of relevant branches for each sample
                 .default_value("2048"),
         )
         .arg(
@@ -1383,8 +1312,26 @@ fn main() -> Result<()> {
                 .long("block")
                 .help("Number of rows per chunk, streaming mode only")
                 .value_parser(clap::value_parser!(usize)),
-        )
-        .get_matches();
+        );
+    #[cfg(feature = "cuda")]
+    {
+        cmd = cmd
+            .arg(
+                Arg::new("gpu-streaming")
+                    .long("gpu-streaming")
+                    .help("Streaming the distance matrix to disk block by block (multi-GPU support); available only with the 'cuda' feature")
+                    .action(clap::ArgAction::SetTrue),
+            )
+            .arg(
+                Arg::new("tile-cols")
+                    .long("tile-cols")
+                    .help("Number of columns per GPU tile in gpu-streaming mode")
+                    .value_parser(clap::value_parser!(usize))
+                    .default_value("8192"),
+            );
+    }
+
+    let m = cmd.get_matches();
 
     let tree_file = m.get_one::<String>("tree").unwrap();
     let input_tsv = m.get_one::<String>("input").map(|s| s.as_str());
@@ -1399,6 +1346,12 @@ fn main() -> Result<()> {
     let pcoa = m.get_flag("pcoa");
     let stream = m.get_flag("streaming");
     let block = m.get_one::<usize>("block").copied();
+
+    #[cfg(feature = "cuda")]
+    let gpu_streaming = m.get_flag("gpu-streaming");
+
+    #[cfg(feature = "cuda")]
+    let tile_cols = *m.get_one::<usize>("tile-cols").unwrap();
 
     let threads = m
         .get_one::<usize>("threads")
@@ -1463,37 +1416,197 @@ fn main() -> Result<()> {
         info!("Done → {}", out_path_stream_str);
         return Ok(());
     }
-    // Pairwise UniFrac (≈ 1 - Jaccard) via normalized Hamming on ID arrays.
-    let t2 = Instant::now();
-    let dist: Vec<f32> = {
-        let n = nsamp;
-        let dh = DistHamming;
-        let mut out = vec![0.0f32; n * n];
-
-        out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
-            row[i] = 0.0;
-            for j in (i + 1)..n {
-                // compute in f64, then cast once
-                let d_j = dh.eval(&sketches_u64[i], &sketches_u64[j]) as f64; // d_J ≈ 1 - Jw
-                let d64 = if weighted {
-                    if d_j < 2.0 { d_j / (2.0 - d_j) } else { 1.0 }
-                } else {
-                    d_j
-                };
-                row[j] = d64 as f32;
+    // CPU streaming block
+    if stream {
+        if pcoa {
+            warn!("--pcoa is incompatible with --stream; skipping PCoA in streaming mode.");
+        }
+        if compress {
+            warn!(
+                "--compress is ignored with --stream; streaming output is already zstd-compressed."
+            );
+        }
+        let out_path_stream: PathBuf = if stream {
+            let p_stream = Path::new(out_file);
+            match p_stream.extension().and_then(|e| e.to_str()) {
+                Some("zst") => p_stream.to_path_buf(),
+                _ => PathBuf::from(format!("{out_file}.zst")),
             }
-        });
+        } else {
+            PathBuf::from(out_file)
+        };
+        let out_path_stream_str = out_path_stream.to_string_lossy();
 
-        // Mirror upper to lower.
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let v = out[i * n + j];
-                out[j * n + i] = v;
+        info!(
+            "Streaming zstd-compressed distance matrix → {}",
+            out_path_stream_str
+        );
+        write_matrix_streaming_zstd(
+            &samples,
+            &sketches_u64,
+            &out_path_stream_str,
+            block,
+            weighted,
+        )?;
+        info!("Done → {}", out_path_stream_str);
+        return Ok(());
+    }
+
+    // GPU streaming block
+    #[cfg(feature = "cuda")]
+    if gpu_streaming {
+        if pcoa {
+            warn!("--pcoa is incompatible with --gpu-streaming; skipping PCoA.");
+        }
+        if compress {
+            warn!("--compress is ignored with --gpu-streaming; output is written as zstd already.");
+        }
+
+        let ng = disthamming_gpu::device_count().unwrap_or(0);
+        if ng == 0 {
+            warn!(
+                "--gpu-streaming requested but no CUDA device found; falling back to normal path."
+            );
+        } else {
+            // pick/path with .zst suffix if none provided
+            let out_path_stream: PathBuf = {
+                let p = Path::new(out_file);
+                match p.extension().and_then(|e| e.to_str()) {
+                    Some("zst") => p.to_path_buf(),
+                    _ => PathBuf::from(format!("{out_file}.zst")),
+                }
+            };
+            let out_path_stream_str = out_path_stream.to_string_lossy();
+
+            // flatten sketches to row-major [n*k]
+            let n = nsamp;
+            let ksk = sketches_u64[0].len();
+            let mut flat: Vec<u64> = Vec::with_capacity(n * ksk);
+            for row in &sketches_u64 {
+                debug_assert_eq!(row.len(), ksk);
+                flat.extend_from_slice(row);
+            }
+
+            info!(
+                "GPU streaming with {} GPU{} → {} (tile_cols={})",
+                ng,
+                if ng > 1 { "s" } else { "" },
+                out_path_stream_str,
+                tile_cols
+            );
+
+            // This function should *internally* use all GPUs if ng>1, otherwise the single GPU,
+            // and stream rows to a zstd writer so host RAM stays small.
+            disthamming_gpu::write_matrix_streaming_gpu_auto(
+                &samples,             // names
+                &flat,                // sketches_flat_u64
+                n,                    // n
+                ksk,                  // k
+                &out_path_stream_str, // path
+                true,                 // compress (zstd)
+                weighted,             // weighted_normalized
+                tile_cols,            // tile width
+            )?;
+
+            info!("Done → {}", out_path_stream_str);
+            return Ok(());
+        }
+    }
+
+    // Pairwise UniFrac (≈ 1 - Jaccard) via normalized Hamming on ID arrays.
+    let dist = {
+        let n = nsamp;
+        #[cfg(feature = "cuda")]
+        {
+            let k = sketches_u64[0].len();
+            match disthamming_gpu::device_count() {
+                Ok(ng) if ng >= 1 => {
+                    log::info!(
+                        "CUDA detected ({} device{}). Computing pairwise distances on GPU{} …",
+                        ng,
+                        if ng > 1 { "s" } else { "" },
+                        if ng > 1 { "s" } else { "" }
+                    );
+                    let t2 = Instant::now();
+
+                    // Flatten sketches: row-major [n*k]
+                    let mut flat: Vec<u64> = Vec::with_capacity(n * k);
+                    for row in &sketches_u64 {
+                        debug_assert_eq!(row.len(), k);
+                        flat.extend_from_slice(row);
+                    }
+
+                    let mut out = vec![0.0f32; n * n];
+                    // 8192 works well; feel free to tune (4096..16384)
+                    disthamming_gpu::pairwise_hamming_multi_gpu(
+                        &flat, n, k, &mut out, 8192, weighted,
+                    )?;
+                    log::info!(
+                        "pairwise distances (GPU) in {} ms",
+                        t2.elapsed().as_millis()
+                    );
+                    out
+                }
+                _ => {
+                    log::info!("CUDA not available (or not enabled). Falling back to CPU.");
+                    // CPU fallback path
+                    let t2 = Instant::now();
+                    let dh = DistHamming;
+                    let mut out = vec![0.0f32; n * n];
+                    out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+                        row[i] = 0.0f32;
+                        for j in (i + 1)..n {
+                            let mut d: f32 = dh.eval(&sketches_u64[i], &sketches_u64[j]) as f32;
+                            if weighted {
+                                d = if d < 2.0f32 { d / (2.0f32 - d) } else { 1.0f32 };
+                            }
+                            row[j] = d;
+                        }
+                    });
+                    for i in 0..n {
+                        for j in (i + 1)..n {
+                            let v = out[i * n + j];
+                            out[j * n + i] = v;
+                        }
+                    }
+                    log::info!(
+                        "pairwise distances (CPU) in {} ms",
+                        t2.elapsed().as_millis()
+                    );
+                    out
+                }
             }
         }
-        out
+
+        // If compiled without the "cuda" feature, this block is the only one:
+        #[cfg(not(feature = "cuda"))]
+        {
+            let t2 = Instant::now();
+            let dh = DistHamming;
+            let mut out = vec![0.0f32; n * n];
+            out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+                row[i] = 0.0f32;
+                for j in (i + 1)..n {
+                    let mut d: f32 = dh.eval(&sketches_u64[i], &sketches_u64[j]) as f32;
+                    if weighted {
+                        d = if d < 2.0f32 { d / (2.0f32 - d) } else { 1.0f32 };
+                    }
+                    row[j] = d;
+                }
+            });
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    let v = out[i * n + j];
+                    out[j * n + i] = v;
+                }
+            }
+            log::info!(
+                "pairwise distances (CPU) in {} ms",
+                t2.elapsed().as_millis()
+            );
+            out
+        }
     };
-    info!("pairwise distances in {} ms", t2.elapsed().as_millis());
 
     // Write output (fast ryu formatting) with compression (.zst)
     let out_path: PathBuf = if compress {
@@ -1520,10 +1633,10 @@ fn main() -> Result<()> {
 
     if pcoa {
         let n = nsamp;
-
-        // Upcast f32 → f64 just for PCoA
-        let dist_f64: Vec<f64> = dist.into_iter().map(|x| x as f64).collect();
-        let dm = Array2::from_shape_vec((n, n), dist_f64).expect("distance matrix shape");
+        // take the ownership of dist to avoid copy, dist wrote to disk already
+        // convert f32 -> f64 for PCoA
++       let dm_f64: Vec<f64> = dist.iter().map(|&x| x as f64).collect();
++       let dm = Array2::from_shape_vec((n, n), dm_f64).expect("distance matrix shape");
 
         let opts = FpcoaOptions {
             k: 10,
@@ -1532,6 +1645,10 @@ fn main() -> Result<()> {
             symmetrize_input: false,
         };
 
+        info!(
+            "Running randomized PCoA: k={}, oversample={}, iters={}",
+            opts.k, opts.oversample, opts.nbiter
+        );
         let t_pcoa = Instant::now();
         let res = pcoa_randomized(dm.view(), opts);
         info!("PCoA done in {} ms", t_pcoa.elapsed().as_millis());

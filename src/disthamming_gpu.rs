@@ -1,17 +1,18 @@
 //! CUDA: in-memory pairwise (single/multi GPU) hamming & automatic streaming writer.
+//! Distances are stored as `f32` (float) to halve memory vs f64.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::{sync::Arc, thread};
 
 use cudarc::driver::{CudaContext, CudaSlice, LaunchConfig, PushKernelArg};
 use cudarc::nvrtc::compile_ptx;
-use log::debug;
-use log::info;
-use log::warn;
+use log::{debug, info, warn};
 
 /// Kernel: computes a (bw×bh) tile of normalized Hamming distances
 /// sketches: [n*k] row-major u64 IDs
-/// Kernel: shared-memory–tiled Hamming for u64 IDs
+/// out: [bw*bh] row-major, leading dim = bh
+///
+/// NOTE: distances are `float` (f32) here.
 const KERNEL_SRC: &str = r#"
 #ifndef BK
 #define BK 64   // k-slab per iteration (tune: 32, 64, 128)
@@ -23,7 +24,7 @@ void hamming_tile_u64(
     int n, int k,
     int i0, int j0,
     int bw, int bh,
-    double* __restrict__ out, // [bw*bh], row-major, ldo = bh
+    float* __restrict__ out, // [bw*bh], row-major, ldo = bh
     int only_upper // 1 => only write j>i, 0 => write full tile
 ){
     // Thread's local coords within the logical tile
@@ -96,7 +97,7 @@ void hamming_tile_u64(
     // Write result (normalize in host if you need weighted transform)
     if (ii < bw && jj < bh) {
         if (!(i == j || (only_upper && j <= i))) {
-            out[(size_t)ii * (size_t)bh + (size_t)jj] = (double)diff / (double)k;
+            out[(size_t)ii * (size_t)bh + (size_t)jj] = (float)diff / (float)k;
         }
     }
 }
@@ -119,6 +120,7 @@ fn gib(x: usize) -> f64 {
 }
 
 /// Single-GPU, produces full n×n matrix in host CPU memory.
+/// Distances are stored as `f32` in `out_upper_tri`.
 pub fn pairwise_hamming_single_gpu(
     sketches_flat_u64: &[u64],
     n: usize,
@@ -154,12 +156,12 @@ pub fn pairwise_hamming_single_gpu(
     }
 
     info!(
-        "single-GPU: n={} k={} block_rows={} sketches={} GiB host_out={} GiB",
+        "single-GPU: n={} k={} block_rows={} sketches={:.2} GiB host_out={:.2} GiB",
         n,
         k,
         block_rows,
         gib(n * k * 8),
-        gib(n * n * 8),
+        gib(n * n * 4), // f32
     );
 
     let ctx = CudaContext::new(0)?;
@@ -173,19 +175,19 @@ pub fn pairwise_hamming_single_gpu(
 
     // Upload sketches
     let d_sketches: CudaSlice<u64> = stream.memcpy_stod(sketches_flat_u64)?;
-    info!("single-GPU: uploaded sketches: {} MiB", mib(n * k * 8));
+    info!("single-GPU: uploaded sketches: {:.2} MiB", mib(n * k * 8));
 
-    // Reusable scratch (block_rows × block_rows)
+    // Reusable scratch (block_rows × block_rows) for distances (f32)
     let max_t = block_rows.min(n);
     let scratch_elems = max_t * max_t;
-    let mut d_tile: CudaSlice<f64> = stream
+    let mut d_tile: CudaSlice<f32> = stream
         .alloc_zeros(scratch_elems)
-        .with_context(|| format!("alloc d_tile: {} MiB", mib(scratch_elems * 8)))?;
-    let mut h_tile = vec![0.0f64; scratch_elems];
+        .with_context(|| format!("alloc d_tile: {:.2} MiB", mib(scratch_elems * 4)))?;
+    let mut h_tile = vec![0.0f32; scratch_elems];
     info!(
         "single-GPU: scratch allocated: elems={} ({:.2} MiB)",
         scratch_elems,
-        mib(scratch_elems * 8)
+        mib(scratch_elems * 4)
     );
 
     // Launch cfg & consts
@@ -206,10 +208,11 @@ pub fn pairwise_hamming_single_gpu(
 
             let blk_x = 64usize; // threads along columns (j)
             let blk_y = 8usize;  // threads along rows (i)
-            let bk    = 64usize; // must match BK in kernel (see #define above)
+            let bk = 64usize; // must match BK in kernel
 
             // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(u64)
-            let smem_bytes = ((bk * (blk_y + blk_x)) * std::mem::size_of::<u64>()) as u32;
+            let smem_bytes =
+                ((bk * (blk_y + blk_x)) * std::mem::size_of::<u64>()) as u32;
 
             let cfg = LaunchConfig {
                 grid_dim: (
@@ -234,7 +237,7 @@ pub fn pairwise_hamming_single_gpu(
                 j0,
                 bw,
                 bh,
-                mib(bw * bh * 8)
+                mib(bw * bh * 4)
             );
 
             let mut launch = stream.launch_builder(&func);
@@ -253,21 +256,19 @@ pub fn pairwise_hamming_single_gpu(
             stream.synchronize()?; // kernel done
             debug!("sync ok");
 
-            // Copy back only bw*bh
+            // Copy back only bw*bh (but cudarc will copy the whole slice)
             let need = bw * bh;
-
-            // Safety checks & trace
             debug_assert!(need <= h_tile.len());
             debug!(
-                "dtoh: copying full scratch {} elems ({} MiB), need={}",
+                "dtoh: copying full scratch {} elems ({:.2} MiB), need={}",
                 h_tile.len(),
-                (h_tile.len() * 8) as f64 / (1024.0 * 1024.0),
+                mib(h_tile.len() * 4),
                 need
             );
 
-            // Copy the entire device slice into the full host buffer.
             stream.memcpy_dtoh(&d_tile, &mut h_tile)?;
-            debug!("dtoh ok ({} MiB)", (need * 8) as f64 / (1024.0 * 1024.0));
+            debug!("dtoh ok ({:.2} MiB)", mib(need * 4));
+
             // Scatter into final matrix (upper + mirror lower)
             let base_ptr = out_upper_tri.as_mut_ptr();
             unsafe {
@@ -280,11 +281,14 @@ pub fn pairwise_hamming_single_gpu(
                         }
                         let mut d = h_tile[ii * bh + jj];
                         if weighted_normalized {
-                            d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
+                            d = if d < 2.0f32 {
+                                d / (2.0f32 - d)
+                            } else {
+                                1.0f32
+                            };
                         }
-                        let d32 = d as f32;
-                        *base_ptr.add(i * n + j) = d32;
-                        *base_ptr.add(j * n + i) = d32;
+                        *base_ptr.add(i * n + j) = d;
+                        *base_ptr.add(j * n + i) = d;
                     }
                 }
             }
@@ -293,7 +297,7 @@ pub fn pairwise_hamming_single_gpu(
     Ok(())
 }
 
-/// Multi-GPU in-memory, n*n matrix in host CPU memory.
+/// Multi-GPU in-memory, n*n matrix in host CPU memory (`f32` distances).
 pub fn pairwise_hamming_multi_gpu(
     sketches_flat_u64: &[u64],
     n: usize,
@@ -301,7 +305,7 @@ pub fn pairwise_hamming_multi_gpu(
     out_upper_tri: &mut [f32],
     block_rows: usize,
     weighted_normalized: bool,
-) -> Result<() {
+) -> Result<()> {
     if sketches_flat_u64.len() != n * k {
         bail!(
             "sketches_flat_u64 length mismatch: got {}, expected {}",
@@ -368,8 +372,8 @@ pub fn pairwise_hamming_multi_gpu(
                     let d_sketches: CudaSlice<u64> = stream.memcpy_stod(&sk[..])?;
 
                     let max_t = br_arc.min(n_arc);
-                    let mut d_tile: CudaSlice<f64> = stream.alloc_zeros(max_t * max_t)?;
-                    let mut h_tile = vec![0.0f64; max_t * max_t];
+                    let mut d_tile: CudaSlice<f32> = stream.alloc_zeros(max_t * max_t)?;
+                    let mut h_tile = vec![0.0f32; max_t * max_t];
 
                     // kernel constants as locals
                     let n_i32 = n_arc as i32;
@@ -391,10 +395,12 @@ pub fn pairwise_hamming_multi_gpu(
 
                         let blk_x = 64usize; // threads along columns (j)
                         let blk_y = 8usize;  // threads along rows (i)
-                        let bk    = 64usize; // must match BK in kernel (see #define above)
+                        let bk = 64usize; // must match BK in kernel
 
                         // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(u64)
-                        let smem_bytes = ((bk * (blk_y + blk_x)) * std::mem::size_of::<u64>()) as u32;
+                        let smem_bytes =
+                            ((bk * (blk_y + blk_x)) * std::mem::size_of::<u64>())
+                                as u32;
 
                         let cfg = LaunchConfig {
                             grid_dim: (
@@ -440,11 +446,14 @@ pub fn pairwise_hamming_multi_gpu(
                                     }
                                     let mut d = h_tile[ii * bh + jj];
                                     if weighted {
-                                        d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
+                                        d = if d < 2.0f32 {
+                                            d / (2.0f32 - d)
+                                        } else {
+                                            1.0f32
+                                        };
                                     }
-                                    let d32 = d as f32;
-                                    *base_ptr.add(i * n_arc + j) = d32;
-                                    *base_ptr.add(j * n_arc + i) = d32;
+                                    *base_ptr.add(i * n_arc + j) = d;
+                                    *base_ptr.add(j * n_arc + i) = d;
                                 }
                             }
                         }
@@ -461,8 +470,7 @@ pub fn pairwise_hamming_multi_gpu(
 }
 
 /// Single-GPU computing with streaming writer: writes full matrix to disk row-by-row (no n×n host memory).
-/// Single-GPU compute with streaming writer: writes full matrix to disk row-by-row.
-/// Computes many rows per kernel launch to reduce launch/D2H overhead.
+/// Distances are computed as `f32` and formatted to text.
 fn write_matrix_streaming_gpu_single(
     names: &[String],
     sketches_flat_u64: &[u64], // [n*k], row-major
@@ -518,16 +526,17 @@ fn write_matrix_streaming_gpu_single(
     let k_i32 = k as i32;
     let only_upper_i32 = 0i32; // compute full strip
 
-    // Choose tile_rows dynamically (~512 MiB device scratch target)
+    // Choose tile_rows dynamically (~512 MiB device scratch target, 4 bytes/elem)
     let target_bytes: usize = 512 << 20; // 512 MiB
-    let mut tile_rows = ((target_bytes / 8).saturating_div(tile_cols.max(1))).max(1);
-    tile_rows = tile_rows.min(4096).min(n); // safety cap similar to in-memory
+    let mut tile_rows =
+        ((target_bytes / 4).saturating_div(tile_cols.max(1))).max(1);
+    tile_rows = tile_rows.min(4096).min(n); // safety cap
+
     let bh_max = tile_cols.min(n);
 
-    // Device/host scratch for a bw × bh_max tile
-    // NOTE: device writes only the first (bw*bh) entries; we copy bw*bh_max then use needed part.
-    let mut d_tile: CudaSlice<f64> = stream.alloc_zeros(tile_rows * bh_max)?;
-    let mut h_tile = vec![0.0f64; tile_rows * bh_max];
+    // Device/host scratch for a bw × bh_max tile (f32)
+    let mut d_tile: CudaSlice<f32> = stream.alloc_zeros(tile_rows * bh_max)?;
+    let mut h_tile = vec![0.0f32; tile_rows * bh_max];
 
     // For formatting
     let mut fmt = ryu::Buffer::new();
@@ -553,10 +562,11 @@ fn write_matrix_streaming_gpu_single(
 
             let blk_x = 64usize; // threads along columns (j)
             let blk_y = 8usize;  // threads along rows (i)
-            let bk    = 64usize; // must match BK in kernel (see #define above)
+            let bk = 64usize; // must match BK in kernel
 
             // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(u64)
-            let smem_bytes = ((bk * (blk_y + blk_x)) * std::mem::size_of::<u64>()) as u32;
+            let smem_bytes =
+                ((bk * (blk_y + blk_x)) * std::mem::size_of::<u64>()) as u32;
 
             let cfg = LaunchConfig {
                 grid_dim: (
@@ -597,7 +607,11 @@ fn write_matrix_streaming_gpu_single(
                 for jj in 0..bh {
                     let mut d = h_tile[row_off + jj];
                     if weighted_normalized {
-                        d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
+                        d = if d < 2.0f32 {
+                            d / (2.0f32 - d)
+                        } else {
+                            1.0f32
+                        };
                     }
                     line.push('\t');
                     line.push_str(fmt.format_finite(d));
@@ -620,7 +634,6 @@ fn write_matrix_streaming_gpu_single(
     Ok(())
 }
 
-/// Multi-GPU compute & streaming writer: GPU workers compute rows; writer outputs in order via CPU.
 /// Multi-GPU compute & streaming writer:
 /// Each GPU processes blocks of `rows_per_launch` rows in a block-strided fashion
 /// and sends completed lines to a single writer thread that writes in-order.
@@ -702,23 +715,25 @@ fn write_matrix_streaming_gpu_multi(
                     let func = module.load_function("hamming_tile_u64")?;
 
                     // Upload sketches once per device
-                    let d_sketches: CudaSlice<u64> = stream.memcpy_stod(&sketches[..])?;
+                    let d_sketches: CudaSlice<u64> =
+                        stream.memcpy_stod(&sketches[..])?;
 
                     // Kernel consts
                     let n_i32 = n as i32;
                     let k_i32 = k as i32;
                     let only_upper_i32 = 0i32;
 
-                    // Pick tile_rows (~512 MiB scratch)
+                    // Pick tile_rows (~512 MiB scratch, 4 bytes/elem)
                     let target_bytes: usize = 512 << 20;
                     let mut tile_rows =
-                        ((target_bytes / 8).saturating_div(tile_cols.max(1))).max(1);
+                        ((target_bytes / 4).saturating_div(tile_cols.max(1))).max(1);
                     tile_rows = tile_rows.min(4096).min(n);
                     let bh_max = tile_cols.min(n);
 
                     // Scratch for bw × bh_max
-                    let mut d_tile: CudaSlice<f64> = stream.alloc_zeros(tile_rows * bh_max)?;
-                    let mut h_tile = vec![0.0f64; tile_rows * bh_max];
+                    let mut d_tile: CudaSlice<f32> =
+                        stream.alloc_zeros(tile_rows * bh_max)?;
+                    let mut h_tile = vec![0.0f32; tile_rows * bh_max];
 
                     let devs = devices.len();
                     let mut fmt = ryu::Buffer::new();
@@ -731,7 +746,8 @@ fn write_matrix_streaming_gpu_multi(
                         // per-row string buffers for this block
                         let mut lines: Vec<String> = (0..bw)
                             .map(|ii| {
-                                let mut s = String::with_capacity(8 + n * 12);
+                                let mut s =
+                                    String::with_capacity(8 + n * 12);
                                 s.push_str(&names[i0 + ii]);
                                 s
                             })
@@ -744,10 +760,13 @@ fn write_matrix_streaming_gpu_multi(
 
                             let blk_x = 64usize; // threads along columns (j)
                             let blk_y = 8usize;  // threads along rows (i)
-                            let bk    = 64usize; // must match BK in kernel (see #define above)
+                            let bk = 64usize; // must match BK in kernel
 
                             // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(u64)
-                            let smem_bytes = ((bk * (blk_y + blk_x)) * std::mem::size_of::<u64>()) as u32;
+                            let smem_bytes =
+                                ((bk * (blk_y + blk_x))
+                                    * std::mem::size_of::<u64>())
+                                    as u32;
 
                             let cfg = LaunchConfig {
                                 grid_dim: (
@@ -781,12 +800,16 @@ fn write_matrix_streaming_gpu_multi(
 
                             // append stripe
                             for ii in 0..bw {
-                                let row_off = ii * bh; // kernel packed with ldo=bh
+                                let row_off = ii * bh; // kernel packed ldo=bh
                                 let line = &mut lines[ii];
                                 for jj in 0..bh {
                                     let mut d = h_tile[row_off + jj];
                                     if weighted_normalized {
-                                        d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
+                                        d = if d < 2.0f32 {
+                                            d / (2.0f32 - d)
+                                        } else {
+                                            1.0f32
+                                        };
                                     }
                                     line.push('\t');
                                     line.push_str(fmt.format_finite(d));
@@ -811,7 +834,9 @@ fn write_matrix_streaming_gpu_multi(
                     Ok(())
                 };
                 if let Err(e) = inner() {
-                    panic!("multi-GPU streaming worker on device {dev_id} failed: {e:?}");
+                    panic!(
+                        "multi-GPU streaming worker on device {dev_id} failed: {e:?}"
+                    );
                 }
             });
         }
@@ -823,6 +848,7 @@ fn write_matrix_streaming_gpu_multi(
         .map_err(|_| anyhow::anyhow!("writer thread panicked"))??;
     Ok(())
 }
+
 /// GPU compute and streaming write:
 /// - if >=2 GPUs detected: multi-GPU streaming across all devices
 /// - if 1 GPU: single-GPU streaming on device 0
