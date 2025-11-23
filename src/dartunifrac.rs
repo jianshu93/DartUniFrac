@@ -286,7 +286,7 @@ fn read_biom_csr_values(
 }
 
 // Write TSV matrix (fast, reusing ryu buffer per row)
-fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()> {
+fn write_matrix(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()> {
     // Header
     let header = {
         let mut s = String::with_capacity(n * 16);
@@ -309,7 +309,7 @@ fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()>
             // Adams, U., 2018, June. Ryū: fast float-to-string conversion. In Proceedings of the 39th ACM SIGPLAN Conference on Programming Language Design and Implementation (pp. 270-282).
             let mut buf = ryu::Buffer::new();
             for j in 0..n {
-                let val = unsafe { *d.get_unchecked(base + j) };
+                let val = unsafe { *d.get_unchecked(base + j) } as f64;
                 line.push('\t');
                 line.push_str(buf.format_finite(val));
             }
@@ -328,7 +328,7 @@ fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()>
     Ok(())
 }
 
-fn write_matrix_zstd(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()> {
+fn write_matrix_zstd(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()> {
     use std::fs::File;
     use std::io::{BufWriter, Write};
 
@@ -362,7 +362,7 @@ fn write_matrix_zstd(names: &[String], d: &[f64], n: usize, path: &str) -> Resul
             let base = i * n;
             let mut buf = ryu::Buffer::new();
             for j in 0..n {
-                let val = unsafe { *d.get_unchecked(base + j) };
+                let val = unsafe { *d.get_unchecked(base + j) } as f64;
                 line.push('\t');
                 line.push_str(buf.format_finite(val));
             }
@@ -413,7 +413,7 @@ fn write_matrix_streaming_zstd(
     info!("streaming block-size = {} (n = {})", bs, n);
 
     // Column-major block buffer: n × bs (each column j is a contiguous slice of length bs)
-    let mut block = vec![0.0f64; n * bs];
+    let mut block = vec![0.0f32; n * bs];
     let dh = DistHamming;
 
     let mut i0 = 0usize;
@@ -435,7 +435,7 @@ fn write_matrix_streaming_zstd(
                     // D = (1 - Jw) / (1 + Jw) = d_J / (2 - d_J)
                     d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
                 }
-                col[bi] = d; // write into column-major slot (j, bi)
+                col[bi] = d as f32; // write into column-major slot (j, bi)
             }
         });
 
@@ -452,7 +452,7 @@ fn write_matrix_streaming_zstd(
                 let mut fmt = ryu::Buffer::new();
                 for j in 0..n {
                     line.push('\t');
-                    let v = block[j * bs + bi]; // column-major index (j, bi)
+                    let v = block[j * bs + bi] as f64; // column-major index (j, bi)
                     line.push_str(fmt.format_finite(v));
                 }
                 line.push('\n');
@@ -1465,21 +1465,22 @@ fn main() -> Result<()> {
     }
     // Pairwise UniFrac (≈ 1 - Jaccard) via normalized Hamming on ID arrays.
     let t2 = Instant::now();
-    let dist = {
+    let dist: Vec<f32> = {
         let n = nsamp;
         let dh = DistHamming;
-        let mut out = vec![0.0f64; n * n];
-        // this is the most computational expensive part (N^2/2 hamming similarity computation)
+        let mut out = vec![0.0f32; n * n];
+
         out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
             row[i] = 0.0;
             for j in (i + 1)..n {
-                // DistHamming<u64> returns (# !=)/k ∈ [0,1]
-                let mut d = dh.eval(&sketches_u64[i], &sketches_u64[j]) as f64; // d_J ≈ 1 - Jw
-                if weighted {
-                    // normalized weighted UniFrac = Bray–Curtis transform
-                    d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
-                }
-                row[j] = d; // (i,j)
+                // compute in f64, then cast once
+                let d_j = dh.eval(&sketches_u64[i], &sketches_u64[j]) as f64; // d_J ≈ 1 - Jw
+                let d64 = if weighted {
+                    if d_j < 2.0 { d_j / (2.0 - d_j) } else { 1.0 }
+                } else {
+                    d_j
+                };
+                row[j] = d64 as f32;
             }
         });
 
@@ -1519,8 +1520,10 @@ fn main() -> Result<()> {
 
     if pcoa {
         let n = nsamp;
-        // take the ownership of dist to avoid copy, dist wrote to disk already
-        let dm = Array2::from_shape_vec((n, n), dist).expect("distance matrix shape");
+
+        // Upcast f32 → f64 just for PCoA
+        let dist_f64: Vec<f64> = dist.into_iter().map(|x| x as f64).collect();
+        let dm = Array2::from_shape_vec((n, n), dist_f64).expect("distance matrix shape");
 
         let opts = FpcoaOptions {
             k: 10,
@@ -1529,10 +1532,6 @@ fn main() -> Result<()> {
             symmetrize_input: false,
         };
 
-        info!(
-            "Running randomized PCoA: k={}, oversample={}, iters={}",
-            opts.k, opts.oversample, opts.nbiter
-        );
         let t_pcoa = Instant::now();
         let res = pcoa_randomized(dm.view(), opts);
         info!("PCoA done in {} ms", t_pcoa.elapsed().as_millis());

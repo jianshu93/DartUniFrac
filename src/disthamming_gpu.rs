@@ -123,7 +123,7 @@ pub fn pairwise_hamming_single_gpu(
     sketches_flat_u64: &[u64],
     n: usize,
     k: usize,
-    out_upper_tri: &mut [f64],
+    out_upper_tri: &mut [f32],
     mut block_rows: usize,
     weighted_normalized: bool,
 ) -> Result<()> {
@@ -282,8 +282,9 @@ pub fn pairwise_hamming_single_gpu(
                         if weighted_normalized {
                             d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
                         }
-                        *base_ptr.add(i * n + j) = d;
-                        *base_ptr.add(j * n + i) = d;
+                        let d32 = d as f32;
+                        *base_ptr.add(i * n + j) = d32;
+                        *base_ptr.add(j * n + i) = d32;
                     }
                 }
             }
@@ -297,10 +298,10 @@ pub fn pairwise_hamming_multi_gpu(
     sketches_flat_u64: &[u64],
     n: usize,
     k: usize,
-    out_upper_tri: &mut [f64],
+    out_upper_tri: &mut [f32],
     block_rows: usize,
     weighted_normalized: bool,
-) -> Result<()> {
+) -> Result<() {
     if sketches_flat_u64.len() != n * k {
         bail!(
             "sketches_flat_u64 length mismatch: got {}, expected {}",
@@ -428,7 +429,7 @@ pub fn pairwise_hamming_multi_gpu(
                         stream.memcpy_dtoh(&d_tile, &mut h_tile)?;
 
                         // host write-back (upper + mirror lower)
-                        let base_ptr = out_addr as *mut f64;
+                        let base_ptr = out_addr as *mut f32;
                         unsafe {
                             for ii in 0..bw {
                                 let i = i0 + ii;
@@ -441,8 +442,9 @@ pub fn pairwise_hamming_multi_gpu(
                                     if weighted {
                                         d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
                                     }
-                                    *base_ptr.add(i * n_arc + j) = d;
-                                    *base_ptr.add(j * n_arc + i) = d;
+                                    let d32 = d as f32;
+                                    *base_ptr.add(i * n_arc + j) = d32;
+                                    *base_ptr.add(j * n_arc + i) = d32;
                                 }
                             }
                         }
