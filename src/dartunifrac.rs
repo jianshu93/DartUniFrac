@@ -28,20 +28,20 @@ use log::{info, warn};
 use rayon::prelude::*;
 
 use anndists::dist::{DistHamming, Distance};
-use dartminhash::{DartMinHash, ErsWmh, rng_utils::mt_from_seed};
-use hdf5::{File as H5File, types::VarLenUnicode};
-use newick::{Newick, NodeID, one_from_string};
+use dartminhash::{rng_utils::mt_from_seed, DartMinHash, ErsWmh};
+use hdf5::{types::VarLenUnicode, File as H5File};
+use newick::{one_from_string, Newick, NodeID};
 use succparen::{
-    bitwise::{SparseOneNnd, ops::NndOne},
+    bitwise::{ops::NndOne, SparseOneNnd},
     tree::Node,
     tree::{
-        LabelVec,
         balanced_parens::{BalancedParensTree, Node as BpNode},
         traversal::{DepthFirstTraverse, VisitNode},
+        LabelVec,
     },
 };
 
-use fpcoa::{FpcoaOptions, pcoa_randomized};
+use fpcoa::{pcoa_randomized, FpcoaOptions};
 use ndarray::{Array1, Array2};
 
 type NwkTree = newick::NewickTree;
@@ -191,6 +191,7 @@ fn read_table(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<Vec<f64>>)> {
     }
     Ok((taxa, samples, mat))
 }
+
 // TSV weighted
 fn read_table_counts(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<Vec<f64>>)> {
     let f = File::open(p)?;
@@ -285,54 +286,45 @@ fn read_biom_csr_values(
     Ok((taxa, samples, indptr, indices, data))
 }
 
-// Write TSV matrix (fast, reusing ryu buffer per row)
-fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()> {
-    // Header
-    let header = {
-        let mut s = String::with_capacity(n * 16);
-        s.push_str("");
-        for name in names {
-            s.push('\t');
-            s.push_str(name);
-        }
-        s.push('\n');
-        s
-    };
+// Write TSV matrix (streaming, using ryu; d is f32)
+fn write_matrix(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()> {
+    use std::fs::File;
+    use std::io::{BufWriter, Write};
 
-    // Build all rows in parallel; reuse a single ryu buffer per row
-    let mut rows: Vec<String> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let mut line = String::with_capacity(8 + n * 12);
-            line.push_str(&names[i]);
-            let base = i * n;
-            // Adams, U., 2018, June. Ryū: fast float-to-string conversion. In Proceedings of the 39th ACM SIGPLAN Conference on Programming Language Design and Implementation (pp. 270-282).
-            let mut buf = ryu::Buffer::new();
-            for j in 0..n {
-                let val = unsafe { *d.get_unchecked(base + j) };
-                line.push('\t');
-                line.push_str(buf.format_finite(val));
-            }
-            line.push('\n');
-            line
-        })
-        .collect();
+    let file = File::create(path)?;
+    let mut out = BufWriter::with_capacity(16 << 20, file);
 
-    let mut out = BufWriter::with_capacity(16 << 20, File::create(path)?);
-    out.write_all(header.as_bytes())?;
-    for line in &mut rows {
-        out.write_all(line.as_bytes())?;
-        line.clear();
+    // Header: "", <names...>
+    out.write_all(b"")?;
+    for name in names {
+        out.write_all(b"\t")?;
+        out.write_all(name.as_bytes())?;
     }
+    out.write_all(b"\n")?;
+
+    let mut buf = ryu::Buffer::new();
+    let nn = n;
+
+    // Stream row by row to avoid holding all lines in memory
+    for i in 0..nn {
+        out.write_all(names[i].as_bytes())?;
+        let base = i * nn;
+        for j in 0..nn {
+            let val: f32 = unsafe { *d.get_unchecked(base + j) };
+            out.write_all(b"\t")?;
+            out.write_all(buf.format_finite(val).as_bytes())?;
+        }
+        out.write_all(b"\n")?;
+    }
+
     out.flush()?;
     Ok(())
 }
 
-fn write_matrix_zstd(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()> {
+fn write_matrix_zstd(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()> {
     use std::fs::File;
     use std::io::{BufWriter, Write};
 
-    // zstd multi-threading
     let file = File::create(path)?;
     let mut enc = zstd::Encoder::new(file, 0)?;
     let zstd_threads = rayon::current_num_threads() as u32;
@@ -342,44 +334,33 @@ fn write_matrix_zstd(names: &[String], d: &[f64], n: usize, path: &str) -> Resul
     let mut out = BufWriter::with_capacity(16 << 20, enc.auto_finish());
 
     // Header
-    let header = {
-        let mut s = String::with_capacity(n * 16);
-        s.push_str("");
-        for name in names {
-            s.push('\t');
-            s.push_str(name);
-        }
-        s.push('\n');
-        s
-    };
-    out.write_all(header.as_bytes())?;
-
-    let mut rows: Vec<String> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let mut line = String::with_capacity(8 + n * 12);
-            line.push_str(&names[i]);
-            let base = i * n;
-            let mut buf = ryu::Buffer::new();
-            for j in 0..n {
-                let val = unsafe { *d.get_unchecked(base + j) };
-                line.push('\t');
-                line.push_str(buf.format_finite(val));
-            }
-            line.push('\n');
-            line
-        })
-        .collect();
-
-    for line in &mut rows {
-        out.write_all(line.as_bytes())?;
-        line.clear();
+    out.write_all(b"")?;
+    for name in names {
+        out.write_all(b"\t")?;
+        out.write_all(name.as_bytes())?;
     }
-    out.flush()?;
+    out.write_all(b"\n")?;
 
+    let mut buf = ryu::Buffer::new();
+    let nn = n;
+
+    // Stream row by row into the compressed writer
+    for i in 0..nn {
+        out.write_all(names[i].as_bytes())?;
+        let base = i * nn;
+        for j in 0..nn {
+            let val: f32 = unsafe { *d.get_unchecked(base + j) };
+            out.write_all(b"\t")?;
+            out.write_all(buf.format_finite(val).as_bytes())?;
+        }
+        out.write_all(b"\n")?;
+    }
+
+    out.flush()?;
     Ok(())
 }
 
+// Streaming distances directly from sketches (for --streaming mode)
 fn write_matrix_streaming_zstd(
     names: &[String],
     sketches: &[Vec<u64>],
@@ -413,27 +394,27 @@ fn write_matrix_streaming_zstd(
     info!("streaming block-size = {} (n = {})", bs, n);
 
     // Column-major block buffer: n × bs (each column j is a contiguous slice of length bs)
-    let mut block = vec![0.0f64; n * bs];
+    let mut block = vec![0.0f32; n * bs];
     let dh = DistHamming;
 
     let mut i0 = 0usize;
     while i0 < n {
         let h = (n - i0).min(bs);
 
-        // Fill block in parallel over columns; each `col` is a disjoint &mut [f64] (length = bs)
+        // Fill block in parallel over columns; each `col` is a disjoint &mut [f32] (length = bs)
         block.par_chunks_mut(bs).enumerate().for_each(|(j, col)| {
             for bi in 0..h {
                 let i = i0 + bi;
-                let mut d = if i == j {
-                    0.0
+                let mut d: f32 = if i == j {
+                    0.0f32
                 } else {
-                    dh.eval(&sketches[i], &sketches[j]) as f64
+                    dh.eval(&sketches[i], &sketches[j]) as f32
                 };
                 // d is an unbiased estimate of d_J = 1 - Jw
                 if weighted_normalized {
                     // Bray–Curtis / normalized weighted UniFrac:
                     // D = (1 - Jw) / (1 + Jw) = d_J / (2 - d_J)
-                    d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
+                    d = if d < 2.0f32 { d / (2.0f32 - d) } else { 1.0f32 };
                 }
                 col[bi] = d; // write into column-major slot (j, bi)
             }
@@ -444,15 +425,13 @@ fn write_matrix_streaming_zstd(
             .into_par_iter()
             .map(|bi| {
                 let i = i0 + bi;
-                // Pre-size roughly: tab + ~12 chars per number
                 let mut line = String::with_capacity(8 + n * 12);
                 line.push_str(&names[i]);
 
-                // Each worker needs its own Ryu buffer
                 let mut fmt = ryu::Buffer::new();
                 for j in 0..n {
                     line.push('\t');
-                    let v = block[j * bs + bi]; // column-major index (j, bi)
+                    let v: f32 = block[j * bs + bi]; // column-major index (j, bi)
                     line.push_str(fmt.format_finite(v));
                 }
                 line.push('\n');
@@ -460,10 +439,9 @@ fn write_matrix_streaming_zstd(
             })
             .collect();
 
-        // Single writer, amortized by BufWriter + zstd MT compression
         for line in &mut lines {
             w.write_all(line.as_bytes())?;
-            line.clear(); // allow capacity reuse across iterations (if the allocator keeps it)
+            line.clear();
         }
         w.flush()?;
         i0 += h;
@@ -686,7 +664,7 @@ fn build_sketches(
     }
     let mut wsets = kept_ws;
     let samples = kept_names;
-    
+
     let kept = samples.len();
     let filtered_samples = nsamp.saturating_sub(kept);
     info!(
@@ -766,7 +744,7 @@ fn compute_parent(total: usize, kids: &[Vec<usize>]) -> Vec<usize> {
     parent
 }
 
-/// CSR (rows=features, cols=samples)to CSC (cols=samples) for fast per-sample scans.
+/// CSR (rows=features, cols=samples) to CSC (cols=samples) for fast per-sample scans.
 /// Returns (colptr, rowind, vals) with colptr.len()==nsamp+1, rowind/vals.len()==nnz.
 fn csr_to_csc(
     indptr: &[u32],
@@ -976,7 +954,9 @@ fn build_sketches_weighted(
             let a = indptr[r] as usize;
             let b = indptr[r + 1] as usize;
             let any_pos = data[a..b].iter().any(|&v| v > 0.0);
-            if any_pos { taxa_pos_any += 1; }
+            if any_pos {
+                taxa_pos_any += 1;
+            }
         }
         let mapped_taxa = total_taxa - unmapped_taxa;
         let taxa_zero_all = total_taxa - taxa_pos_any;
@@ -1066,7 +1046,7 @@ fn build_sketches_weighted(
     }
     let mut wsets = kept_ws;
     let samples = kept_names;
-        
+
     let kept = samples.len();
     let filtered_samples = nsamp.saturating_sub(kept);
     info!(
@@ -1093,6 +1073,7 @@ fn build_sketches_weighted(
 
     let mut id_map = vec![usize::MAX; total];
     for (new_id, &v) in active_edges.iter().enumerate() {
+        id_map[v] = v;
         id_map[v] = new_id;
     }
     for ws in &mut wsets {
@@ -1181,7 +1162,7 @@ fn write_pcoa(
     // Blank line
     out.write_all(b"\n")?;
 
-    // Header again for the rates (to match your request)
+    // Header again for the rates
     out.write_all(b"")?;
     for pc in 1..=k {
         out.write_all(b"\t")?;
@@ -1189,7 +1170,7 @@ fn write_pcoa(
     }
     out.write_all(b"\n")?;
 
-    // One row of 10 (or k) explanation rates
+    // One row of explanation rates
     out.write_all(b"proportion_explained")?;
     for j in 0..k {
         out.write_all(b"\t")?;
@@ -1282,8 +1263,10 @@ fn main() -> Result<()> {
         .unwrap_or("🎯");
 
     let m = Command::new("dartunifrac")
-        .version("0.2.6")
-        .about(format!("DartUniFrac: Approximate UniFrac via Weighted MinHash {dart}{dart}{dart}"))
+        .version("0.2.7")
+        .about(format!(
+            "DartUniFrac: Approximate UniFrac via Weighted MinHash {dart}{dart}{dart}"
+        ))
         .arg(
             Arg::new("tree")
                 .short('t')
@@ -1303,10 +1286,7 @@ fn main() -> Result<()> {
                 .long("biom")
                 .help("OTU/Feature table in BIOM (HDF5) format"),
         )
-        .group(
-            ArgGroup::new("table").
-            args(["input", "biom"]).
-            required(true))
+        .group(ArgGroup::new("table").args(["input", "biom"]).required(true))
         .arg(
             Arg::new("output")
                 .short('o')
@@ -1421,12 +1401,15 @@ fn main() -> Result<()> {
     } else {
         info!("Unweighted mode");
     };
+
     let (samples, sketches_u64) = if weighted {
         build_sketches_weighted(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
     } else {
         build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
     };
     let nsamp = samples.len();
+
+    // Streaming mode: compute Hamming on the fly from sketches and stream to disk
     if stream {
         if pcoa {
             warn!("--pcoa is incompatible with --stream; skipping PCoA in streaming mode.");
@@ -1436,17 +1419,14 @@ fn main() -> Result<()> {
                 "--compress is ignored with --stream; streaming output is already zstd-compressed."
             );
         }
-        let out_path_stream: PathBuf = if stream {
+        let out_path_stream: PathBuf = {
             let p_stream = Path::new(out_file);
             match p_stream.extension().and_then(|e| e.to_str()) {
                 Some("zst") => p_stream.to_path_buf(),
                 _ => PathBuf::from(format!("{out_file}.zst")),
             }
-        } else {
-            PathBuf::from(out_file)
         };
 
-        // Convert to &str for your existing functions
         let out_path_stream_str = out_path_stream.to_string_lossy();
 
         info!(
@@ -1463,21 +1443,22 @@ fn main() -> Result<()> {
         info!("Done → {}", out_path_stream_str);
         return Ok(());
     }
-    // Pairwise UniFrac (≈ 1 - Jaccard) via normalized Hamming on ID arrays.
+
+    // Pairwise UniFrac (≈ 1 - Jaccard) via normalized Hamming on ID arrays (full N×N in f32)
     let t2 = Instant::now();
-    let dist = {
+    let dist: Vec<f32> = {
         let n = nsamp;
         let dh = DistHamming;
-        let mut out = vec![0.0f64; n * n];
-        // this is the most computational expensive part (N^2/2 hamming similarity computation)
+        let mut out = vec![0.0f32; n * n];
+
         out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
-            row[i] = 0.0;
+            row[i] = 0.0f32;
             for j in (i + 1)..n {
                 // DistHamming<u64> returns (# !=)/k ∈ [0,1]
-                let mut d = dh.eval(&sketches_u64[i], &sketches_u64[j]) as f64; // d_J ≈ 1 - Jw
+                let mut d: f32 = dh.eval(&sketches_u64[i], &sketches_u64[j]) as f32; // d_J ≈ 1 - Jw
                 if weighted {
                     // normalized weighted UniFrac = Bray–Curtis transform
-                    d = if d < 2.0 { d / (2.0 - d) } else { 1.0 };
+                    d = if d < 2.0f32 { d / (2.0f32 - d) } else { 1.0f32 };
                 }
                 row[j] = d; // (i,j)
             }
@@ -1505,7 +1486,6 @@ fn main() -> Result<()> {
         PathBuf::from(out_file)
     };
 
-    // Convert to &str for your existing functions
     let out_path_str = out_path.to_string_lossy();
 
     if compress {
@@ -1519,8 +1499,9 @@ fn main() -> Result<()> {
 
     if pcoa {
         let n = nsamp;
-        // take the ownership of dist to avoid copy, dist wrote to disk already
-        let dm = Array2::from_shape_vec((n, n), dist).expect("distance matrix shape");
+        // Convert f32 → f64 for PCoA
+        let dm_f64: Vec<f64> = dist.iter().map(|&x| x as f64).collect();
+        let dm = Array2::from_shape_vec((n, n), dm_f64).expect("distance matrix shape");
 
         let opts = FpcoaOptions {
             k: 10,
@@ -1537,14 +1518,12 @@ fn main() -> Result<()> {
         let res = pcoa_randomized(dm.view(), opts);
         info!("PCoA done in {} ms", t_pcoa.elapsed().as_millis());
 
-        // Write ordination in simple format
         let pcoa_path = {
             let p_pcoa = std::path::Path::new(out_file);
-            let mut pb_poca = p_pcoa.to_path_buf();
-            pb_poca.set_file_name("pcoa.txt");
-            pb_poca
+            let mut pb_pcoa = p_pcoa.to_path_buf();
+            pb_pcoa.set_file_name("pcoa.txt");
+            pb_pcoa
         };
-        // Write ordination in ordination format
         let ord_path = {
             let p = std::path::Path::new(out_file);
             let mut pb = p.to_path_buf();
@@ -1561,7 +1540,6 @@ fn main() -> Result<()> {
             "Writing pcoa and ordination results → {}",
             ord_path.display()
         );
-        // ordination results
         write_pcoa_ordination(
             &samples,
             &res.coordinates,
