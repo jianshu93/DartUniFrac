@@ -10,7 +10,7 @@ keywords = ["unifrac", "phylogenetic", "MinHash", "succint", "Jaccard"]
 
 [[bin]]
 
-name = "dartunifrac"
+name = "dartunifrac-cuda"
 path = "src/dartunifrac.rs"
 
 [[bin]]
