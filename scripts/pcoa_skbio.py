@@ -5,9 +5,7 @@ import numpy as np
 from skbio import DistanceMatrix
 from skbio.stats.ordination import pcoa
 
-# ---------------------------------------------------------------------
 # Command-line arguments: input DM, output coordinates
-# ---------------------------------------------------------------------
 if len(sys.argv) != 3:
     print(f"Usage: {sys.argv[0]} <input_dm_tsv> <output_pcoa_tsv>", file=sys.stderr)
     sys.exit(1)
@@ -18,9 +16,7 @@ OUT_FILE  = sys.argv[2]
 t_start = time.time()
 print(f"[INFO] Starting PCoA pipeline on {DIST_FILE}")
 
-# ---------------------------------------------------------------------
-# 1) Read the distance matrix
-# ---------------------------------------------------------------------
+# Read the distance matrix
 t_read_start = time.time()
 dist_df = pd.read_csv(DIST_FILE, sep="\t", index_col=0)
 t_read_end = time.time()
@@ -47,7 +43,7 @@ dm = DistanceMatrix(dist_df.values, ids=dist_df.index)
 t_pcoa_start = time.time()
 try:
     # fast PCoA: randomized SVD, first two dimensions only
-    ordination = pcoa(dm, method="fsvd", dimensions=2)
+    ordination = pcoa(dm, method="fsvd", dimensions=10)
     method_used = "fsvd"
 except TypeError:
     # fallback for older scikit-bio without 'method' kwarg
