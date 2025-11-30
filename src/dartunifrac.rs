@@ -28,20 +28,20 @@ use log::{info, warn};
 use rayon::prelude::*;
 
 use anndists::dist::{DistHamming, Distance};
-use dartminhash::{rng_utils::mt_from_seed, DartMinHash, ErsWmh};
-use hdf5::{types::VarLenUnicode, File as H5File};
-use newick::{one_from_string, Newick, NodeID};
+use dartminhash::{DartMinHash, ErsWmh, rng_utils::mt_from_seed};
+use hdf5::{File as H5File, types::VarLenUnicode};
+use newick::{Newick, NodeID, one_from_string};
 use succparen::{
-    bitwise::{ops::NndOne, SparseOneNnd},
+    bitwise::{SparseOneNnd, ops::NndOne},
     tree::Node,
     tree::{
+        LabelVec,
         balanced_parens::{BalancedParensTree, Node as BpNode},
         traversal::{DepthFirstTraverse, VisitNode},
-        LabelVec,
     },
 };
 
-use fpcoa::{pcoa_randomized, FpcoaOptions};
+use fpcoa::{FpcoaOptions, pcoa_randomized};
 use ndarray::{Array1, Array2};
 
 type NwkTree = newick::NewickTree;
