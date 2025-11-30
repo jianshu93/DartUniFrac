@@ -472,9 +472,11 @@ fn build_sketches(
     ers_l: u64,
     seed: u64,
 ) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
+    
     // Load tree & balanced parens
     let raw = std::fs::read_to_string(tree_file).context("read newick")?;
     let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
+    let t_tree0 = Instant::now();
     let t: NwkTree = one_from_string(&sanitized).context("parse newick (sanitized)")?;
     let mut lens_f32 = Vec::<f32>::new();
     let trav = SuccTrav::new(&t, &mut lens_f32);
@@ -508,7 +510,12 @@ fn build_sketches(
     collect_children::<SparseOneNnd>(&bp.root(), &mut kids, &mut post);
     let parent = compute_parent(total, &kids);
     let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
-
+    info!(
+        "Loaded tree with {} nodes ({} leaves). Tree preprocessing took {} ms",
+        total,
+        leaf_ids.len(),
+        t_tree0.elapsed().as_millis()
+    );
     // Build per-sample presence sets (emit (edge_id, ℓ_v) when present)
     let (samples, wsets_by_vid): (Vec<String>, Vec<Vec<(u64, f64)>>) = if let Some(tsv) = input_tsv
     {
@@ -806,6 +813,7 @@ fn build_sketches_weighted(
     // Load tree & balanced parens
     let raw = std::fs::read_to_string(tree_file).context("read newick")?;
     let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
+    let t_tree0 = Instant::now();
     let t: NwkTree = one_from_string(&sanitized).context("parse newick (sanitized)")?;
     let mut lens_f32 = Vec::<f32>::new();
     let trav = SuccTrav::new(&t, &mut lens_f32);
@@ -842,6 +850,13 @@ fn build_sketches_weighted(
     let parent = compute_parent(total, &kids);
     let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
     info!("nodes = {}  leaves = {}", total, leaf_ids.len());
+
+    info!(
+        "Loaded tree with {} nodes ({} leaves). Tree preprocessing took {} ms",
+        total,
+        leaf_ids.len(),
+        t_tree0.elapsed().as_millis()
+    );
 
     // Build per-sample weighted sets
     let (samples, wsets_by_vid): (Vec<String>, Vec<Vec<(u64, f64)>>) = if let Some(tsv) = input_tsv
