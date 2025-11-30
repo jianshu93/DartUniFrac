@@ -543,7 +543,7 @@ enum WeightedMode<'a> {
 }
 
 /// Sparse stripe: only nodes that are non-zero in [s0..s1)
-/// NEW: `nz` lists local non-zero columns per row.
+/// `nz` lists local non-zero columns per row.
 struct Stripe {
     nodes: Vec<usize>,
     rows: Vec<Vec<f32>>,   // rows[k] length == bw

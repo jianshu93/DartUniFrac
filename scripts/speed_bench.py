@@ -17,7 +17,7 @@ mpl.rcParams.update({
     "axes.labelsize"  : 20,              # x/y label size
     "xtick.labelsize" : 20,              # x tick label size
     "ytick.labelsize" : 20,              # y tick label size
-    "legend.fontsize" : 20, 
+    "legend.fontsize" : 20,
     "text.color"      : "black",
     "axes.labelcolor" : "black",
     "axes.edgecolor"  : "black",
@@ -32,10 +32,13 @@ mpl.rcParams.update({
 })
 
 def load_bench_df(path: str | None) -> pd.DataFrame:
-    expected = ["samples", "DartUniFrac", "Opt_Striped_UniFrac", "Striped_UniFrac"]
+    expected = ["samples", "DartUniFrac", "unifrac-binaries", "Striped_UniFrac"]
     if path and Path(path).exists():
         # auto-detect delimiter (tabs, commas, spaces)
         df = pd.read_csv(path, sep=None, engine="python")
+    else:
+        raise FileNotFoundError(f"Input file not found: {path}")
+
     df.columns = [c.strip() for c in df.columns]
     missing = set(expected) - set(df.columns)
     if missing:
@@ -47,16 +50,36 @@ def load_bench_df(path: str | None) -> pd.DataFrame:
 def plot_time_on_x(df: pd.DataFrame, out_pdf: str) -> None:
     from matplotlib.ticker import ScalarFormatter
 
-    methods = ["DartUniFrac", "Opt_Striped_UniFrac", "Striped_UniFrac"]
+    methods = ["DartUniFrac", "unifrac-binaries", "Striped_UniFrac"]
     markers = ["o", "s", "^"]
-    fig, ax = plt.subplots(figsize=(6, 8))
+
+    # Colors for the three categories
+    time_color   = "#1f77b4"  # blue
+    mem_color    = "#d62728"  # red
+    striped_color = "#2ca02c" # green
+
+    color_map = {
+        "DartUniFrac": time_color,
+        "unifrac-binaries": mem_color,
+        "Striped_UniFrac": striped_color,
+    }
+
+    fig, ax = plt.subplots(figsize=(8, 5))
 
     # x = samples (linear, scientific labels), y = time (log)
     for method, mk in zip(methods, markers):
         x = df["samples"].to_numpy()
         y = df[method].to_numpy()
         order = np.argsort(y)
-        ax.plot(x[order], y[order], marker=mk, linewidth=1.8, markersize=8, label=method)
+        ax.plot(
+            x[order],
+            y[order],
+            marker=mk,
+            linewidth=1.8,
+            markersize=8,
+            label=method,
+            color=color_map.get(method, "#000000"),
+        )
 
     # y is log-scale time
     ax.set_yscale("log")
@@ -71,16 +94,23 @@ def plot_time_on_x(df: pd.DataFrame, out_pdf: str) -> None:
     ax.set_xlabel("Number of Samples")
     ax.set_ylabel("Time (s)")
     ax.legend(frameon=False)
+
     plt.tight_layout()
     plt.savefig(out_pdf, bbox_inches="tight")
     plt.close(fig)
 
 def main():
-    ap = argparse.ArgumentParser(description="Plot: time on X (log), samples on Y; one curve per method.")
-    ap.add_argument("-i", "--input", type=str, default=None,
-                    help="Path to TSV/CSV with columns: samples, DartUniFrac, Opt_Striped_UniFrac, Striped_UniFrac")
-    ap.add_argument("-o", "--output", type=str, default="dartunifrac_benchmark_time_x.pdf",
-                    help="Output PDF filename")
+    ap = argparse.ArgumentParser(
+        description="Plot: samples on X, time on Y (log); one curve per method."
+    )
+    ap.add_argument(
+        "-i", "--input", type=str, default=None,
+        help="Path to TSV/CSV with columns: samples, DartUniFrac, unifrac-binaries, Striped_UniFrac"
+    )
+    ap.add_argument(
+        "-o", "--output", type=str, default="dartunifrac_benchmark_time_x.pdf",
+        help="Output PDF filename"
+    )
     args = ap.parse_args()
 
     df = load_bench_df(args.input)
