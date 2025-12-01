@@ -192,27 +192,27 @@ cargo build --release --features intel-mkl-static,stdsimd,cuda
 ./target/release/dartunifrac -h
 
 ```
-Speed benchmark for 50k samples, 4 Nvidia RTX6000 was available
+Speed benchmark for 50k samples, 4 Nvidia RTX 6000 Pro were available
 ```bash
-$ RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ./ag_emp_even500.biom --weighted -m dmh -s 3072 -o ag_emp_dmh_RTX.tsv
+$ RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ag_emp_even500.biom --weighted -m dmh -s 2048
 
  ************** initializing logger *****************
 
-[2025-09-17T20:01:21Z INFO  dartunifrac] Logger initialized from default environment
-[2025-09-17T20:01:22Z INFO  dartunifrac] 24 threads will be used 
-[2025-09-17T20:01:22Z INFO  dartunifrac] method=dmh   k=3072   seed=1337
-[2025-09-17T20:01:22Z INFO  dartunifrac] Weighted mode
-[2025-09-17T20:01:27Z INFO  dartunifrac] nodes = 614110  leaves = 307055
-[2025-09-17T20:01:28Z INFO  dartunifrac] transposing BIOM CSR→CSC …
-[2025-09-17T20:01:28Z INFO  dartunifrac] building per-sample weighted sets from BIOM (CSC) …
-[2025-09-17T20:01:29Z INFO  dartunifrac] built weighted sets in 919 ms
-[2025-09-17T20:01:30Z INFO  dartunifrac] active edges = 545049 (from 614110 total, 307055 leaves)
-[2025-09-17T20:01:30Z INFO  dartunifrac] sketching starting...
-[2025-09-17T20:01:37Z INFO  dartunifrac] sketching done.
-[2025-09-17T20:01:38Z INFO  dartunifrac] CUDA detected (4 devices). Computing pairwise distances on GPUs …
-[2025-09-17T20:02:01Z INFO  dartunifrac] pairwise distances (GPU) in 23305 ms
-[2025-09-17T20:02:01Z INFO  dartunifrac] Writing uncompressed output → ag_emp_dmh_RTX.tsv
-[2025-09-17T20:02:56Z INFO  dartunifrac] Done → ag_emp_dmh_RTX.tsv
+[2025-12-01T07:03:48Z INFO  dartunifrac_cuda] Logger initialized from default environment
+[2025-12-01T07:03:48Z INFO  dartunifrac_cuda] 48 threads will be used 
+[2025-12-01T07:03:48Z INFO  dartunifrac_cuda] method=dmh   k=2048   seed=1337
+[2025-12-01T07:03:48Z INFO  dartunifrac_cuda] Weighted mode
+[2025-12-01T07:03:52Z INFO  dartunifrac_cuda] nodes = 614110  leaves = 307055
+[2025-12-01T07:03:53Z INFO  dartunifrac_cuda] transposing BIOM CSR→CSC …
+[2025-12-01T07:03:53Z INFO  dartunifrac_cuda] building per-sample weighted sets from BIOM (CSC) …
+[2025-12-01T07:03:54Z INFO  dartunifrac_cuda] built weighted sets in 288 ms
+[2025-12-01T07:03:55Z INFO  dartunifrac_cuda] active edges = 545049 (from 614110 total, 307055 leaves)
+[2025-12-01T07:03:55Z INFO  dartunifrac_cuda] sketching starting...
+[2025-12-01T07:03:56Z INFO  dartunifrac_cuda] sketching done.
+[2025-12-01T07:03:57Z INFO  dartunifrac_cuda] CUDA detected (4 devices). Computing pairwise distances on GPUs …
+[2025-12-01T07:04:02Z INFO  dartunifrac_cuda] pairwise distances (GPU) in 4574 ms
+[2025-12-01T07:04:02Z INFO  dartunifrac_cuda] Writing uncompressed output → unifrac.tsv
+[2025-12-01T07:05:08Z INFO  dartunifrac_cuda] Done → unifrac.tsv
 
 ```
 
