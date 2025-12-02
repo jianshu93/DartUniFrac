@@ -2,7 +2,7 @@
 //! Distances are stored as `f32` (float) to halve memory vs f64.
 
 use anyhow::{bail, Context, Result};
-use std::{sync::Arc, thread};
+use std::{sync::Arc, thread, time::Instant};
 
 use cudarc::driver::{CudaContext, CudaSlice, LaunchConfig, PushKernelArg};
 use cudarc::nvrtc::compile_ptx;
@@ -538,6 +538,15 @@ fn write_matrix_streaming_gpu_single(
     let mut d_tile: CudaSlice<f32> = stream.alloc_zeros(tile_rows * bh_max)?;
     let mut h_tile = vec![0.0f32; tile_rows * bh_max];
 
+    info!(
+        "gpu-streaming(single): n={} k={} tile_rows={} tile_cols={} (scratch≈{:.2} MiB)",
+        n,
+        k,
+        tile_rows,
+        tile_cols,
+        (tile_rows * bh_max * std::mem::size_of::<f32>()) as f64 / (1024.0 * 1024.0),
+    );
+
     // For formatting
     let mut fmt = ryu::Buffer::new();
 
@@ -546,6 +555,13 @@ fn write_matrix_streaming_gpu_single(
     while i0 < n {
         let bw = (n - i0).min(tile_rows);
 
+        let block_start = Instant::now();
+        info!(
+            "gpu-streaming(single): row-block i0={}..{} (bw={}) compute start",
+            i0,
+            i0 + bw,
+            bw
+        );
         // Prepare per-row line buffers (prefix with sample name once)
         let mut lines: Vec<String> = (0..bw)
             .map(|ii| {
@@ -621,12 +637,28 @@ fn write_matrix_streaming_gpu_single(
             j0 += bh;
         }
 
+        let compute_ms = block_start.elapsed().as_millis();
+        info!(
+            "gpu-streaming(single): row-block i0={}..{} compute+gather done in {} ms",
+            i0,
+            i0 + bw,
+            compute_ms
+        );
+
+        // block timing: IO (writing)
+        let io_start = Instant::now();
         // Flush bw completed rows
         for s in lines {
             writer.write_all(s.as_bytes())?;
             writer.write_all(b"\n")?;
         }
-
+        let io_ms = io_start.elapsed().as_millis();
+        info!(
+            "gpu-streaming(single): row-block i0={}..{} IO(write) done in {} ms",
+            i0,
+            i0 + bw,
+            io_ms
+        );
         i0 += bw;
     }
 
@@ -675,7 +707,7 @@ fn write_matrix_streaming_gpu_multi(
                 std::fs::File::create(&path_str)?,
             ))
         };
-
+        let t_writer_start = Instant::now();
         // header
         writer.write_all(b"")?;
         for name in &names_vec {
@@ -695,6 +727,12 @@ fn write_matrix_streaming_gpu_multi(
             }
         }
         writer.flush()?;
+        let writer_ms = t_writer_start.elapsed().as_millis();
+        info!(
+            "gpu-streaming(multi): writer finished all {} rows in {} ms",
+            names_vec.len(),
+            writer_ms
+        );
         Ok(())
     });
 
@@ -738,11 +776,28 @@ fn write_matrix_streaming_gpu_multi(
                     let devs = devices.len();
                     let mut fmt = ryu::Buffer::new();
 
+                    info!(
+                        "gpu-streaming(multi): dev {} starting, n={} k={} tile_rows={} tile_cols={} (scratch≈{:.2} MiB)",
+                        dev_id,
+                        n,
+                        k,
+                        tile_rows,
+                        tile_cols,
+                        (tile_rows * bh_max * std::mem::size_of::<f32>()) as f64 / (1024.0 * 1024.0),
+                    );
                     // Block-stride over row blocks
                     let mut i0 = widx * tile_rows;
                     while i0 < n {
                         let bw = (n - i0).min(tile_rows);
 
+                        let block_start = Instant::now();
+                        info!(
+                            "gpu-streaming(multi): dev {} row-block i0={}..{} (bw={}) compute start",
+                            dev_id,
+                            i0,
+                            i0 + bw,
+                            bw
+                        );
                         // per-row string buffers for this block
                         let mut lines: Vec<String> = (0..bw)
                             .map(|ii| {
@@ -818,7 +873,16 @@ fn write_matrix_streaming_gpu_multi(
 
                             j0 += bh;
                         }
+                        let compute_ms = block_start.elapsed().as_millis();
+                        info!(
+                            "gpu-streaming(multi): dev {} row-block i0={}..{} compute+gather done in {} ms",
+                            dev_id,
+                            i0,
+                            i0 + bw,
+                            compute_ms
+                        );
 
+                        let send_start = Instant::now();
                         // emit completed rows
                         for ii in 0..bw {
                             let i = i0 + ii;
@@ -826,7 +890,14 @@ fn write_matrix_streaming_gpu_multi(
                             s.push('\n');
                             tx.send((i, s)).expect("send row to writer");
                         }
-
+                        let send_ms = send_start.elapsed().as_millis();
+                        info!(
+                            "gpu-streaming(multi): dev {} row-block i0={}..{} enqueue/send done in {} ms",
+                            dev_id,
+                            i0,
+                            i0 + bw,
+                            send_ms
+                        );
                         // next block for this device
                         i0 = i0.saturating_add(tile_rows * devs);
                     }
