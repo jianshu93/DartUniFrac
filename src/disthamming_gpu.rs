@@ -9,6 +9,7 @@ use cudarc::driver::{CudaContext, CudaSlice, LaunchConfig, PushKernelArg};
 use cudarc::nvrtc::compile_ptx;
 use log::{debug, info, warn};
 use std::io::Write;
+use std::sync::mpsc;
 /// Kernel: computes a (bw×bh) tile of normalized Hamming distances
 /// sketches: [n*k] row-major u64 IDs
 /// out: [bw*bh] row-major, leading dim = bh
