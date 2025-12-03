@@ -2,6 +2,7 @@
 //! Distances are stored as `f32` (float) to halve memory vs f64.
 
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeMap;
 use std::{sync::Arc, thread, time::Instant};
 
 use cudarc::driver::{CudaContext, CudaSlice, LaunchConfig, PushKernelArg};
