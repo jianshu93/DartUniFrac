@@ -288,11 +288,8 @@ fn read_biom_csr_values(
     Ok((taxa, samples, indptr, indices, data))
 }
 
-// Write TSV matrix (fast, reusing ryu buffer per row)
 // Write TSV matrix (parallel formatting, block-wise, d is f32)
 fn write_matrix(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()> {
-    use std::fs::File;
-    use std::io::{BufWriter, Write};
 
     let file = File::create(path)?;
     let mut out = BufWriter::with_capacity(16 << 20, file);
@@ -359,8 +356,6 @@ fn write_matrix(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()>
 }
 
 fn write_matrix_zstd(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()> {
-    use std::fs::File;
-    use std::io::{BufWriter, Write};
 
     // zstd encoder (multi-threaded) + big buffer
     let file = File::create(path)?;
