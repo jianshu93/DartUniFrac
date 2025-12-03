@@ -7,9 +7,7 @@ use std::{sync::Arc, thread, time::Instant};
 use cudarc::driver::{CudaContext, CudaSlice, LaunchConfig, PushKernelArg};
 use cudarc::nvrtc::compile_ptx;
 use log::{debug, info, warn};
-use std::collections::BTreeMap;
 use std::io::Write;
-use std::sync::mpsc;
 /// Kernel: computes a (bw×bh) tile of normalized Hamming distances
 /// sketches: [n*k] row-major u64 IDs
 /// out: [bw*bh] row-major, leading dim = bh
@@ -527,7 +525,7 @@ fn write_matrix_streaming_gpu_single(
     // *** Host- and GPU-friendly row block size ***
     // Keep this small to bound per-block host String memory.
     // You can tune this (128, 256, 512) depending on RAM.
-    let mut tile_rows = n.min(1024);
+    let mut tile_rows = n.min(512);
     if tile_rows == 0 {
         tile_rows = 1;
     }
@@ -681,9 +679,6 @@ fn write_matrix_streaming_gpu_multi(
     tile_cols: usize,
     devices: &[usize],
 ) -> Result<()> {
-    use std::collections::BTreeMap;
-    use std::io::Write;
-    use std::sync::mpsc;
 
     let ng = devices.len().max(1);
 
