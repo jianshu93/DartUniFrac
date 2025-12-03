@@ -484,6 +484,16 @@ fn write_matrix_streaming_gpu_single(
 ) -> Result<()> {
     use std::io::Write;
 
+    // Basic sanity checks
+    if sketches_flat_u64.len() != n * k {
+        bail!(
+            "write_matrix_streaming_gpu_single: sketches length mismatch: got {}, expected {}",
+            sketches_flat_u64.len(),
+            n * k
+        );
+    }
+
+    // ---- CUDA setup --------------------------------------------------------
     let ctx = CudaContext::new(gpu_id)?;
     let stream = ctx.default_stream();
 
@@ -494,7 +504,7 @@ fn write_matrix_streaming_gpu_single(
     // Upload sketches once
     let d_sketches: CudaSlice<u64> = stream.memcpy_stod(sketches_flat_u64)?;
 
-    // Writer (optional zstd)
+    // ---- Output writer (optionally zstd-compressed) ------------------------
     let mut writer: Box<dyn std::io::Write> = if compress {
         let file = std::fs::File::create(path)?;
         let mut enc = zstd::Encoder::new(file, 0)?;
@@ -513,7 +523,7 @@ fn write_matrix_streaming_gpu_single(
         ))
     };
 
-    // Header
+    // Header row
     writer.write_all(b"")?;
     for name in names {
         writer.write_all(b"\t")?;
@@ -521,16 +531,19 @@ fn write_matrix_streaming_gpu_single(
     }
     writer.write_all(b"\n")?;
 
-    // Kernel consts
+    // ---- Kernel constants --------------------------------------------------
     let n_i32 = n as i32;
     let k_i32 = k as i32;
-    let only_upper_i32 = 0i32; // compute full strip
+    let only_upper_i32 = 0i32; // compute full strip (not just upper)
 
-    // Choose tile_rows dynamically (~512 MiB device scratch target, 4 bytes/elem)
-    let target_bytes: usize = 512 << 20; // 512 MiB
+    // Choose tile_rows so that:
+    //  - GPU scratch fits (~512 MiB goal),
+    //  - but we also clamp to keep host RAM for h_tile modest.
+    let target_bytes: usize = 512 << 20; // 512 MiB scratch target
     let mut tile_rows =
         ((target_bytes / 4).saturating_div(tile_cols.max(1))).max(1);
-    tile_rows = tile_rows.min(4096).min(n); // safety cap
+    // Hard clamp: keep host RAM smaller (you can tune 1024 downward if needed)
+    tile_rows = tile_rows.min(1024).min(n);
 
     let bh_max = tile_cols.min(n);
 
@@ -547,10 +560,10 @@ fn write_matrix_streaming_gpu_single(
         (tile_rows * bh_max * std::mem::size_of::<f32>()) as f64 / (1024.0 * 1024.0),
     );
 
-    // For formatting
+    // For formatting floats
     let mut fmt = ryu::Buffer::new();
 
-    // Process by row blocks (bw rows at a time)
+    // ---- Main loop over row blocks ----------------------------------------
     let mut i0 = 0usize;
     while i0 < n {
         let bw = (n - i0).min(tile_rows);
@@ -562,23 +575,15 @@ fn write_matrix_streaming_gpu_single(
             i0 + bw,
             bw
         );
-        // Prepare per-row line buffers (prefix with sample name once)
-        let mut lines: Vec<String> = (0..bw)
-            .map(|ii| {
-                let mut s = String::with_capacity(8 + n * 12);
-                s.push_str(&names[i0 + ii]);
-                s
-            })
-            .collect();
 
-        // Sweep columns in stripes
+        // Sweep columns in stripes; we stream each stripe directly to the writer.
         let mut j0 = 0usize;
         while j0 < n {
             let bh = (n - j0).min(tile_cols);
 
             let blk_x = 64usize; // threads along columns (j)
             let blk_y = 8usize;  // threads along rows (i)
-            let bk = 64usize; // must match BK in kernel
+            let bk = 64usize;    // must match BK in kernel
 
             // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(u64)
             let smem_bytes =
@@ -599,6 +604,7 @@ fn write_matrix_streaming_gpu_single(
             let bw_i32 = bw as i32;
             let bh_i32 = bh as i32;
 
+            // Launch kernel
             let mut launch = stream.launch_builder(&func);
             launch.arg(&d_sketches);
             launch.arg(&n_i32);
@@ -613,13 +619,19 @@ fn write_matrix_streaming_gpu_single(
             unsafe { launch.launch(cfg) }?;
             stream.synchronize()?; // kernel done
 
-            // Copy full scratch (bw * bh_max) to satisfy cudarc's size check
+            // Copy full scratch (tile_rows * bh_max) to host; we only read bw*bh of it.
             stream.memcpy_dtoh(&d_tile, &mut h_tile)?;
 
-            // Append this stripe to each row's line
+            // Stream this stripe to the writer row by row.
             for ii in 0..bw {
-                let row_off = ii * bh; // kernel packed with ldo=bh
-                let line = &mut lines[ii];
+                let i_idx = i0 + ii;
+                let row_off = ii * bh; // kernel packs with ldo = bh for this tile
+
+                // First stripe: write row label once.
+                if j0 == 0 {
+                    writer.write_all(names[i_idx].as_bytes())?;
+                }
+
                 for jj in 0..bh {
                     let mut d = h_tile[row_off + jj];
                     if weighted_normalized {
@@ -629,36 +641,27 @@ fn write_matrix_streaming_gpu_single(
                             1.0f32
                         };
                     }
-                    line.push('\t');
-                    line.push_str(fmt.format_finite(d));
+                    writer.write_all(b"\t")?;
+                    writer.write_all(fmt.format_finite(d).as_bytes())?;
                 }
             }
 
             j0 += bh;
         }
 
-        let compute_ms = block_start.elapsed().as_millis();
-        info!(
-            "gpu-streaming(single): row-block i0={}..{} compute+gather done in {} ms",
-            i0,
-            i0 + bw,
-            compute_ms
-        );
-
-        // block timing: IO (writing)
-        let io_start = Instant::now();
-        // Flush bw completed rows
-        for s in lines {
-            writer.write_all(s.as_bytes())?;
+        // Finish all rows in this block with newline
+        for _ii in 0..bw {
             writer.write_all(b"\n")?;
         }
-        let io_ms = io_start.elapsed().as_millis();
+
+        let block_ms = block_start.elapsed().as_millis();
         info!(
-            "gpu-streaming(single): row-block i0={}..{} IO(write) done in {} ms",
+            "gpu-streaming(single): row-block i0={}..{} done in {} ms",
             i0,
             i0 + bw,
-            io_ms
+            block_ms
         );
+
         i0 += bw;
     }
 
@@ -667,7 +670,7 @@ fn write_matrix_streaming_gpu_single(
 }
 
 /// Multi-GPU compute & streaming writer:
-/// Each GPU processes blocks of `rows_per_launch` rows in a block-strided fashion
+/// Each GPU processes blocks of rows in a block-strided fashion
 /// and sends completed lines to a single writer thread that writes in-order.
 fn write_matrix_streaming_gpu_multi(
     names: &[String],
@@ -684,9 +687,17 @@ fn write_matrix_streaming_gpu_multi(
     use std::io::Write;
     use std::sync::mpsc;
 
+    if sketches_flat_u64.len() != n * k {
+        bail!(
+            "write_matrix_streaming_gpu_multi: sketches length mismatch: got {}, expected {}",
+            sketches_flat_u64.len(),
+            n * k
+        );
+    }
+
     let (tx, rx) = mpsc::sync_channel::<(usize, String)>(devices.len() * 2);
 
-    // Writer thread: drains rows in-order
+    // Writer thread: drains rows in-order by row index
     let names_vec = names.to_vec();
     let path_str = path.to_string();
     let writer_handle = std::thread::spawn(move || -> Result<()> {
@@ -708,6 +719,7 @@ fn write_matrix_streaming_gpu_multi(
             ))
         };
         let t_writer_start = Instant::now();
+
         // header
         writer.write_all(b"")?;
         for name in &names_vec {
@@ -716,6 +728,7 @@ fn write_matrix_streaming_gpu_multi(
         }
         writer.write_all(b"\n")?;
 
+        // Ensure rows are written in order [0..n)
         let mut next = 0usize;
         let mut stash: BTreeMap<usize, String> = BTreeMap::new();
         while next < names_vec.len() {
@@ -759,13 +772,14 @@ fn write_matrix_streaming_gpu_multi(
                     // Kernel consts
                     let n_i32 = n as i32;
                     let k_i32 = k as i32;
-                    let only_upper_i32 = 0i32;
+                    let only_upper_i32 = 0i32; // full strip
 
-                    // Pick tile_rows (~512 MiB scratch, 4 bytes/elem)
+                    // Pick tile_rows (~512 MiB scratch, 4 bytes/elem), but clamp to keep host RAM low.
                     let target_bytes: usize = 512 << 20;
                     let mut tile_rows =
                         ((target_bytes / 4).saturating_div(tile_cols.max(1))).max(1);
-                    tile_rows = tile_rows.min(4096).min(n);
+                    // Hard clamp: at most 512 rows per device block to limit per-worker CPU memory
+                    tile_rows = tile_rows.min(512).min(n);
                     let bh_max = tile_cols.min(n);
 
                     // Scratch for bw × bh_max
@@ -785,6 +799,7 @@ fn write_matrix_streaming_gpu_multi(
                         tile_cols,
                         (tile_rows * bh_max * std::mem::size_of::<f32>()) as f64 / (1024.0 * 1024.0),
                     );
+
                     // Block-stride over row blocks
                     let mut i0 = widx * tile_rows;
                     while i0 < n {
@@ -798,11 +813,11 @@ fn write_matrix_streaming_gpu_multi(
                             i0 + bw,
                             bw
                         );
-                        // per-row string buffers for this block
+
+                        // per-row string buffers for this block (prefix with sample name once)
                         let mut lines: Vec<String> = (0..bw)
                             .map(|ii| {
-                                let mut s =
-                                    String::with_capacity(8 + n * 12);
+                                let mut s = String::with_capacity(8 + tile_cols * 12);
                                 s.push_str(&names[i0 + ii]);
                                 s
                             })
@@ -815,7 +830,7 @@ fn write_matrix_streaming_gpu_multi(
 
                             let blk_x = 64usize; // threads along columns (j)
                             let blk_y = 8usize;  // threads along rows (i)
-                            let bk = 64usize; // must match BK in kernel
+                            let bk = 64usize;    // must match BK in kernel
 
                             // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(u64)
                             let smem_bytes =
@@ -853,9 +868,9 @@ fn write_matrix_streaming_gpu_multi(
                             stream.synchronize()?;
                             stream.memcpy_dtoh(&d_tile, &mut h_tile)?; // copy bw*bh_max
 
-                            // append stripe
+                            // append this stripe to each row's line
                             for ii in 0..bw {
-                                let row_off = ii * bh; // kernel packed ldo=bh
+                                let row_off = ii * bh; // kernel packed with ldo = bh
                                 let line = &mut lines[ii];
                                 for jj in 0..bh {
                                     let mut d = h_tile[row_off + jj];
@@ -873,6 +888,7 @@ fn write_matrix_streaming_gpu_multi(
 
                             j0 += bh;
                         }
+
                         let compute_ms = block_start.elapsed().as_millis();
                         info!(
                             "gpu-streaming(multi): dev {} row-block i0={}..{} compute+gather done in {} ms",
@@ -898,6 +914,7 @@ fn write_matrix_streaming_gpu_multi(
                             i0 + bw,
                             send_ms
                         );
+
                         // next block for this device
                         i0 = i0.saturating_add(tile_rows * devs);
                     }
@@ -919,6 +936,8 @@ fn write_matrix_streaming_gpu_multi(
         .map_err(|_| anyhow::anyhow!("writer thread panicked"))??;
     Ok(())
 }
+
+
 
 /// GPU compute and streaming write:
 /// - if >=2 GPUs detected: multi-GPU streaming across all devices
