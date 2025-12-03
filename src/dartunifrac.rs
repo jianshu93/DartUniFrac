@@ -289,19 +289,18 @@ fn read_biom_csr_values(
 }
 
 // Write TSV matrix (fast, reusing ryu buffer per row)
+// Write TSV matrix (parallel formatting, block-wise, d is f32)
 fn write_matrix(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()> {
     use std::fs::File;
     use std::io::{BufWriter, Write};
 
-    // Open output file with a big buffered writer
     let file = File::create(path)?;
     let mut out = BufWriter::with_capacity(16 << 20, file);
 
-    // header line: "", <sample1> <sample2> ... <sampleN>
-    // Build header in one String to minimize write calls
+    // Header: "", <names...>
+    // Build in a single String to minimize write calls.
     let mut header = String::new();
-    // first cell is empty by design
-    // then '\t' + name for each sample
+    header.push_str(""); // first empty cell
     for name in names {
         header.push('\t');
         header.push_str(name);
@@ -309,30 +308,50 @@ fn write_matrix(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()>
     header.push('\n');
     out.write_all(header.as_bytes())?;
 
-    // body: one big line per row
     let nn = n;
-    let mut fmt = ryu::Buffer::new();
 
-    // We reuse a row buffer per iteration to avoid reallocating capacity repeatedly
-    let mut line = String::new();
-    for i in 0..nn {
-        line.clear();
-        // rough capacity hint: name + tabs + numbers
-        // (this is only a hint; String will grow if needed)
-        line.reserve(names[i].len() + 1 + nn * 12);
+    // Block size: default ~ sqrt(n) rows at a time.
+    let block_rows = ((n as f64).sqrt() as usize).max(1);
+    log::info!(
+        "write_matrix: parallel block-wise writing with block_rows = {} (n = {})",
+        block_rows,
+        n
+    );
 
-        // row label
-        line.push_str(&names[i]);
+    let mut i0 = 0usize;
+    while i0 < nn {
+        let h = (nn - i0).min(block_rows);
 
-        let base = i * nn;
-        for j in 0..nn {
-            let val = unsafe { *d.get_unchecked(base + j) };
-            line.push('\t');
-            line.push_str(fmt.format_finite(val));
+        // Build h rows in parallel, each as its own String.
+        let lines: Vec<String> = (0..h)
+            .into_par_iter()
+            .map(|bi| {
+                let i = i0 + bi;
+                let mut line =
+                    String::with_capacity(names[i].len() + 1 + nn * 12); // rough capacity
+
+                // row label
+                line.push_str(&names[i]);
+
+                // row values
+                let base = i * nn;
+                let mut fmt = ryu::Buffer::new();
+                for j in 0..nn {
+                    line.push('\t');
+                    let val: f32 = unsafe { *d.get_unchecked(base + j) };
+                    line.push_str(fmt.format_finite(val));
+                }
+                line.push('\n');
+                line
+            })
+            .collect();
+
+        // Single writer to the buffered file.
+        for line in &lines {
+            out.write_all(line.as_bytes())?;
         }
-        line.push('\n');
 
-        out.write_all(line.as_bytes())?;
+        i0 += h;
     }
 
     out.flush()?;
@@ -352,8 +371,9 @@ fn write_matrix_zstd(names: &[String], d: &[f32], n: usize, path: &str) -> Resul
     }
     let mut out = BufWriter::with_capacity(16 << 20, enc.auto_finish());
 
-    // header line: "", <sample1> <sample2> ... <sampleN> 
+    // Header: "", <names...>
     let mut header = String::new();
+    header.push_str(""); // first empty cell
     for name in names {
         header.push('\t');
         header.push_str(name);
@@ -361,27 +381,50 @@ fn write_matrix_zstd(names: &[String], d: &[f32], n: usize, path: &str) -> Resul
     header.push('\n');
     out.write_all(header.as_bytes())?;
 
-    // body: one big line per row
     let nn = n;
-    let mut fmt = ryu::Buffer::new();
-    let mut line = String::new();
 
-    for i in 0..nn {
-        line.clear();
-        line.reserve(names[i].len() + 1 + nn * 12);
+    // Block size: default ~ sqrt(n) rows at a time.
+    let block_rows = ((n as f64).sqrt() as usize).max(1);
+    log::info!(
+        "write_matrix_zstd: parallel block-wise writing with block_rows = {} (n = {})",
+        block_rows,
+        n
+    );
 
-        // row label
-        line.push_str(&names[i]);
+    let mut i0 = 0usize;
+    while i0 < nn {
+        let h = (nn - i0).min(block_rows);
 
-        let base = i * nn;
-        for j in 0..nn {
-            let val = unsafe { *d.get_unchecked(base + j) };
-            line.push('\t');
-            line.push_str(fmt.format_finite(val));
+        // Build h rows in parallel, each as its own String.
+        let lines: Vec<String> = (0..h)
+            .into_par_iter()
+            .map(|bi| {
+                let i = i0 + bi;
+                let mut line =
+                    String::with_capacity(names[i].len() + 1 + nn * 12); // rough capacity
+
+                // row label
+                line.push_str(&names[i]);
+
+                // row values
+                let base = i * nn;
+                let mut fmt = ryu::Buffer::new();
+                for j in 0..nn {
+                    line.push('\t');
+                    let val: f32 = unsafe { *d.get_unchecked(base + j) };
+                    line.push_str(fmt.format_finite(val));
+                }
+                line.push('\n');
+                line
+            })
+            .collect();
+
+        // Single writer to the compressed stream.
+        for line in &lines {
+            out.write_all(line.as_bytes())?;
         }
-        line.push('\n');
 
-        out.write_all(line.as_bytes())?;
+        i0 += h;
     }
 
     out.flush()?;
