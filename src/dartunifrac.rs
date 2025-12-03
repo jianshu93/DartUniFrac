@@ -297,30 +297,42 @@ fn write_matrix(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()>
     let file = File::create(path)?;
     let mut out = BufWriter::with_capacity(16 << 20, file);
 
-    // Header: "", <sample1> <sample2> ... <sampleN>
-    out.write_all(b"")?;
+    // header line: "", <sample1> <sample2> ... <sampleN>
+    // Build header in one String to minimize write calls
+    let mut header = String::new();
+    // first cell is empty by design
+    // then '\t' + name for each sample
     for name in names {
-        out.write_all(b"\t")?;
-        out.write_all(name.as_bytes())?;
+        header.push('\t');
+        header.push_str(name);
     }
-    out.write_all(b"\n")?;
+    header.push('\n');
+    out.write_all(header.as_bytes())?;
 
-    // Single ryu buffer reused for all values (still very fast)
-    let mut buf = ryu::Buffer::new();
+    // body: one big line per row
     let nn = n;
+    let mut fmt = ryu::Buffer::new();
 
-    // Stream rows one by one; no extra O(n²) memory
+    // We reuse a row buffer per iteration to avoid reallocating capacity repeatedly
+    let mut line = String::new();
     for i in 0..nn {
-        // Row label
-        out.write_all(names[i].as_bytes())?;
+        line.clear();
+        // rough capacity hint: name + tabs + numbers
+        // (this is only a hint; String will grow if needed)
+        line.reserve(names[i].len() + 1 + nn * 12);
+
+        // row label
+        line.push_str(&names[i]);
 
         let base = i * nn;
         for j in 0..nn {
             let val = unsafe { *d.get_unchecked(base + j) };
-            out.write_all(b"\t")?;
-            out.write_all(buf.format_finite(val).as_bytes())?;
+            line.push('\t');
+            line.push_str(fmt.format_finite(val));
         }
-        out.write_all(b"\n")?;
+        line.push('\n');
+
+        out.write_all(line.as_bytes())?;
     }
 
     out.flush()?;
@@ -340,30 +352,36 @@ fn write_matrix_zstd(names: &[String], d: &[f32], n: usize, path: &str) -> Resul
     }
     let mut out = BufWriter::with_capacity(16 << 20, enc.auto_finish());
 
-    // Header: "", <sample1> <sample2> ... <sampleN>
-    out.write_all(b"")?;
+    // header line: "", <sample1> <sample2> ... <sampleN> 
+    let mut header = String::new();
     for name in names {
-        out.write_all(b"\t")?;
-        out.write_all(name.as_bytes())?;
+        header.push('\t');
+        header.push_str(name);
     }
-    out.write_all(b"\n")?;
+    header.push('\n');
+    out.write_all(header.as_bytes())?;
 
-    // Single ryu buffer reused for all values
-    let mut buf = ryu::Buffer::new();
+    // body: one big line per row
     let nn = n;
+    let mut fmt = ryu::Buffer::new();
+    let mut line = String::new();
 
-    // Stream rows one by one to the compressed writer
     for i in 0..nn {
-        // Row label
-        out.write_all(names[i].as_bytes())?;
+        line.clear();
+        line.reserve(names[i].len() + 1 + nn * 12);
+
+        // row label
+        line.push_str(&names[i]);
 
         let base = i * nn;
         for j in 0..nn {
             let val = unsafe { *d.get_unchecked(base + j) };
-            out.write_all(b"\t")?;
-            out.write_all(buf.format_finite(val).as_bytes())?;
+            line.push('\t');
+            line.push_str(fmt.format_finite(val));
         }
-        out.write_all(b"\n")?;
+        line.push('\n');
+
+        out.write_all(line.as_bytes())?;
     }
 
     out.flush()?;
