@@ -189,7 +189,7 @@ A better way is to compile from source.
 git clone --branch DartUniFrac-GPU https://github.com/jianshu93/DartUniFrac.git
 cd DartUniFrac
 cargo build --release --features intel-mkl-static,stdsimd,cuda
-./target/release/dartunifrac -h
+./target/release/dartunifrac-cuda -h
 
 ```
 Speed benchmark for 50k samples, 4 Nvidia RTX 6000 Pro were available
