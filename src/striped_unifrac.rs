@@ -51,6 +51,7 @@ Citations:
     Lozupone et al. Appl Environ Microbiol 2007; DOI: 10.1128/AEM.01996-06
     Hamady et al. ISME 2010; DOI: 10.1038/ismej.2009.97
     Lozupone et al. ISME 2011; DOI: 10.1038/ismej.2010.133
+    Chen et al. Bioinformatics 2012; DOI: 10.1093/bioinformatics/bts342
 "#;
 
 
