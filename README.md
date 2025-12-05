@@ -175,7 +175,7 @@ dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048
 ```
 
 ## GPU support (DartUniFrac-GPU branch)
-We provide Nvidia GPU support via CUDA (CUDA v12.9.1 or later must be installed and in system library path) on Linux (x86-64 tested). It will fall back to CPU if no GPU device is detected. Only the Hamming distance computation step benefits from GPU. It is optimized for Nvidia A100 but also works for RTX series.
+We provide Nvidia GPU support via CUDA Toolkit (CUDA v12.9.1 or later must be installed and in system library path, see, how to install [here](https://developer.nvidia.com/cuda-downloads?target_os=Linux&target_arch=x86_64)) on Linux (x86-64 tested). It will fall back to CPU if no GPU device is detected. Only the Hamming distance computation step benefits from GPU. It is optimized for Nvidia A100 but also works for RTX series.
 ```bash
 ### get the binary
 wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.6/dartunifrac-cuda_Linux_x86-64_v0.2.6.zip
