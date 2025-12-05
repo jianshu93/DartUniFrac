@@ -1269,6 +1269,8 @@ fn main() -> Result<()> {
     let mut cmd = Command::new("dartunifrac")
         .version("0.2.7")
         .about(format!("DartUniFrac: Approximate UniFrac via Weighted MinHash {dart}{dart}{dart}"))
+        .after_help(UNIFRAC_CITATIONS)
+        .after_long_help(UNIFRAC_CITATIONS)
         .arg(
             Arg::new("tree")
                 .short('t')
