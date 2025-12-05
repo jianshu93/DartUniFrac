@@ -179,7 +179,7 @@ We provide Nvidia GPU support via CUDA Toolkit (CUDA v12.9.1 or later must be in
 ```bash
 ### get the binary
 wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.6/dartunifrac-cuda_Linux_x86-64_v0.2.6.zip
-unzip dartunifrac-cuda_Linux_x86-64_v0.2.3.zip
+unzip dartunifrac-cuda_Linux_x86-64_v0.2.6.zip
 chmod a+x ./dartunifrac-cuda
 RUST_LOG=info ./dartunifrac-cuda -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom -m dmh -s 3072 --weighted -o unifrac_weighted.cuda.tsv
 
