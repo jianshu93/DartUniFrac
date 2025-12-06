@@ -175,33 +175,25 @@ dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048
 ```
 
 ## GPU support (DartUniFrac-GPU branch, Linux only)
-We provide Nvidia GPU support via CUDA Toolkit (CUDA v12.9.1 or later must be installed and in system library path, see how to install [here](https://developer.nvidia.com/cuda-downloads?target_os=Linux&target_arch=x86_64)) on Linux (x86-64 tested). It will fall back to CPU if no GPU device is detected. Only the Hamming distance computation step benefits from GPU. It is optimized for Nvidia A100 but also works for RTX series.
-```bash
-### get the binary
-wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.6/dartunifrac-cuda_Linux_x86-64_v0.2.6.zip
-unzip dartunifrac-cuda_Linux_x86-64_v0.2.6.zip
-chmod a+x ./dartunifrac-cuda
-RUST_LOG=info ./dartunifrac-cuda -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom -m dmh -s 3072 --weighted -o unifrac_weighted.cuda.tsv
-
-```
-A better way is to compile from source. 
+First, you need to install Rust here:
 ```bash
 ### Install rust first, see here: https://rustup.rs, after run it, run:
 rustup install nightly
 rustup default nightly
+
+```
+
+### CUDA Toolkit
+We provide Nvidia GPU support via CUDA Toolkit (CUDA v12.9.1 or later must be installed and in system library path, see how to install [here](https://developer.nvidia.com/cuda-downloads?target_os=Linux&target_arch=x86_64)) on Linux (x86-64 tested). It will fall back to CPU if no GPU device is detected. Only the Hamming distance computation step benefits from GPU. It is optimized for Nvidia A100 but also works for RTX series. You need to compile from source. 
+```bash
 git clone --branch DartUniFrac-GPU https://github.com/jianshu93/DartUniFrac.git
 cd DartUniFrac
 cargo build --release --features intel-mkl-static,stdsimd,cuda
 ./target/release/dartunifrac-cuda -h
 
 ```
-You can also use bioconda to manage dependencies and compile from source (recommended). 
-```bash
-### Install rust first, see here: https://rustup.rs, after run it, run:
-rustup install nightly
-rustup default nightly
-
-```
+### Use Nvidia HPC SDK (recommented)
+You can also use bioconda to manage dependencies and compile from source (recommended). See how to install bioconda [here](https://www.anaconda.com/docs/getting-started/miniconda/install)
 
 On Linux:
 ```
