@@ -177,7 +177,7 @@ dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048
 ## GPU support (DartUniFrac-GPU branch, Linux only)
 First, you need to install Rust here:
 ```bash
-### Install rust first, see here: https://rustup.rs, after run it, run:
+### Install rust first, see here: https://rustup.rs, after install rustup, run:
 rustup install nightly
 rustup default nightly
 
@@ -192,7 +192,7 @@ cargo build --release --features intel-mkl-static,stdsimd,cuda
 ./target/release/dartunifrac-cuda -h
 
 ```
-### Use Nvidia HPC SDK (recommented)
+### Use Nvidia HPC SDK (recommended)
 You can also use bioconda to manage dependencies and compile from source (recommended). See how to install bioconda [here](https://www.anaconda.com/docs/getting-started/miniconda/install)
 
 On Linux:
