@@ -52,6 +52,7 @@ Citations:
     Hamady et al. ISME 2010; DOI: 10.1038/ismej.2009.97
     Lozupone et al. ISME 2011; DOI: 10.1038/ismej.2010.133
     Chen et al. Bioinformatics 2012; DOI: 10.1093/bioinformatics/bts342
+    Chang et al. BMC Bioinformatics 2011; DOI: 10.1186/1471-2105-12-118
 "#;
 
 
@@ -1118,6 +1119,241 @@ fn unifrac_striped_par_generalized(
     Arc::try_unwrap(dist).unwrap()
 }
 
+fn unifrac_striped_par_variance_adjusted(
+    _post: &[usize],
+    kids: &[Vec<usize>],
+    lens: &[f32],
+    leaf_ids: &[usize],
+    row2leaf: &[Option<usize>],
+    mode: WeightedMode,
+    nsamp: usize,
+    col_sums: &[f64], // true per-sample totals
+) -> Vec<f64> {
+    // Build parent[] (same as in weighted/generalized)
+    let total = lens.len();
+    let parent: Vec<usize> = {
+        let mut p = vec![usize::MAX; total];
+        for v in 0..total {
+            for &c in &kids[v] {
+                p[c] = v;
+            }
+        }
+        p
+    };
+
+    // Block geometry (same heuristic as other kernels)
+    let n_threads = rayon::current_num_threads().max(1);
+    let est_blk = ((nsamp as f64 / (2.0 * n_threads as f64)).sqrt()) as usize;
+    let blk = est_blk.clamp(64, 512).next_power_of_two();
+    let nblk = (nsamp + blk - 1) / blk;
+
+    let dist = Arc::new(vec![0.0f64; nsamp * nsamp]);
+    let base_addr = dist.as_ptr() as usize;
+
+    for bi in 0..nblk {
+        let i0 = bi * blk;
+        let i1 = (i0 + blk).min(nsamp);
+        let bw = i1 - i0;
+
+        // Stripe for block i (proportions, not raw counts)
+        let stripe_i = match &mode {
+            WeightedMode::Dense { counts } => build_stripe_dense(
+                counts,
+                row2leaf,
+                leaf_ids,
+                &parent,
+                col_sums,
+                i0,
+                i1,
+                total,
+                /*raw_counts=*/ false,
+            ),
+            WeightedMode::Csr {
+                indptr,
+                indices,
+                data,
+            } => build_stripe_csr(
+                indptr,
+                indices,
+                data,
+                row2leaf,
+                leaf_ids,
+                &parent,
+                col_sums,
+                i0,
+                i1,
+                total,
+                /*raw_counts=*/ false,
+            ),
+        };
+
+        let mode_c = mode;
+        let parent_ref = &parent;
+        let row2leaf_ref = row2leaf;
+        let leaf_ids_ref = leaf_ids;
+        let col_sums_ref = col_sums;
+        let stripe_i_ref = &stripe_i;
+
+        (bi..nblk).into_par_iter().for_each(move |bj| {
+            let (j0, j1) = (bj * blk, ((bj + 1) * blk).min(nsamp));
+            let bh = j1 - j0;
+            let diagonal_block = bj == bi;
+
+            // Stripe for block j (clone or build)
+            let stripe_j = if diagonal_block {
+                Stripe {
+                    nodes: stripe_i_ref.nodes.clone(),
+                    rows: stripe_i_ref.rows.clone(),
+                    index: stripe_i_ref.index.clone(),
+                    nz: stripe_i_ref.nz.clone(),
+                }
+            } else {
+                match mode_c {
+                    WeightedMode::Dense { counts } => build_stripe_dense(
+                        counts,
+                        row2leaf_ref,
+                        leaf_ids_ref,
+                        parent_ref,
+                        col_sums_ref,
+                        j0,
+                        j1,
+                        total,
+                        /*raw_counts=*/ false,
+                    ),
+                    WeightedMode::Csr {
+                        indptr,
+                        indices,
+                        data,
+                    } => build_stripe_csr(
+                        indptr,
+                        indices,
+                        data,
+                        row2leaf_ref,
+                        leaf_ids_ref,
+                        parent_ref,
+                        col_sums_ref,
+                        j0,
+                        j1,
+                        total,
+                        /*raw_counts=*/ false,
+                    ),
+                }
+            };
+
+            // num / den for this block
+            let mut num = vec![0.0f64; bw * bh];
+            let mut den = vec![0.0f64; bw * bh];
+
+            // Helper: apply VAW contributions for a *single* branch v
+            let mut apply_branch = |v: usize| {
+                let len = lens[v] as f64;
+                if len <= 0.0 {
+                    return;
+                }
+
+                let idx_i = stripe_i_ref.index[v];
+                let idx_j = stripe_j.index[v];
+
+                // No sample in either block has this branch → skip
+                if idx_i == u32::MAX && idx_j == u32::MAX {
+                    return;
+                }
+
+                // Pointer to per-sample proportions for branch v in each block
+                let ai_opt = if idx_i != u32::MAX {
+                    Some(&stripe_i_ref.rows[idx_i as usize])
+                } else {
+                    None
+                };
+                let aj_opt = if idx_j != u32::MAX {
+                    Some(&stripe_j.rows[idx_j as usize])
+                } else {
+                    None
+                };
+
+                for ii in 0..bw {
+                    let si = i0 + ii;
+                    let tot_i = col_sums_ref[si];
+                    let p_i = ai_opt.map(|ai| ai[ii] as f64).unwrap_or(0.0);
+
+                    for jj in 0..bh {
+                        let sj = j0 + jj;
+                        if diagonal_block && sj <= si {
+                            continue;
+                        }
+                        let p_j = aj_opt.map(|aj| aj[jj] as f64).unwrap_or(0.0);
+
+                        // both zero → no contribution
+                        if p_i == 0.0 && p_j == 0.0 {
+                            continue;
+                        }
+
+                        let sum_p = p_i + p_j;
+                        if sum_p <= 0.0 {
+                            continue;
+                        }
+
+                        let tot_j = col_sums_ref[sj];
+                        let m_total = tot_i + tot_j;
+                        if m_total <= 0.0 {
+                            continue;
+                        }
+
+                        // branch-specific counts for pair (i,j)
+                        let m = p_i * tot_i + p_j * tot_j;
+                        if m <= 0.0 || m >= m_total {
+                            // zero variance in this clade
+                            continue;
+                        }
+
+                        let diff = (p_i - p_j).abs() / sum_p;
+                        let w = len * sum_p / (m * (m_total - m)).sqrt();
+
+                        let idx = ii * bh + jj;
+                        num[idx] += diff * w;
+                        den[idx] += w;
+                    }
+                }
+            };
+
+            // Process all branches that appear in stripe_i
+            for &v in &stripe_i_ref.nodes {
+                apply_branch(v);
+            }
+            // Plus branches that only appear in stripe_j
+            for &v in &stripe_j.nodes {
+                if stripe_i_ref.index[v] == u32::MAX {
+                    apply_branch(v);
+                }
+            }
+
+            // write back normalized distances
+            unsafe {
+                let base = base_addr as *mut f64;
+                for ii in 0..bw {
+                    let i = i0 + ii;
+                    for jj in 0..bh {
+                        let j = j0 + jj;
+                        if j <= i {
+                            continue;
+                        }
+                        let idx = ii * bh + jj;
+                        let d = if den[idx] > 0.0 {
+                            num[idx] / den[idx]
+                        } else {
+                            0.0
+                        };
+                        *base.add(i * nsamp + j) = d;
+                        *base.add(j * nsamp + i) = d;
+                    }
+                }
+            }
+        });
+    }
+
+    Arc::try_unwrap(dist).unwrap()
+}
+
 // BIOM readers
 fn read_biom_csr(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32>)> {
     let f = H5File::open(p).with_context(|| format!("open BIOM file {p}"))?;
@@ -1262,9 +1498,15 @@ fn main() -> Result<()> {
                 .value_parser(clap::value_parser!(f64))
                 .default_value("0.5"),
         )
+        .arg(
+            Arg::new("variance_adjusted")
+                .long("vaw")
+                .help("Variance-adjusted Weighted UniFrac (VAW)")
+                .action(ArgAction::SetTrue),
+        )
         .group(
             ArgGroup::new("metric")
-                .args(["weighted", "generalized"])
+                .args(["weighted", "generalized", "variance_adjusted"])
                 .required(false)
                 .multiple(false),
         )
@@ -1276,6 +1518,16 @@ fn main() -> Result<()> {
     let alpha = *m.get_one::<f64>("alpha").unwrap_or(&0.5);
     let weighted = *m.get_one::<bool>("weighted").unwrap_or(&false);
     let raw_counts = *m.get_one::<bool>("raw_sample_counts").unwrap_or(&false);
+    let variance_adjusted = *m
+        .get_one::<bool>("variance_adjusted")
+        .unwrap_or(&false);
+    
+    if variance_adjusted && raw_counts {
+        log::warn!(
+            "--variance-adjusted with --raw-sample-counts is not well-defined; \
+             ignoring --raw-sample-counts and using relative abundances instead."
+        );
+    }    
 
     let threads = m
         .get_one::<usize>("threads")
@@ -1345,7 +1597,7 @@ fn main() -> Result<()> {
 
     if let Some(tsv) = m.get_one::<String>("input") {
         pres_dense = true;
-        if weighted || generalized {
+        if weighted || generalized || variance_adjusted {
             let (t, s, mat) = read_table_counts(tsv)?;
             taxa = t;
             samples = s;
@@ -1358,7 +1610,7 @@ fn main() -> Result<()> {
         }
     } else {
         let biom = m.get_one::<String>("biom").unwrap();
-        if weighted || generalized {
+        if weighted || generalized || variance_adjusted {
             let (t, s, ip, idx, vals) = read_biom_csr_values(biom)?;
             taxa = t;
             samples = s;
@@ -1464,6 +1716,65 @@ fn main() -> Result<()> {
                     alpha,
                 )
             }
+        }
+    } else if variance_adjusted {
+        // VAW: always based on *counts* (TSV or BIOM), using relative abundances
+
+        let mut col_sums = vec![0.0f64; nsamp];
+
+        if pres_dense {
+            // TSV: counts[][] is rows x nsamp
+            for r in 0..counts.len() {
+                for s in 0..nsamp {
+                    col_sums[s] += counts[r][s];
+                }
+            }
+            if col_sums.iter().all(|&x| x == 0.0) {
+                log::warn!("All column sums are zero in TSV VAW run; check counts.");
+            }
+
+            unifrac_striped_par_variance_adjusted(
+                &post,
+                &kids,
+                &lens,
+                &leaf_ids,
+                &row2leaf,
+                WeightedMode::Dense { counts: &counts },
+                nsamp,
+                &col_sums,
+            )
+        } else {
+            // Sanity checks (optional)
+            debug_assert_eq!(indptr.len(), taxa.len() + 1, "indptr length mismatch");
+            debug_assert_eq!(indices.len(), data.len(), "indices/data length mismatch");
+
+            // BIOM: sum data over each column
+            for r in 0..taxa.len() {
+                let a = indptr[r] as usize;
+                let b = indptr[r + 1] as usize;
+                for k in a..b {
+                    let s = indices[k] as usize;
+                    col_sums[s] += data[k];
+                }
+            }
+            if col_sums.iter().all(|&x| x == 0.0) {
+                log::warn!("All column sums are zero in BIOM VAW run; check BIOM data.");
+            }
+
+            unifrac_striped_par_variance_adjusted(
+                &post,
+                &kids,
+                &lens,
+                &leaf_ids,
+                &row2leaf,
+                WeightedMode::Csr {
+                    indptr: &indptr,
+                    indices: &indices,
+                    data: &data,
+                },
+                nsamp,
+                &col_sums,
+            )
         }
     } else if weighted {
         let _col_sums = vec![0.0f64; nsamp];
