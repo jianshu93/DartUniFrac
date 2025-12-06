@@ -174,7 +174,7 @@ dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048
 
 ```
 
-## GPU support (DartUniFrac-GPU branch)
+## GPU support (DartUniFrac-GPU branch, Linux only)
 We provide Nvidia GPU support via CUDA Toolkit (CUDA v12.9.1 or later must be installed and in system library path, see how to install [here](https://developer.nvidia.com/cuda-downloads?target_os=Linux&target_arch=x86_64)) on Linux (x86-64 tested). It will fall back to CPU if no GPU device is detected. Only the Hamming distance computation step benefits from GPU. It is optimized for Nvidia A100 but also works for RTX series.
 ```bash
 ### get the binary
@@ -195,6 +195,37 @@ cargo build --release --features intel-mkl-static,stdsimd,cuda
 ./target/release/dartunifrac-cuda -h
 
 ```
+You can also use bioconda to manage dependencies and compile from source (recommended). 
+```bash
+### Install rust first, see here: https://rustup.rs, after run it, run:
+rustup install nightly
+rustup default nightly
+
+```
+
+On Linux:
+```
+conda create --strict-channel-priority -n dartunifrac -c conda-forge -c bioconda gxx_linux-64 gfortran_linux-64 hdf5 cmake lz4 zlib hdf5-static make curl
+conda activate dartunifrac
+git clone --branch DartUniFrac-GPU https://github.com/jianshu93/DartUniFrac.git
+cd DartUniFrac
+
+```
+For NVIDIA-GPU-enabled code, you will need the [NVIDIA HPC SDK](https://developer.nvidia.com/hpc-sdk) compiler, and is only supported on Linux.
+The NVIDIA GPU compilation requires the setting of the `NV_CXX` environment variable.
+
+This helper script will download it, install it and setup the necessary environment:
+```bash
+./install_hpc_sdk.sh 
+source setup_nv_compiler.sh
+```
+Compile:
+```bash
+cargo build --release --features intel-mkl-static,stdsimd,cuda
+./target/release/dartunifrac-cuda -h
+```
+
+
 Speed benchmark for 50k samples, 4 Nvidia RTX 6000 Pro were available
 ```bash
 $ RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ag_emp_even500.biom --weighted -m dmh -s 2048
