@@ -47,13 +47,8 @@ use ndarray::{Array1, Array2};
 
 const UNIFRAC_CITATIONS: &str = r#"
 Citations:
-  For DartUniFrac/UniFrac, please see:
-    Sfiligoi et al. mSystems 2022; DOI: 10.1128/msystems.00028-22
-    McDonald et al. Nature Methods 2018; DOI: 10.1038/s41592-018-0187-8
-    Lozupone and Knight Appl Environ Microbiol 2005; DOI: 10.1128/AEM.71.12.8228-8235.2005
-    Lozupone et al. Appl Environ Microbiol 2007; DOI: 10.1128/AEM.01996-06
-    Hamady et al. ISME 2010; DOI: 10.1038/ismej.2009.97
-    Lozupone et al. ISME 2011; DOI: 10.1038/ismej.2010.133
+  For DartUniFrac, please see:
+    Zhao et al. 2025; DOI:
 "#;
 
 type NwkTree = newick::NewickTree;
