@@ -2,10 +2,10 @@
 
 #
 # This is a helper script for installing the NVIDIA HPC SDK 
-# needed to compile a GPU-enabled version of unifrac.
+# needed to compile a GPU-enabled version of DartUniFrac.
 #
 # Note: The script currently assumes Linux_x86_64 platform.
-#
+# Credit: Igor Sfiligoi (isfiligoi@sdsc.edu), github handle: sfiligoi
 
 if [ "x${SYSROOT_DIR}" == "x" ]; then
   SYSROOT_DIR=${CONDA_PREFIX}/`$CC -dumpmachine`/sysroot/usr/lib64
