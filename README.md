@@ -9,84 +9,8 @@
   <img width="30%" src ="DartUniFrac_logo.png">
 </div>
 
-This is the GPU branch of DartUniFrac.
 
-## GPU support
-We provide Nvidia GPU support via CUDA (CUDA v0.12.0 or later must be installed and in system library path) on Linux (x86-64 tested). It will fall back to CPU if no GPU device is detected. Only the Hamming distance computation step benefits from GPU. Optimized for Nvidia A100 but also works for RTX
-```bash
-### get the binary
-wegt https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/dartunifrac-cuda_Linux_x86-64_v0.2.3.zip
-unzip dartunifrac-cuda_Linux_x86-64_v0.2.3.zip
-chmod a+x ./dartunifrac-cuda
-RUST_LOG=info ./dartunifrac-cuda -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom -m dmh -s 3072 --weighted -o unifrac_weighted.cuda.tsv
-
-```
-A better way is to compile from source. 
-```bash
-git clone --branch DartUniFrac-GPU https://github.com/jianshu93/DartUniFrac.git
-cd DartUniFrac
-cargo build --release --features intel-mkl-static,stdsimd,cuda
-./target/release/dartunifrac -h
-
-```
-Speed benchmark for 50k samples, 4 Nvidia RTX6000 was available
-```bash
-$ RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ./ag_emp_even500.biom --weighted -m dmh -s 3072 -o ag_emp_dmh_RTX.tsv
-
- ************** initializing logger *****************
-
-[2025-09-17T20:01:21Z INFO  dartunifrac] Logger initialized from default environment
-[2025-09-17T20:01:22Z INFO  dartunifrac] 24 threads will be used 
-[2025-09-17T20:01:22Z INFO  dartunifrac] method=dmh   k=3072   seed=1337
-[2025-09-17T20:01:22Z INFO  dartunifrac] Weighted mode
-[2025-09-17T20:01:27Z INFO  dartunifrac] nodes = 614110  leaves = 307055
-[2025-09-17T20:01:28Z INFO  dartunifrac] transposing BIOM CSR→CSC …
-[2025-09-17T20:01:28Z INFO  dartunifrac] building per-sample weighted sets from BIOM (CSC) …
-[2025-09-17T20:01:29Z INFO  dartunifrac] built weighted sets in 919 ms
-[2025-09-17T20:01:30Z INFO  dartunifrac] active edges = 545049 (from 614110 total, 307055 leaves)
-[2025-09-17T20:01:30Z INFO  dartunifrac] sketching starting...
-[2025-09-17T20:01:37Z INFO  dartunifrac] sketching done.
-[2025-09-17T20:01:38Z INFO  dartunifrac] CUDA detected (4 devices). Computing pairwise distances on GPUs …
-[2025-09-17T20:02:01Z INFO  dartunifrac] pairwise distances (GPU) in 23305 ms
-[2025-09-17T20:02:01Z INFO  dartunifrac] Writing uncompressed output → ag_emp_dmh_RTX.tsv
-[2025-09-17T20:02:56Z INFO  dartunifrac] Done → ag_emp_dmh_RTX.tsv
-
-```
-
-2 Nividia A100
-```bash
-$ RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ./ag_emp_even500.biom --weighted -m dmh -s 3072 -o ag_emp.weighted.dmh.cuda.tsv --compress --pcoa
-
- ************** initializing logger *****************
-
-[2025-09-07T05:33:22Z INFO  dartunifrac] Logger initialized from default environment
-[2025-09-07T05:33:22Z INFO  dartunifrac] 8 threads will be used 
-[2025-09-07T05:33:22Z INFO  dartunifrac] method=dmh   k=3072   seed=1337
-[2025-09-07T05:33:22Z INFO  dartunifrac] Weighted mode
-[2025-09-07T05:33:26Z INFO  dartunifrac] nodes = 614110  leaves = 307055
-[2025-09-07T05:33:27Z INFO  dartunifrac] transposing BIOM CSR→CSC …
-[2025-09-07T05:33:27Z INFO  dartunifrac] building per-sample weighted sets from BIOM (CSC) …
-[2025-09-07T05:33:28Z INFO  dartunifrac] built weighted sets in 936 ms
-[2025-09-07T05:33:28Z INFO  dartunifrac] active edges = 545049 (from 614110 total, 307055 leaves)
-[2025-09-07T05:33:28Z INFO  dartunifrac] sketching starting...
-[2025-09-07T05:33:43Z INFO  dartunifrac] sketching done.
-[2025-09-07T05:33:43Z INFO  dartunifrac] CUDA detected (2 devices). Computing pairwise distances on GPUs …
-[2025-09-07T05:34:03Z INFO  dartunifrac] pairwise distances (GPU) in 19668 ms
-[2025-09-07T05:34:03Z INFO  dartunifrac] Writing compressed (zstd) output → ag_emp.weighted.dmh.cuda.tsv.zst
-```
-
-
-
-
-
-
-
-
-
-
-This is the original README:
-
-# DartUniFrac: Approximate UniFrac via Weighted MinHash
+# DartUniFrac: Approximate UniFrac via Weighted MinHash 🦀
 This crate provides an efficient implementation of the newly invented ***DartUniFrac*** algorithm for large-scale [UniFrac](https://en.wikipedia.org/wiki/UniFrac) computation (weighted and unweighted). We named this new algorithm DartUniFrac because the key step is to use DartMinHash or Efficient Rejection Sampling (or ERS) on branches and the DartMinHash/ERS is about "Among the first r darts thrown, return those hitting $x_i$". 
 
 
@@ -250,6 +174,103 @@ dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048
 
 ```
 
+## GPU support (DartUniFrac-GPU branch, Linux only)
+We provide Nvidia GPU support via CUDA Toolkit (CUDA v12.9.1 or later must be installed and in system library path, see how to install [here](https://developer.nvidia.com/cuda-downloads?target_os=Linux&target_arch=x86_64)) on Linux (x86-64 tested). It will fall back to CPU if no GPU device is detected. Only the Hamming distance computation step benefits from GPU. It is optimized for Nvidia A100 but also works for RTX series.
+```bash
+### get the binary
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.6/dartunifrac-cuda_Linux_x86-64_v0.2.6.zip
+unzip dartunifrac-cuda_Linux_x86-64_v0.2.6.zip
+chmod a+x ./dartunifrac-cuda
+RUST_LOG=info ./dartunifrac-cuda -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom -m dmh -s 3072 --weighted -o unifrac_weighted.cuda.tsv
+
+```
+A better way is to compile from source. 
+```bash
+### Install rust first, see here: https://rustup.rs, after run it, run:
+rustup install nightly
+rustup default nightly
+git clone --branch DartUniFrac-GPU https://github.com/jianshu93/DartUniFrac.git
+cd DartUniFrac
+cargo build --release --features intel-mkl-static,stdsimd,cuda
+./target/release/dartunifrac-cuda -h
+
+```
+You can also use bioconda to manage dependencies and compile from source (recommended). 
+```bash
+### Install rust first, see here: https://rustup.rs, after run it, run:
+rustup install nightly
+rustup default nightly
+
+```
+
+On Linux:
+```
+conda create --strict-channel-priority -n dartunifrac -c conda-forge -c bioconda gxx_linux-64 gfortran_linux-64 hdf5 cmake lz4 zlib hdf5-static make curl
+conda activate dartunifrac
+git clone --branch DartUniFrac-GPU https://github.com/jianshu93/DartUniFrac.git
+cd DartUniFrac
+
+```
+For NVIDIA-GPU-enabled code, you will need the [NVIDIA HPC SDK](https://developer.nvidia.com/hpc-sdk) compiler, and is only supported on Linux.
+The NVIDIA GPU compilation requires the setting of the `NV_CXX` environment variable.
+
+This helper script will download it, install it and setup the necessary environment:
+```bash
+./install_hpc_sdk.sh 
+source setup_nv_compiler.sh
+```
+Compile:
+```bash
+cargo build --release --features intel-mkl-static,stdsimd,cuda
+./target/release/dartunifrac-cuda -h
+```
+
+
+Speed benchmark for 50k samples, 4 Nvidia RTX 6000 Pro were available
+```bash
+$ RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ag_emp_even500.biom --weighted -m dmh -s 2048
+
+ ************** initializing logger *****************
+
+[2025-12-01T07:03:48Z INFO  dartunifrac_cuda] Logger initialized from default environment
+[2025-12-01T07:03:48Z INFO  dartunifrac_cuda] 48 threads will be used 
+[2025-12-01T07:03:48Z INFO  dartunifrac_cuda] method=dmh   k=2048   seed=1337
+[2025-12-01T07:03:48Z INFO  dartunifrac_cuda] Weighted mode
+[2025-12-01T07:03:52Z INFO  dartunifrac_cuda] nodes = 614110  leaves = 307055
+[2025-12-01T07:03:53Z INFO  dartunifrac_cuda] transposing BIOM CSR→CSC …
+[2025-12-01T07:03:53Z INFO  dartunifrac_cuda] building per-sample weighted sets from BIOM (CSC) …
+[2025-12-01T07:03:54Z INFO  dartunifrac_cuda] built weighted sets in 288 ms
+[2025-12-01T07:03:55Z INFO  dartunifrac_cuda] active edges = 545049 (from 614110 total, 307055 leaves)
+[2025-12-01T07:03:55Z INFO  dartunifrac_cuda] sketching starting...
+[2025-12-01T07:03:56Z INFO  dartunifrac_cuda] sketching done.
+[2025-12-01T07:03:57Z INFO  dartunifrac_cuda] CUDA detected (4 devices). Computing pairwise distances on GPUs …
+[2025-12-01T07:04:02Z INFO  dartunifrac_cuda] pairwise distances (GPU) in 4574 ms
+[2025-12-01T07:04:02Z INFO  dartunifrac_cuda] Writing uncompressed output → unifrac.tsv
+[2025-12-01T07:05:08Z INFO  dartunifrac_cuda] Done → unifrac.tsv
+
+```
+
+2 Nividia A100
+```bash
+$ RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ./ag_emp_even500.biom --weighted -m dmh -s 3072 -o ag_emp.weighted.dmh.cuda.tsv --compress --pcoa
+
+ ************** initializing logger *****************
+
+[2025-09-07T05:33:22Z INFO  dartunifrac] Logger initialized from default environment
+[2025-09-07T05:33:22Z INFO  dartunifrac] 8 threads will be used 
+[2025-09-07T05:33:22Z INFO  dartunifrac] method=dmh   k=3072   seed=1337
+[2025-09-07T05:33:22Z INFO  dartunifrac] Weighted mode
+[2025-09-07T05:33:26Z INFO  dartunifrac] nodes = 614110  leaves = 307055
+[2025-09-07T05:33:27Z INFO  dartunifrac] transposing BIOM CSR→CSC …
+[2025-09-07T05:33:27Z INFO  dartunifrac] building per-sample weighted sets from BIOM (CSC) …
+[2025-09-07T05:33:28Z INFO  dartunifrac] built weighted sets in 936 ms
+[2025-09-07T05:33:28Z INFO  dartunifrac] active edges = 545049 (from 614110 total, 307055 leaves)
+[2025-09-07T05:33:28Z INFO  dartunifrac] sketching starting...
+[2025-09-07T05:33:43Z INFO  dartunifrac] sketching done.
+[2025-09-07T05:33:43Z INFO  dartunifrac] CUDA detected (2 devices). Computing pairwise distances on GPUs …
+[2025-09-07T05:34:03Z INFO  dartunifrac] pairwise distances (GPU) in 19668 ms
+[2025-09-07T05:34:03Z INFO  dartunifrac] Writing compressed (zstd) output → ag_emp.weighted.dmh.cuda.tsv.zst
+```
 
 
 ## Output
@@ -413,7 +434,7 @@ This is a dense example where $\alpha$ is almost 75% so L can be small. For real
 
 
 ## Acknowledgements
-We want to thank  [Otmar Ertl](https://www.dynatrace.com/engineering/persons/otmar-ertl/) and [Xiaoyun Li](https://lixiaoyun0239.github.io/cv/) for their helpful comments on DartMinHash and Efficient Rejection Sampling, respectively. We want to thank Yuhan(Sherlyn) Weng for helping with DartUniFrac logo design.
+We want to thank  [Otmar Ertl](https://www.linkedin.com/in/otmar-ertl/?originalSubdomain=at) and [Xiaoyun Li](https://lixiaoyun0239.github.io/cv/) for their helpful comments on DartMinHash and Efficient Rejection Sampling, respectively. We want to thank Yuhan(Sherlyn) Weng for helping with DartUniFrac logo design.
 
 ## References
 
