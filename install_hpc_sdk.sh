@@ -5,7 +5,7 @@
 # needed to compile a GPU-enabled version of unifrac.
 #
 # Note: The script currently assumes Linux_x86_64 platform.
-#
+# Credit: Igor Sfiligoi (isfiligoi@sdsc.edu), Github handle: sfiligoi
 
 if [ "x${SYSROOT_DIR}" == "x" ]; then
   SYSROOT_DIR=${CONDA_PREFIX}/`$CC -dumpmachine`/sysroot/usr/lib64
