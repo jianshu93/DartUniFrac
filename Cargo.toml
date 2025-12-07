@@ -38,7 +38,7 @@ anndists = { git = "https://github.com/jean-pierreBoth/anndists", default-featur
 ndarray = { version = "0.16", features = ["rayon", "serde"] }
 fpcoa = { git = "https://github.com/jianshu93/fpcoa" }
 
-cudarc = { version = "0.17.3", features = [
+cudarc = { version = "0.18.1", features = [
     "driver",
     "nvrtc",
     "cuda-version-from-build-system"], optional = true }
