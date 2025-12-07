@@ -176,7 +176,7 @@ pub fn pairwise_hamming_single_gpu(
         .context("load function 'hamming_tile_u64'")?;
 
     // Upload sketches
-    let d_sketches: CudaSlice<u64> = stream.clone_htod(&sketches_flat_u64)?;
+    let d_sketches: CudaSlice<u64> = stream.clone_htod(sketches_flat_u64)?;
     info!("single-GPU: uploaded sketches: {:.2} MiB", mib(n * k * 8));
 
     // Reusable scratch (block_rows × block_rows) for distances (f32)
@@ -491,7 +491,7 @@ fn write_matrix_streaming_gpu_single(
     let func = module.load_function("hamming_tile_u64")?;
 
     // Upload sketches once
-    let d_sketches: CudaSlice<u64> = stream.clone_htod(&sketches_flat_u64)?;
+    let d_sketches: CudaSlice<u64> = stream.clone_htod(sketches_flat_u64)?;
 
     // Writer (optional zstd)
     let mut writer: Box<dyn std::io::Write> = if compress {
