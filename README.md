@@ -15,10 +15,17 @@ This crate provides an efficient implementation of the newly invented ***DartUni
 
 
 ## Quick install and usage
-On Linux or MacOS
+On Linux or MacOS (CPU)
 ```bash
 conda install -c bioconda -c conda-forge dartunifrac
 ```
+Linux only (Nvidia GPU)
+```bash
+conda install -c bioconda -c conda-forge dartunifrac-gpu
+```
+
+
+
 Run on example data
 ```bash
 wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/GWMC_16S_otutab.biom
@@ -29,6 +36,15 @@ dartunifrac -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted -m d
 
 ### obtain the truth via striped unifrac algorithm (SIMD supported), extremely slow at the million-sample scale
 striped_unifrac -t ./GWMC_rep_seqs_all.tre -m ./GWMC_16S_otutab.biom --weighted -o unifrac_weighted_striped.tsv
+
+```
+
+GPU on example data:
+
+```bash
+dartunifrac-cuda -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom -m dmh -s 3072 -o unifrac_unweighted.tsv
+
+dartunifrac-cuda -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted -m dmh -s 3072 -o unifrac_weighted.tsv
 
 ```
 
