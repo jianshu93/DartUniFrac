@@ -480,6 +480,7 @@ fn write_matrix_streaming_gpu_single(
     compress: bool,
     weighted_normalized: bool,
     tile_cols: usize, // e.g. 8192 or 24576
+    tile_rows: usize, // rows per block,
     gpu_id: usize,    // device index
 ) -> Result<()> {
     let ctx = CudaContext::new(gpu_id)?;
@@ -527,7 +528,7 @@ fn write_matrix_streaming_gpu_single(
     // *** Host- and GPU-friendly row block size ***
     // Keep this small to bound per-block host String memory.
     // You can tune this (128, 256, 512) depending on RAM.
-    let mut tile_rows = n.min(512);
+    let mut tile_rows = tile_rows.min(n);
     if tile_rows == 0 {
         tile_rows = 1;
     }
@@ -679,6 +680,7 @@ fn write_matrix_streaming_gpu_multi(
     compress: bool,
     weighted_normalized: bool,
     tile_cols: usize,
+    tile_rows: usize,
     devices: &[usize],
 ) -> Result<()> {
 
@@ -765,9 +767,8 @@ fn write_matrix_streaming_gpu_multi(
                     let k_i32 = k as i32;
                     let only_upper_i32 = 0i32;
 
-                    // *** Fixed tile_rows to bound host memory per GPU ***
-                    // Each row String holds ~O(n) chars, so tile_rows should be small.
-                    let mut tile_rows = n.min(256); // tune: 128/256/512
+                    // Use user tile_rows (clamped) to control per-GPU row blocks
+                    let mut tile_rows = tile_rows.min(n);
                     if tile_rows == 0 {
                         tile_rows = 1;
                     }
@@ -939,6 +940,7 @@ pub fn write_matrix_streaming_gpu_auto(
     compress: bool,
     weighted_normalized: bool,
     tile_cols: usize,
+    tile_rows: usize,
 ) -> Result<()> {
     let ng = device_count()?; // may be 0 if CUDA not present
     if ng == 0 {
@@ -953,6 +955,7 @@ pub fn write_matrix_streaming_gpu_auto(
             compress,
             weighted_normalized,
             tile_cols,
+            tile_rows,
             0,
         )
     } else {
@@ -966,6 +969,7 @@ pub fn write_matrix_streaming_gpu_auto(
             compress,
             weighted_normalized,
             tile_cols,
+            tile_rows,
             &devices,
         )
     }

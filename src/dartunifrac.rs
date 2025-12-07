@@ -1384,7 +1384,15 @@ fn main() -> Result<()> {
                     .long("tile-cols")
                     .help("Number of columns per GPU tile in gpu-streaming mode")
                     .value_parser(clap::value_parser!(usize))
-                    .default_value("8192"),
+                    .default_value("32768"),
+            )
+            .arg(
+                Arg::new("tile-rows")
+                    .long("tile-rows")
+                    .help("Number of rows per GPU tile in gpu-streaming mode")
+                    .value_parser(clap::value_parser!(usize))
+                    // 1028 rows: safe for 256G RAM, easy to bump up
+                    .default_value("1028"),
             );
     }
 
@@ -1409,6 +1417,10 @@ fn main() -> Result<()> {
 
     #[cfg(feature = "cuda")]
     let tile_cols = *m.get_one::<usize>("tile-cols").unwrap();
+
+    #[cfg(feature = "cuda")]
+    let tile_rows = *m.get_one::<usize>("tile-rows").unwrap();
+
 
     let threads = m
         .get_one::<usize>("threads")
@@ -1563,6 +1575,7 @@ fn main() -> Result<()> {
                 true,                 // compress (zstd)
                 weighted,             // weighted_normalized
                 tile_cols,            // tile width
+                tile_rows,            // tile height (rows per block)
             )?;
 
             info!("Done → {}", out_path_stream_str);
