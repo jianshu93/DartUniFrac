@@ -38,11 +38,6 @@ anndists = { git = "https://github.com/jean-pierreBoth/anndists", default-featur
 ndarray = { version = "0.16", features = ["rayon", "serde"] }
 fpcoa = { git = "https://github.com/jianshu93/fpcoa" }
 
-cudarc = { version = "0.17.3", features = [
-    "driver",
-    "nvrtc",
-    "cuda-version-from-build-system"], optional = true }
-
 
 [features]
 default = []
@@ -53,4 +48,3 @@ openblas-static = ["fpcoa/openblas-static"]
 macos-accelerate = ["fpcoa/macos-accelerate"]
 
 stdsimd = []
-cuda = ["dep:cudarc"]
