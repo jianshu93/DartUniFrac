@@ -469,7 +469,7 @@ This is a dense example where $\alpha$ is almost 75% so L can be small. For real
 
 
 ## Acknowledgements
-We want to thank  [Otmar Ertl](https://www.linkedin.com/in/otmar-ertl/?originalSubdomain=at) and [Xiaoyun Li](https://lixiaoyun0239.github.io/cv/) for their helpful comments on DartMinHash and Efficient Rejection Sampling, respectively. We want to thank Yuhan(Sherlyn) Weng for helping with DartUniFrac logo design.
+We want to thank [Tobias Christiani](https://www.linkedin.com/in/tobias-christiani/), [Otmar Ertl](https://www.linkedin.com/in/otmar-ertl/?originalSubdomain=at) and [Xiaoyun Li](https://lixiaoyun0239.github.io/cv/) for their helpful comments on DartMinHash and Efficient Rejection Sampling. We want to thank Yuhan(Sherlyn) Weng for helping with DartUniFrac logo design.
 
 ## References
 
