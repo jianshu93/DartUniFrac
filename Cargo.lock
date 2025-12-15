@@ -912,8 +912,8 @@ dependencies = [
 
 [[package]]
 name = "fpcoa"
-version = "0.1.1"
-source = "git+https://github.com/jianshu93/fpcoa#b08d3379cb0a54d140371e511281a1f664ee5bbc"
+version = "0.1.2"
+source = "git+https://github.com/jianshu93/fpcoa#8180e5770ade874dc116304e5a4fc52765bb392b"
 dependencies = [
  "annembed",
  "lax 0.17.0",
