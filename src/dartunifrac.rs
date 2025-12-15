@@ -41,7 +41,7 @@ use succparen::{
     },
 };
 
-use fpcoa::{FpcoaOptions, pcoa_randomized_inplace};
+use fpcoa::{FpcoaOptions, pcoa_randomized_inplace_f32};
 use ndarray::{Array1, Array2};
 
 #[cfg(feature = "cuda")]
@@ -1698,10 +1698,7 @@ fn main() -> Result<()> {
 
     if pcoa {
         let n = nsamp;
-        // take the ownership of dist to avoid copy, dist wrote to disk already
-        // convert f32 -> f64 for PCoA
-        let dm_f64: Vec<f64> = dist.iter().map(|&x| x as f64).collect();
-        let mut dm = Array2::from_shape_vec((n, n), dm_f64).expect("distance matrix shape");
+        let mut dm_f32 = Array2::from_shape_vec((n, n), dist).expect("distance matrix shape");
 
         let opts = FpcoaOptions {
             k: 10,
@@ -1715,7 +1712,7 @@ fn main() -> Result<()> {
             opts.k, opts.oversample, opts.nbiter
         );
         let t_pcoa = Instant::now();
-        let res = pcoa_randomized_inplace(&mut dm, opts);
+        let res = pcoa_randomized_inplace_f32(&mut dm_f32, opts);
         info!("PCoA done in {} ms", t_pcoa.elapsed().as_millis());
 
         // Write ordination in simple format
