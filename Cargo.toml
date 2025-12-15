@@ -35,7 +35,7 @@ hdf5 = { package = "hdf5-metno", version = "0.10", features = ["static", "zlib"]
 ## dartminhash = "0.1.1"
 dartminhash = { git = "https://github.com/jianshu93/dartminhash-rs.git" }
 anndists = { git = "https://github.com/jean-pierreBoth/anndists", default-features = false, features = ["stdsimd"] }
-ndarray = { version = "0.16", features = ["rayon", "serde"] }
+ndarray = { version = "0.17.1", features = ["rayon", "serde"] }
 fpcoa = { git = "https://github.com/jianshu93/fpcoa" }
 
 cudarc = { version = "0.18.1", features = [
