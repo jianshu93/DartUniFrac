@@ -41,7 +41,7 @@ use succparen::{
     },
 };
 
-use fpcoa::{FpcoaOptions, pcoa_randomized};
+use fpcoa::{FpcoaOptions, pcoa_randomized_inplace};
 use ndarray::{Array1, Array2};
 
 
@@ -1594,7 +1594,7 @@ fn main() -> Result<()> {
         let n = nsamp;
         // Convert f32 → f64 for PCoA
         let dm_f64: Vec<f64> = dist.iter().map(|&x| x as f64).collect();
-        let dm = Array2::from_shape_vec((n, n), dm_f64).expect("distance matrix shape");
+        let mut dm = Array2::from_shape_vec((n, n), dm_f64).expect("distance matrix shape");
 
         let opts = FpcoaOptions {
             k: 10,
@@ -1608,7 +1608,7 @@ fn main() -> Result<()> {
             opts.k, opts.oversample, opts.nbiter
         );
         let t_pcoa = Instant::now();
-        let res = pcoa_randomized(dm.view(), opts);
+        let res = pcoa_randomized_inplace(&mut dm, opts);
         info!("PCoA done in {} ms", t_pcoa.elapsed().as_millis());
 
         let pcoa_path = {
