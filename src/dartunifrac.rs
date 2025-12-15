@@ -41,7 +41,7 @@ use succparen::{
     },
 };
 
-use fpcoa::{FpcoaOptions, pcoa_randomized};
+use fpcoa::{FpcoaOptions, pcoa_randomized_inplace};
 use ndarray::{Array1, Array2};
 
 #[cfg(feature = "cuda")]
