@@ -18,7 +18,7 @@ print(f"[INFO] Starting PCoA pipeline on {DIST_FILE}")
 
 # Read the distance matrix
 t_read_start = time.time()
-dist_df = pd.read_csv(DIST_FILE, sep="\t", index_col=0)
+dist_df = pd.read_csv(DIST_FILE, sep="\t", index_col=0, dtype=np.float32)
 t_read_end = time.time()
 print(f"[INFO] Loaded distance matrix with shape {dist_df.shape} in "
       f"{t_read_end - t_read_start:.2f} s")
