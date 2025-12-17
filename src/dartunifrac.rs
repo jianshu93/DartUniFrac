@@ -1100,7 +1100,6 @@ fn build_sketches_weighted(
     } else {
         // each ws must be sorted by id so ERS can binary_search x_i.
         let t_sort = Instant::now();
-        wsets.par_iter_mut().for_each(|ws| ws.sort_unstable_by_key(|p| p.0));
         info!("ERS: sorted wsets by id in {} ms", t_sort.elapsed().as_millis());
 
         // tight caps: m_i = max_s (ℓ_v * A_v[s]) over samples for that edge
