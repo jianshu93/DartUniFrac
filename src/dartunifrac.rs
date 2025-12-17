@@ -1099,6 +1099,8 @@ fn build_sketches_weighted(
             .collect()
     } else {
         // tight caps: m_i = max_s (ℓ_v * A_v[s]) over samples for that edge
+        let t_caps = Instant::now();
+
         let mut max_w = vec![0.0f64; active_edges.len()];
         for ws in &wsets {
             for &(id, w) in ws {
@@ -1108,9 +1110,15 @@ fn build_sketches_weighted(
                 }
             }
         }
+
+        info!("ERS: caps(max_w) built in {} ms", t_caps.elapsed().as_millis());
+
         let caps = max_w;
         let ers = ErsWmh::new_mt(&mut rng, &caps, k as u64);
-        wsets
+
+        let t_ers = Instant::now();
+
+        let sketches = wsets
             .par_iter()
             .map(|ws| {
                 ers.sketch(ws, Some(ers_l))
@@ -1118,7 +1126,14 @@ fn build_sketches_weighted(
                     .map(|(id, _rank)| id)
                     .collect()
             })
-            .collect()
+            .collect();
+
+        info!(
+            "ERS: sketching (ers.sketch over all samples) in {} ms",
+            t_ers.elapsed().as_millis()
+        );
+
+        sketches
     };
     info!("sketching done.");
 
