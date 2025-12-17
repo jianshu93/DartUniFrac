@@ -157,7 +157,7 @@ Options:
       --weighted              Weighted UniFrac (normalized)
   -s, --sketch <sketch-size>  Sketch size for Weighted MinHash (DartMinHash or ERS) [default: 2048]
   -m, --method <method>       Sketching method: dmh (DartMinHash) or ers (Efficient Rejection Sampling) [default: dmh] [possible values: dmh, ers]
-  -l, --length <seq-length>   Per-hash independent random sequence length for ERS, must be >= 1024 [default: 4096]
+  -l, --length <seq-length>   Per-hash independent random sequence length for ERS, must be >= 512 [default: 2048]
   -T, --threads <threads>     Number of threads, default all logical cores
       --seed <seed>           Random seed for reproducibility [default: 1337]
       --compress              Compress output with zstd, .zst suffix will be added to the output file name
