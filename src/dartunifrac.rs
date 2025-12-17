@@ -1190,23 +1190,51 @@ fn build_sketches_weighted(
             .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
             .collect()
     } else {
+        // each ws must be sorted by id so ERS can binary_search x_i.
+        let t_sort = Instant::now();
+        wsets.par_iter_mut().for_each(|ws| ws.sort_unstable_by_key(|p| p.0));
+        info!("ERS: sorted wsets by id in {} ms", t_sort.elapsed().as_millis());
+
         // tight caps: m_i = max_s (ℓ_v * A_v[s]) over samples for that edge
         let t_caps = Instant::now();
+        let d = active_edges.len();
 
-        let mut max_w = vec![0.0f64; active_edges.len()];
-        for ws in &wsets {
-            for &(id, w) in ws {
-                let idx = id as usize;
-                if w > max_w[idx] {
-                    max_w[idx] = w;
-                }
-            }
-        }
+        // Parallel caps build: thread-local max vectors + reduce by max
+        let caps: Vec<f64> = wsets
+            .par_iter()
+            .fold(
+                || vec![0.0f64; d], // thread-local maxima
+                |mut local, ws| {
+                    for &(id, w) in ws {
+                        let idx = id as usize;
+                        if w > local[idx] {
+                            local[idx] = w;
+                        }
+                    }
+                    local
+                },
+            )
+            .reduce(
+                || vec![0.0f64; d], // identity
+                |mut a, b| {
+                    // elementwise max
+                    for i in 0..d {
+                        if b[i] > a[i] {
+                            a[i] = b[i];
+                        }
+                    }
+                    a
+                },
+            );
+
         info!("ERS: caps(max_w) built in {} ms", t_caps.elapsed().as_millis());
-        let caps = max_w;
-        let t_ers = Instant::now();
+
+        // Build ERS with caps
         let ers = ErsWmh::new_mt(&mut rng, &caps, k as u64);
-        let sketches = wsets
+
+        // Sketch all samples
+        let t_ers = Instant::now();
+        let sketches: Vec<Vec<u64>> = wsets
             .par_iter()
             .map(|ws| {
                 ers.sketch(ws, Some(ers_l))
@@ -1215,9 +1243,12 @@ fn build_sketches_weighted(
                     .collect()
             })
             .collect();
+
         info!(
-        "ERS: sketching (ers.sketch over all samples) in {} ms",
-        t_ers.elapsed().as_millis());
+            "ERS: sketching (ers.sketch over all samples) in {} ms",
+            t_ers.elapsed().as_millis()
+        );
+
         sketches
     };
     info!("sketching done.");
