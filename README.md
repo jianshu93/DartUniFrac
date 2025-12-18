@@ -250,7 +250,7 @@ You can run GPU in 2 modes:
 RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ./ag_emp_even500.biom --weighted -m dmh -s 2048 -o ag_emp_even500_weighted_dist.tsv --compress
 ```
 
-2. streaming mode:
+2. streaming mode for an extremely large number of samples:
 ```bash
 RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ./ag_emp_even500.biom --weighted -m dmh -s 2048 -o ag_emp_even500_weighted_dist.tsv --compress --gpu-streaming
 ```
