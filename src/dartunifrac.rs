@@ -130,14 +130,25 @@ fn sanitize_newick_drop_internal_labels_and_comments(s: &str) -> String {
 struct SuccTrav<'a> {
     t: &'a NwkTree,
     stack: Vec<(NodeID, usize, usize)>,
-    lens: &'a mut Vec<f32>,
+
+    // branch lengths indexed by bp node id
+    lens_bp: &'a mut Vec<f32>,
+
+    // map: newick node id -> bp node id
+    nwk2bp: &'a mut Vec<usize>,
+
+    // next bp id assigned in traversal order
+    bp_next: usize,
 }
+
 impl<'a> SuccTrav<'a> {
-    fn new(t: &'a NwkTree, lens: &'a mut Vec<f32>) -> Self {
+    fn new(t: &'a NwkTree, lens_bp: &'a mut Vec<f32>, nwk2bp: &'a mut Vec<usize>) -> Self {
         Self {
             t,
             stack: vec![(t.root(), 0, 0)],
-            lens,
+            lens_bp,
+            nwk2bp,
+            bp_next: 0,
         }
     }
 }
@@ -154,10 +165,21 @@ impl<'a> DepthFirstTraverse for SuccTrav<'a> {
             self.stack.push((c, lvl + 1, k));
         }
 
-        if self.lens.len() <= id {
-            self.lens.resize(id + 1, 0.0);
+        let bp_id = self.bp_next;
+        self.bp_next += 1;
+
+        // record mapping newick->bp
+        let nid = id as usize;
+        if self.nwk2bp.len() <= nid {
+            self.nwk2bp.resize(nid + 1, usize::MAX);
         }
-        self.lens[id] = self.t[id].branch().copied().unwrap_or(0.0);
+        self.nwk2bp[nid] = bp_id;
+
+        // store branch length by bp-id
+        if self.lens_bp.len() <= bp_id {
+            self.lens_bp.resize(bp_id + 1, 0.0);
+        }
+        self.lens_bp[bp_id] = self.t[id].branch().copied().unwrap_or(0.0);
 
         Some(VisitNode::new((), lvl, nth))
     }
@@ -262,7 +284,7 @@ fn build_sketches_simple(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
+        let leaf_ids_ref = &leaf_ids_bp;
 
         info!("(simple) building per-sample presence sets from TSV …");
         let t0 = Instant::now();
@@ -327,7 +349,7 @@ fn build_sketches_simple(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
+        let leaf_ids_ref = &leaf_ids_bp;
 
         info!("(simple) building per-sample presence sets from BIOM (CSC) …");
         let t0 = Instant::now();
@@ -517,7 +539,7 @@ fn build_sketches_weighted_simple(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
+        let leaf_ids_ref = &leaf_ids_bp;
         info!("(simple) building per-sample weighted sets from TSV (dense) …");
         let t0 = Instant::now();
 
@@ -618,7 +640,7 @@ fn build_sketches_weighted_simple(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
+        let leaf_ids_ref = &leaf_ids_bp;
 
         info!("(simple) building per-sample weighted sets from BIOM (CSC) …");
         let t0 = Instant::now();
@@ -1184,7 +1206,9 @@ fn build_sketches(
     let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
     let t: NwkTree = one_from_string(&sanitized).context("parse newick (sanitized)")?;
     let mut lens_f32 = Vec::<f32>::new();
-    let trav = SuccTrav::new(&t, &mut lens_f32);
+    let mut nwk2bp = Vec::<usize>::new();
+
+    let trav = SuccTrav::new(&t, &mut lens_f32, &mut nwk2bp);
     let bp: BalancedParensTree<LabelVec<()>, SparseOneNnd> =
         BalancedParensTree::new_builder(trav, LabelVec::<()>::new()).build_all();
 
@@ -1229,7 +1253,7 @@ fn build_sketches(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
+        let leaf_ids_ref = &leaf_ids_bp;
 
         info!("building per-sample presence sets from TSV …");
         let t0 = Instant::now();
@@ -1294,7 +1318,7 @@ fn build_sketches(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
+        let leaf_ids_ref = &leaf_ids_bp;
 
         info!("building per-sample presence sets from BIOM (CSC) …");
         let t0 = Instant::now();
@@ -1485,11 +1509,16 @@ fn build_sketches_weighted(
         BalancedParensTree::new_builder(trav, LabelVec::<()>::new()).build_all();
 
     // Leaves & mapping name→leaf-ordinal, and leaf node ids
-    let mut leaf_ids = Vec::<usize>::new();
+    let mut leaf_ids_bp = Vec::<usize>::new();
     let mut leaf_nm = Vec::<String>::new();
+
     for n in t.nodes() {
         if t[n].is_leaf() {
-            leaf_ids.push(n);
+            let nid = n as usize;
+            let bid = nwk2bp[nid];
+            debug_assert!(bid != usize::MAX, "leaf newick id {nid} missing bp mapping");
+
+            leaf_ids_bp.push(bid);
             leaf_nm.push(
                 t.name(n)
                     .map(|s| s.to_owned())
@@ -1534,7 +1563,7 @@ fn build_sketches_weighted(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
+        let leaf_ids_ref = &leaf_ids_bp;
         info!("building per-sample weighted sets from TSV (dense) …");
         let t0 = Instant::now();
 
@@ -1623,7 +1652,7 @@ fn build_sketches_weighted(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
+        let leaf_ids_ref = &leaf_ids_bp;
 
         info!("building per-sample weighted sets from BIOM (CSC) …");
         let t0 = Instant::now();
