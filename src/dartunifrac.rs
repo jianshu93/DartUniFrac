@@ -141,19 +141,24 @@ impl<'a> SuccTrav<'a> {
         }
     }
 }
+
 impl<'a> DepthFirstTraverse for SuccTrav<'a> {
     type Label = ();
+
     fn next(&mut self) -> Option<VisitNode<Self::Label>> {
         let (id, lvl, nth) = self.stack.pop()?;
-        let n_children = self.t[id].children().len();
+
+        // Push children in reverse so that child 0 is visited first (stack is LIFO),
+        // but keep nth_child as the ORIGINAL index k.
         for (k, &c) in self.t[id].children().iter().enumerate().rev() {
-            let nth = n_children - 1 - k;
-            self.stack.push((c, lvl + 1, nth));
+            self.stack.push((c, lvl + 1, k));
         }
+
         if self.lens.len() <= id {
             self.lens.resize(id + 1, 0.0);
         }
         self.lens[id] = self.t[id].branch().copied().unwrap_or(0.0);
+
         Some(VisitNode::new((), lvl, nth))
     }
 }
