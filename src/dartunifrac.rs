@@ -148,8 +148,8 @@ impl<'a> DepthFirstTraverse for SuccTrav<'a> {
     fn next(&mut self) -> Option<VisitNode<Self::Label>> {
         let (id, lvl, nth) = self.stack.pop()?;
 
-        // Push children in reverse so that child 0 is visited first (stack is LIFO),
-        // but keep nth_child as the ORIGINAL index k.
+        // Push children in reverse so pop() visits them left-to-right,
+        // but keep nth_child as the ORIGINAL index.
         for (k, &c) in self.t[id].children().iter().enumerate().rev() {
             self.stack.push((c, lvl + 1, k));
         }
