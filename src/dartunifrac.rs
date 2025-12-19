@@ -1602,24 +1602,29 @@ fn build_sketches_weighted(
                     let touched = &mut state.touched;
 
                     // iterate only nnz in column s
-                    for kk in colptr[s]..colptr[s + 1] {
-                        let r = rowind[kk];
-                        let lp = match row2leaf[r] {
-                            Some(v) => v,
+                    for (r, lopt) in row2leaf.iter().enumerate() {
+                        let lp = match lopt {
+                            Some(v) => *v,
                             None => continue,
                         };
-                        let mut v = leaf_ids_ref[lp];
 
-                        let inc = (vals[kk] / denom) as f32;
+                        let val = counts[r][s];
+                        if val <= 0.0 {
+                            continue;
+                        }
+
+                        let inc = (val / denom) as f32;
                         if inc == 0.0 {
                             continue;
                         }
 
+                        let mut v = leaf_ids_ref[lp];
                         loop {
                             if acc[v] == 0.0 {
                                 touched.push(v);
                             }
                             acc[v] += inc;
+
                             let p = parent[v];
                             if p == usize::MAX {
                                 break;
