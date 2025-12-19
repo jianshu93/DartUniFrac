@@ -177,19 +177,26 @@ fn collect_children<N: NndOne>(
 /// - `parent[v]` = parent node id of v, or usize::MAX if v is root.
 /// - `lens[v]`   = branch length from parent[v] to v (0.0 for root if absent).
 fn build_parent_and_lens_simple(t: &NwkTree) -> (Vec<usize>, Vec<f64>) {
-    let total = t.nodes().len();
+    // First pass: find max node id so we can size the vectors
+    let mut max_id = 0usize;
+    for v in t.nodes() {
+        if v > max_id {
+            max_id = v;
+        }
+    }
+    let total = max_id + 1;
+
     let mut parent = vec![usize::MAX; total];
     let mut lens = vec![0.0f64; total];
 
+    // Second pass: fill parent + branch length
     for v in t.nodes() {
-        // branch length for this node (edge from parent → v)
         lens[v] = t[v].branch().copied().unwrap_or(0.0) as f64;
-
-        // children
         for &c in t[v].children() {
             parent[c] = v;
         }
     }
+
     (parent, lens)
 }
 
@@ -2085,19 +2092,21 @@ fn main() -> Result<()> {
         info!("Unweighted mode");
     };
 
-    let (samples, sketches_u64) = if weighted {
-        if succ {
-            build_sketches_weighted(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
+    let (samples, sketches_u64): (Vec<String>, Vec<Vec<u64>>) =
+        if weighted {
+            if use_succ {
+                build_sketches_weighted(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
+            } else {
+                build_sketches_weighted_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
+            }
         } else {
-            build_sketches_weighted_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
-        }
-    } else {
-        if use_succ {
-            build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
-        } else {
-            build_sketches_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
-        }
-    };
+            if use_succ {
+                build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
+            } else {
+                build_sketches_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
+            }
+        };
+        
     let nsamp = samples.len();
     if stream {
         if pcoa {
