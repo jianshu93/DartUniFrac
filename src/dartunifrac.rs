@@ -1213,11 +1213,16 @@ fn build_sketches(
         BalancedParensTree::new_builder(trav, LabelVec::<()>::new()).build_all();
 
     // Leaves & mapping name→leaf
-    let mut leaf_ids = Vec::<usize>::new();
+    let mut leaf_ids_bp = Vec::<usize>::new();
     let mut leaf_nm = Vec::<String>::new();
+
     for n in t.nodes() {
         if t[n].is_leaf() {
-            leaf_ids.push(n);
+            let nid = n as usize;
+            let bid = nwk2bp[nid];
+            debug_assert!(bid != usize::MAX, "leaf newick id {nid} missing bp mapping");
+
+            leaf_ids_bp.push(bid);
             leaf_nm.push(
                 t.name(n)
                     .map(|s| s.to_owned())
@@ -1253,7 +1258,7 @@ fn build_sketches(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
+        let leaf_ids_ref = &leaf_ids_bp;
 
         info!("building per-sample presence sets from TSV …");
         let t0 = Instant::now();
@@ -1318,7 +1323,7 @@ fn build_sketches(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
+        let leaf_ids_ref = &leaf_ids_bp;
 
         info!("building per-sample presence sets from BIOM (CSC) …");
         let t0 = Instant::now();
@@ -1410,7 +1415,7 @@ fn build_sketches(
         "active edges = {} (from {} total, {} leaves)",
         active_edges.len(),
         total,
-        leaf_ids.len()
+        leaf_ids_bp.len()
     );
 
     // Sketch (DMH or ERS with tight f64 caps)
@@ -1504,7 +1509,9 @@ fn build_sketches_weighted(
     let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
     let t: NwkTree = one_from_string(&sanitized).context("parse newick (sanitized)")?;
     let mut lens_f32 = Vec::<f32>::new();
-    let trav = SuccTrav::new(&t, &mut lens_f32);
+    let mut nwk2bp = Vec::<usize>::new();
+
+    let trav = SuccTrav::new(&t, &mut lens_f32, &mut nwk2bp);
     let bp: BalancedParensTree<LabelVec<()>, SparseOneNnd> =
         BalancedParensTree::new_builder(trav, LabelVec::<()>::new()).build_all();
 
@@ -1542,7 +1549,7 @@ fn build_sketches_weighted(
     // parent pointers for leaf→root accumulation
     let parent = compute_parent(total, &kids);
     let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
-    info!("nodes = {}  leaves = {}", total, leaf_ids.len());
+    info!("nodes = {}  leaves = {}", total, leaf_ids_bp.len());
 
     // Build per-sample weighted sets
     let (samples, wsets_by_vid): (Vec<String>, Vec<Vec<(u64, f64)>>) = if let Some(tsv) = input_tsv
@@ -1758,7 +1765,7 @@ fn build_sketches_weighted(
         "active edges = {} (from {} total, {} leaves)",
         active_edges.len(),
         total,
-        leaf_ids.len()
+        leaf_ids_bp.len()
     );
 
     // Sketch (DMH or ERS)
