@@ -2094,19 +2094,19 @@ fn main() -> Result<()> {
 
     let (samples, sketches_u64): (Vec<String>, Vec<Vec<u64>>) =
         if weighted {
-            if use_succ {
+            if succ {
                 build_sketches_weighted(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
             } else {
                 build_sketches_weighted_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
             }
         } else {
-            if use_succ {
+            if succ {
                 build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
             } else {
                 build_sketches_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
             }
         };
-        
+
     let nsamp = samples.len();
     if stream {
         if pcoa {
