@@ -20,7 +20,7 @@ use std::{
     io::{BufRead, BufReader, BufWriter, Write},
     time::Instant,
 };
-
+use anyhow::ensure;
 use anyhow::{Context, Result};
 use clap::{Arg, ArgGroup, Command};
 use env_logger;
@@ -1196,21 +1196,6 @@ fn write_matrix_streaming_zstd(
     }
 
     Ok(())
-}
-
-// Unweighted, build sketches without node_bits (leaf→root OR per sample)
-/// Build parent pointers from children lists. Root will have usize::MAX.
-/// Assumes ids are 0..kids.len()-1.
-fn compute_parent(kids: &[Vec<usize>]) -> Vec<usize> {
-    let total = kids.len();
-    let mut parent = vec![usize::MAX; total];
-    for v in 0..total {
-        for &c in &kids[v] {
-            debug_assert!(c < total, "child id out of range: c={c} total={total}");
-            parent[c] = v;
-        }
-    }
-    parent
 }
 
 fn build_sketches(
