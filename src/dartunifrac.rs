@@ -185,20 +185,22 @@ impl<'a> DepthFirstTraverse for SuccTrav<'a> {
     }
 }
 
-fn collect_children<N: NndOne>(
+fn collect_children_dense<N: NndOne>(
     node: &BpNode<LabelVec<()>, N, &BalancedParensTree<LabelVec<()>, N>>,
     kids: &mut [Vec<usize>],
     post: &mut Vec<usize>,
-) {
-    let pid = node.id() as usize;
-    for edge in node.children() {
-        let cid = edge.node.id() as usize;
-        kids[pid].push(cid);
-        collect_children(&edge.node, kids, post);
-    }
-    post.push(pid);
-}
+    next_id: &mut usize,
+) -> usize {
+    let my = *next_id;
+    *next_id += 1;
 
+    for edge in node.children() {
+        let child = collect_children_dense(&edge.node, kids, post, next_id);
+        kids[my].push(child);
+    }
+    post.push(my);
+    my
+}
 // for recording per-worker accumulators
 struct WorkerAccum {
     acc: Vec<f32>,
@@ -1237,12 +1239,20 @@ fn build_sketches(
         .collect();
 
     // children, post (unused here but harmless), parents, lengths
-    let total = bp.len() + 1;
+    // total nodes must match SuccTrav's dense preorder indexing
+    let total = lens_f32.len();
+
     let mut kids = vec![Vec::<usize>::new(); total];
     let mut post = Vec::<usize>::with_capacity(total);
-    lens_f32.resize(total, 0.0);
-    collect_children::<SparseOneNnd>(&bp.root(), &mut kids, &mut post);
+
+    let mut next_id = 0usize;
+    collect_children_dense::<SparseOneNnd>(&bp.root(), &mut kids, &mut post, &mut next_id);
+    debug_assert_eq!(next_id, total);
+
+    // parent pointers in the SAME dense id space
     let parent = compute_parent(total, &kids);
+
+    // lens already aligned to dense ids from SuccTrav
     let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
 
     // Build per-sample presence sets (emit (edge_id, ℓ_v) when present)
@@ -1540,11 +1550,21 @@ fn build_sketches_weighted(
         .collect();
 
     // children & postorder
-    let total = bp.len() + 1;
+    // total nodes must match SuccTrav's dense preorder indexing
+    let total = lens_f32.len();
+
     let mut kids = vec![Vec::<usize>::new(); total];
     let mut post = Vec::<usize>::with_capacity(total);
-    lens_f32.resize(total, 0.0);
-    collect_children::<SparseOneNnd>(&bp.root(), &mut kids, &mut post);
+
+    let mut next_id = 0usize;
+    collect_children_dense::<SparseOneNnd>(&bp.root(), &mut kids, &mut post, &mut next_id);
+    debug_assert_eq!(next_id, total);
+
+    // parent pointers in the SAME dense id space
+    let parent = compute_parent(total, &kids);
+
+    // lens already aligned to dense ids from SuccTrav
+    let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
 
     // parent pointers for leaf→root accumulation
     let parent = compute_parent(total, &kids);
@@ -2058,7 +2078,7 @@ fn main() -> Result<()> {
         .arg(
             Arg::new("succ")
                 .long("succ")
-                .help("Use succparen balanced-parentheses tree representation")
+                .help("Use succparen balanced-parentheses tree representation, simple vector-based Newick parsing otherwise")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
