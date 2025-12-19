@@ -284,7 +284,7 @@ fn build_sketches_simple(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids_bp;
+        let leaf_ids_ref = &leaf_ids;
 
         info!("(simple) building per-sample presence sets from TSV …");
         let t0 = Instant::now();
@@ -349,7 +349,7 @@ fn build_sketches_simple(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids_bp;
+        let leaf_ids_ref = &leaf_ids;
 
         info!("(simple) building per-sample presence sets from BIOM (CSC) …");
         let t0 = Instant::now();
@@ -539,7 +539,7 @@ fn build_sketches_weighted_simple(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids_bp;
+        let leaf_ids_ref = &leaf_ids;
         info!("(simple) building per-sample weighted sets from TSV (dense) …");
         let t0 = Instant::now();
 
@@ -640,7 +640,7 @@ fn build_sketches_weighted_simple(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids_bp;
+        let leaf_ids_ref = &leaf_ids;
 
         info!("(simple) building per-sample weighted sets from BIOM (CSC) …");
         let t0 = Instant::now();
@@ -1253,7 +1253,7 @@ fn build_sketches(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids_bp;
+        let leaf_ids_ref = &leaf_ids;
 
         info!("building per-sample presence sets from TSV …");
         let t0 = Instant::now();
@@ -1318,7 +1318,7 @@ fn build_sketches(
 
         let total_usize = total;
         let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids_bp;
+        let leaf_ids_ref = &leaf_ids;
 
         info!("building per-sample presence sets from BIOM (CSC) …");
         let t0 = Instant::now();
