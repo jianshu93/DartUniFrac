@@ -172,6 +172,12 @@ fn collect_children<N: NndOne>(
     post.push(pid);
 }
 
+// for recording per-worker accumulators
+struct WorkerAccum {
+    acc: Vec<f32>,
+    touched: Vec<usize>,
+}
+
 /// Simple Newick-based parent + branch-length extractor.
 ///
 /// - `parent[v]` = parent node id of v, or usize::MAX if v is root.
@@ -511,59 +517,70 @@ fn build_sketches_weighted_simple(
         let t0 = Instant::now();
 
         let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-        wsets.par_iter_mut().enumerate().for_each(|(s, out)| {
-            let denom = col_sums[s];
-            if denom == 0.0 {
-                return;
-            }
-
-            // per-worker scratch: accumulator over nodes + touched list
-            let mut acc = vec![0f32; total_usize];
-            let mut touched: Vec<usize> = Vec::new();
-
-            // scatter this sample’s rows at leaves, then climb to root
-            for (r, lopt) in row2leaf.iter().enumerate() {
-                let lp = match lopt {
-                    Some(v) => *v,
-                    None => continue,
-                };
-                let val = counts[r][s];
-                if val <= 0.0 {
-                    continue;
-                }
-                let inc = (val / denom) as f32;
-                if inc == 0.0 {
-                    continue;
-                }
-
-                // leaf node id
-                let mut v = leaf_ids_ref[lp];
-
-                loop {
-                    if acc[v] == 0.0 {
-                        touched.push(v);
+        wsets
+            .par_iter_mut()
+            .enumerate()
+            .for_each_init(
+                || WorkerAccum {
+                    acc: vec![0f32; total_usize],
+                    touched: Vec::new(),
+                },
+                |state, (s, out)| {
+                    let denom = col_sums[s];
+                    if denom == 0.0 {
+                        return;
                     }
-                    acc[v] += inc;
-                    let p = parent[v];
-                    if p == usize::MAX {
-                        break;
-                    }
-                    v = p;
-                }
-            }
 
-            // Emit (edge_id=vid, weight = ℓ_v * A_v[s])
-            out.reserve(touched.len());
-            for &v in &touched {
-                let a = acc[v] as f64;
-                if a > 0.0 {
-                    let lw = lens_ref[v];
-                    if lw > 0.0 {
-                        out.push((v as u64, lw * a));
+                    // reset only touched entries
+                    for &v in &state.touched {
+                        state.acc[v] = 0.0;
                     }
-                }
-            }
-        });
+                    state.touched.clear();
+                    out.clear();
+
+                    let acc = &mut state.acc;
+                    let touched = &mut state.touched;
+
+                    for (r, lopt) in row2leaf.iter().enumerate() {
+                        let lp = match lopt {
+                            Some(v) => *v,
+                            None => continue,
+                        };
+                        let val = counts[r][s];
+                        if val <= 0.0 {
+                            continue;
+                        }
+                        let inc = (val / denom) as f32;
+                        if inc == 0.0 {
+                            continue;
+                        }
+
+                        let mut v = leaf_ids_ref[lp];
+                        loop {
+                            if acc[v] == 0.0 {
+                                touched.push(v);
+                            }
+                            acc[v] += inc;
+                            let p = parent[v];
+                            if p == usize::MAX {
+                                break;
+                            }
+                            v = p;
+                        }
+                    }
+
+                    out.reserve(touched.len());
+                    for &v in touched.iter() {
+                        let a = acc[v] as f64;
+                        if a > 0.0 {
+                            let lw = lens_ref[v];
+                            if lw > 0.0 {
+                                out.push((v as u64, lw * a));
+                            }
+                        }
+                    }
+                },
+            );
 
         info!(
             "(simple) built weighted sets from TSV in {} ms",
@@ -602,54 +619,70 @@ fn build_sketches_weighted_simple(
         let t0 = Instant::now();
 
         let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-        wsets.par_iter_mut().enumerate().for_each(|(s, out)| {
-            let denom = col_sums[s];
-            if denom == 0.0 {
-                return;
-            }
-
-            // per-worker scratch
-            let mut acc = vec![0f32; total_usize];
-            let mut touched: Vec<usize> = Vec::new();
-
-            // iterate only nnz in column s
-            for kk in colptr[s]..colptr[s + 1] {
-                let r = rowind[kk];
-                let lp = match row2leaf[r] {
-                    Some(v) => v,
-                    None => continue,
-                };
-                let mut v = leaf_ids_ref[lp];
-
-                let inc = (vals[kk] / denom) as f32;
-                if inc == 0.0 {
-                    continue;
-                }
-
-                loop {
-                    if acc[v] == 0.0 {
-                        touched.push(v);
+        wsets
+            .par_iter_mut()
+            .enumerate()
+            .for_each_init(
+                || WorkerAccum {
+                    acc: vec![0f32; total_usize],
+                    touched: Vec::new(),
+                },
+                |state, (s, out)| {
+                    let denom = col_sums[s];
+                    if denom == 0.0 {
+                        // nothing for this sample
+                        return;
                     }
-                    acc[v] += inc;
-                    let p = parent[v];
-                    if p == usize::MAX {
-                        break;
-                    }
-                    v = p;
-                }
-            }
 
-            out.reserve(touched.len());
-            for &v in &touched {
-                let a = acc[v] as f64;
-                if a > 0.0 {
-                    let lw = lens_ref[v];
-                    if lw > 0.0 {
-                        out.push((v as u64, lw * a));
+                    // Reset only previously-touched entries in this worker's acc buffer.
+                    for &v in &state.touched {
+                        state.acc[v] = 0.0;
                     }
-                }
-            }
-        });
+                    state.touched.clear();
+                    out.clear();
+
+                    let acc = &mut state.acc;
+                    let touched = &mut state.touched;
+
+                    // iterate only nnz in column s
+                    for kk in colptr[s]..colptr[s + 1] {
+                        let r = rowind[kk];
+                        let lp = match row2leaf[r] {
+                            Some(v) => v,
+                            None => continue,
+                        };
+                        let mut v = leaf_ids_ref[lp];
+
+                        let inc = (vals[kk] / denom) as f32;
+                        if inc == 0.0 {
+                            continue;
+                        }
+
+                        loop {
+                            if acc[v] == 0.0 {
+                                touched.push(v);
+                            }
+                            acc[v] += inc;
+                            let p = parent[v];
+                            if p == usize::MAX {
+                                break;
+                            }
+                            v = p;
+                        }
+                    }
+
+                    out.reserve(touched.len());
+                    for &v in touched.iter() {
+                        let a = acc[v] as f64;
+                        if a > 0.0 {
+                            let lw = lens_ref[v];
+                            if lw > 0.0 {
+                                out.push((v as u64, lw * a));
+                            }
+                        }
+                    }
+                },
+            );
 
         info!(
             "(simple) built weighted sets from BIOM in {} ms",
@@ -1946,7 +1979,7 @@ fn main() -> Result<()> {
         .arg(
             Arg::new("succ")
                 .long("succ")
-                .help("Use succparen balanced-parentheses tree representation.")
+                .help("Use succparen balanced-parentheses tree representation")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
