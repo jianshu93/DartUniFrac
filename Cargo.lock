@@ -2665,8 +2665,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "succparen"
 version = "0.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07cfb1699739b1b32d207b78352e16782d00ef1e7558f16c036b12307e2bd7bd"
+source = "git+https://github.com/jianshu93/succparen#6dd932beb079917ddab5d198a16f492d034e1ae5"
 
 [[package]]
 name = "syn"
