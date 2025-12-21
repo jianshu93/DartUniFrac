@@ -15,11 +15,11 @@ This crate provides an efficient implementation of the newly invented ***DartUni
 
 
 ## Quick install and usage
-On Linux or MacOS (CPU)
+On Linux or MacOS (cPU)
 ```bash
 conda install -c bioconda -c conda-forge dartunifrac
 ```
-Linux only (Nvidia GPU)
+Linux only (GPU)
 ```bash
 conda install -c bioconda -c conda-forge dartunifrac-gpu
 ```
@@ -32,7 +32,8 @@ wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/GWMC_16S_
 wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/GWMC_rep_seqs_all.tre
 dartunifrac -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom -m dmh -s 3072 -o unifrac_unweighted.tsv
 dartunifrac -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted -m dmh -s 3072 -o unifrac_weighted.tsv
-
+#### if you have GPU device and driver installed (bioconda binary was compiled using CUDA 13.0 or later, or toolkit 25.11)
+dartunifrac-cuda -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted -m dmh -s 3072 -o unifrac_weighted.tsv
 
 ### obtain the truth via striped unifrac algorithm (SIMD supported), extremely slow at the million-sample scale
 striped_unifrac -t ./GWMC_rep_seqs_all.tre -m ./GWMC_16S_otutab.biom --weighted -o unifrac_weighted_striped.tsv
@@ -111,8 +112,8 @@ We first created a few libraries for the best performance of DartUniFrac impleme
 ## Install
 ### Pre-compiled on Linux (x86-64)
 ```bash
-wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/dartunifrac_Linux_x86-64_v0.2.3.zip
-unzip dartunifrac_Linux_x86-64_v0.2.3.zip
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.8/dartunifrac_Linux_x86-64_v0.2.8.zip
+unzip dartunifrac_Linux_x86-64_v0.2.8.zip
 chmod a+x ./dartunifrac
 ./dartunifrac -h
 ```
@@ -155,9 +156,10 @@ Options:
   -b, --biom <biom>           OTU/Feature table in BIOM (HDF5) format
   -o, --output <output>       Output distance matrix in TSV format [default: unifrac.tsv]
       --weighted              Weighted UniFrac (normalized)
+      --succ                  Use succparen balanced-parentheses tree representation
   -s, --sketch <sketch-size>  Sketch size for Weighted MinHash (DartMinHash or ERS) [default: 2048]
   -m, --method <method>       Sketching method: dmh (DartMinHash) or ers (Efficient Rejection Sampling) [default: dmh] [possible values: dmh, ers]
-  -l, --length <seq-length>   Per-hash independent random sequence length for ERS, must be >= 512 [default: 2048]
+  -l, --length <seq-length>   Per-hash independent random sequence length for ERS, must be >= 1024 [default: 4096]
   -T, --threads <threads>     Number of threads, default all logical cores
       --seed <seed>           Random seed for reproducibility [default: 1337]
       --compress              Compress output with zstd, .zst suffix will be added to the output file name
@@ -193,7 +195,7 @@ dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048
 ## GPU support (DartUniFrac-GPU branch, Linux only)
 First, you need to install Rust here:
 ```bash
-### Install rust first, see here: https://rustup.rs, after install rustup, run:
+### Install rust first, see here: https://rustup.rs, after run it, run:
 rustup install nightly
 rustup default nightly
 
@@ -208,7 +210,7 @@ cargo build --release --features intel-mkl-static,stdsimd,cuda
 ./target/release/dartunifrac-cuda -h
 
 ```
-### Use Nvidia HPC SDK (recommended)
+### Use Nvidia HPC SDK (recommented)
 You can also use bioconda to manage dependencies and compile from source (recommended). See how to install bioconda [here](https://www.anaconda.com/docs/getting-started/miniconda/install)
 
 On Linux:
@@ -224,7 +226,6 @@ The NVIDIA GPU compilation requires the setting of the `NV_CXX` environment vari
 
 This helper script will download it, install it and setup the necessary environment:
 ```bash
-#### This may take a while, be patient!
 ./install_hpc_sdk.sh 
 source setup_nv_compiler.sh
 ```
@@ -234,31 +235,9 @@ cargo build --release --features intel-mkl-static,stdsimd,cuda
 ./target/release/dartunifrac-cuda -h
 ```
 
-Then, let's get some data:
-
-```bash
-wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.7/ag_emp.tre
-
-wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.7/ag_emp_even500.biom
-
-```
-
-You can run GPU in 2 modes:
-
-1. in memory mode:
-```bash
-RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ./ag_emp_even500.biom --weighted -m dmh -s 2048 -o ag_emp_even500_weighted_dist.tsv --compress
-```
-
-2. streaming mode for an extremely large number of samples:
-```bash
-RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ./ag_emp_even500.biom --weighted -m dmh -s 2048 -o ag_emp_even500_weighted_dist.tsv --compress --gpu-streaming
-```
 
 Speed benchmark for 50k samples, 4 Nvidia RTX 6000 Pro were available
 ```bash
-
-
 $ RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ag_emp_even500.biom --weighted -m dmh -s 2048
 
  ************** initializing logger *****************
@@ -280,10 +259,6 @@ $ RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ag_emp_even500.biom --weight
 [2025-12-01T07:05:08Z INFO  dartunifrac_cuda] Done → unifrac.tsv
 
 ```
-
-
-
-
 
 2 Nividia A100
 ```bash
@@ -469,7 +444,7 @@ This is a dense example where $\alpha$ is almost 75% so L can be small. For real
 
 
 ## Acknowledgements
-We want to thank [Tobias Christiani](https://www.linkedin.com/in/tobias-christiani/), [Otmar Ertl](https://www.linkedin.com/in/otmar-ertl/?originalSubdomain=at) and [Xiaoyun Li](https://lixiaoyun0239.github.io/cv/) for their helpful comments on DartMinHash and Efficient Rejection Sampling. We want to thank Yuhan(Sherlyn) Weng for helping with DartUniFrac logo design.
+We want to thank  [Otmar Ertl](https://www.linkedin.com/in/otmar-ertl/?originalSubdomain=at) and [Xiaoyun Li](https://lixiaoyun0239.github.io/cv/) for their helpful comments on DartMinHash and Efficient Rejection Sampling, respectively. We want to thank Yuhan(Sherlyn) Weng for helping with DartUniFrac logo design.
 
 ## References
 
