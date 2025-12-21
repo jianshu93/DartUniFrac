@@ -32,7 +32,8 @@ wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/GWMC_16S_
 wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/GWMC_rep_seqs_all.tre
 dartunifrac -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom -m dmh -s 3072 -o unifrac_unweighted.tsv
 dartunifrac -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted -m dmh -s 3072 -o unifrac_weighted.tsv
-
+#### if you have GPU device and driver installed (bioconda binary was compiled using CUDA 13.0 or later, or toolkit 25.11)
+dartunifrac-cuda -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted -m dmh -s 3072 -o unifrac_weighted.tsv
 
 ### obtain the truth via striped unifrac algorithm (SIMD supported), extremely slow at the million-sample scale
 striped_unifrac -t ./GWMC_rep_seqs_all.tre -m ./GWMC_16S_otutab.biom --weighted -o unifrac_weighted_striped.tsv
@@ -111,8 +112,8 @@ We first created a few libraries for the best performance of DartUniFrac impleme
 ## Install
 ### Pre-compiled on Linux (x86-64)
 ```bash
-wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/dartunifrac_Linux_x86-64_v0.2.3.zip
-unzip dartunifrac_Linux_x86-64_v0.2.3.zip
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.8/dartunifrac_Linux_x86-64_v0.2.8.zip
+unzip dartunifrac_Linux_x86-64_v0.2.8.zip
 chmod a+x ./dartunifrac
 ./dartunifrac -h
 ```
@@ -155,6 +156,7 @@ Options:
   -b, --biom <biom>           OTU/Feature table in BIOM (HDF5) format
   -o, --output <output>       Output distance matrix in TSV format [default: unifrac.tsv]
       --weighted              Weighted UniFrac (normalized)
+      --succ                  Use succparen balanced-parentheses tree representation
   -s, --sketch <sketch-size>  Sketch size for Weighted MinHash (DartMinHash or ERS) [default: 2048]
   -m, --method <method>       Sketching method: dmh (DartMinHash) or ers (Efficient Rejection Sampling) [default: dmh] [possible values: dmh, ers]
   -l, --length <seq-length>   Per-hash independent random sequence length for ERS, must be >= 1024 [default: 4096]
