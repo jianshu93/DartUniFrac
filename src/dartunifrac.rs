@@ -541,12 +541,31 @@ fn build_sketches_weighted_simple(
         // TSV (dense)
         let (taxa, samples, counts) = read_table_counts(tsv)?;
         let nsamp = samples.len();
-        let mut col_sums = vec![0.0f64; nsamp];
-        for r in 0..taxa.len() {
-            for s in 0..nsamp {
-                col_sums[s] += counts[r][s];
-            }
-        }
+        // column sums (parallel)
+        let col_sums: Vec<f64> = (0..taxa.len())
+            .into_par_iter()
+            .fold(
+                || vec![0.0f64; nsamp],               // per-thread local col_sums
+                |mut local, r| {
+                    let a = indptr[r] as usize;
+                    let b = indptr[r + 1] as usize;
+                    for k in a..b {
+                        let s = indices[k] as usize;
+                        local[s] += data[k];
+                    }
+                    local
+                },
+            )
+            .reduce(
+                || vec![0.0f64; nsamp],               // identity
+                |mut a, b| {
+                    for i in 0..nsamp {
+                        a[i] += b[i];
+                    }
+                    a
+                },
+            );
+
         let row2leaf: Vec<Option<usize>> = taxa
             .iter()
             .map(|n| t2leaf.get(n.as_str()).copied())
@@ -1503,33 +1522,43 @@ fn csr_to_csc(
     nsamp: usize,
 ) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
     let nnz = data.len();
+
+    // 1) Column counts (still serial, but cheap compared to nnz scatter)
     let mut col_counts = vec![0usize; nsamp];
     for &sidx in indices {
         col_counts[sidx as usize] += 1;
     }
 
+    // 2) Prefix-sum colptr
     let mut colptr = vec![0usize; nsamp + 1];
     for i in 0..nsamp {
         colptr[i + 1] = colptr[i] + col_counts[i];
     }
 
-    let mut cur = colptr.clone();
-    let mut rowind = vec![0usize; nnz];
-    let mut vals = vec![0f64; nnz];
+    // 3) Per-column write cursors using atomics
+    let cur: Vec<AtomicUsize> = colptr
+        .iter()
+        .map(|&x| AtomicUsize::new(x))
+        .collect();
 
-    for r in 0..(indptr.len() - 1) {
-        let a = indptr[r] as usize;
-        let b = indptr[r + 1] as usize;
-        for k in a..b {
-            let s = indices[k] as usize;
-            let dst = cur[s];
-            rowind[dst] = r;
-            vals[dst] = data[k];
-            cur[s] += 1;
-        }
-    }
+    let mut rowind = vec![0usize; nnz];
+    let mut vals   = vec![0f64; nnz];
+
+    // Parallel over rows
+    (0..(indptr.len() - 1))
+        .into_par_iter()
+        .for_each(|r| {
+            let a = indptr[r] as usize;
+            let b = indptr[r + 1] as usize;
+            for k in a..b {
+                let s = indices[k] as usize;
+                let dst = cur[s].fetch_add(1, Ordering::Relaxed);
+                rowind[dst] = r;
+                vals[dst]   = data[k];
+            }
+        });
+
     (colptr, rowind, vals)
-}
 
 // Weighted, build sketches for normalized weighted UniFrac
 fn build_sketches_weighted(
