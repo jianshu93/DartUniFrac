@@ -210,7 +210,7 @@ cargo build --release --features intel-mkl-static,stdsimd,cuda
 ./target/release/dartunifrac-cuda -h
 
 ```
-### Use Nvidia HPC SDK (recommented)
+### Use Nvidia HPC SDK (recommended)
 You can also use bioconda to manage dependencies and compile from source (recommended). See how to install bioconda [here](https://www.anaconda.com/docs/getting-started/miniconda/install)
 
 On Linux:

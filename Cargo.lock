@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "dartunifrac"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "anndists 0.1.3 (git+https://github.com/jean-pierreBoth/anndists)",
  "anyhow",

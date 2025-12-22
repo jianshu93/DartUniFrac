@@ -42,20 +42,6 @@ use succparen::{
 #[cfg(feature = "stdsimd")]
 use std::simd::{LaneCount, Simd, SupportedLaneCount};
 
-const UNIFRAC_CITATIONS: &str = r#"
-Citations:
-  For DartUniFrac/UniFrac, please see:
-    Sfiligoi et al. mSystems 2022; DOI: 10.1128/msystems.00028-22
-    McDonald et al. Nature Methods 2018; DOI: 10.1038/s41592-018-0187-8
-    Lozupone and Knight Appl Environ Microbiol 2005; DOI: 10.1128/AEM.71.12.8228-8235.2005
-    Lozupone et al. Appl Environ Microbiol 2007; DOI: 10.1128/AEM.01996-06
-    Hamady et al. ISME 2010; DOI: 10.1038/ismej.2009.97
-    Lozupone et al. ISME 2011; DOI: 10.1038/ismej.2010.133
-    Chen et al. Bioinformatics 2012; DOI: 10.1093/bioinformatics/bts342
-    Chang et al. BMC Bioinformatics 2011; DOI: 10.1186/1471-2105-12-118
-"#;
-
-
 // Plain new-type – automatically `Copy`.
 #[derive(Clone, Copy)]
 struct DistPtr(NonNull<f64>);
@@ -136,7 +122,6 @@ struct SuccTrav<'a> {
     stack: Vec<(NodeID, usize, usize)>,
     lens: &'a mut Vec<f32>,
 }
-
 impl<'a> SuccTrav<'a> {
     fn new(t: &'a NwkTree, lens: &'a mut Vec<f32>) -> Self {
         Self {
@@ -146,7 +131,6 @@ impl<'a> SuccTrav<'a> {
         }
     }
 }
-
 impl<'a> DepthFirstTraverse for SuccTrav<'a> {
     type Label = ();
 
@@ -256,6 +240,7 @@ fn write_matrix(names: &[String], d: &[f64], n: usize, path: &str) -> Result<()>
 
     let mut out = BufWriter::with_capacity(16 << 20, File::create(path)?);
     out.write_all(header.as_bytes())?;
+    out.write_all(b"\n")?;
     for line in &mut rows {
         out.write_all(line.as_bytes())?;
         line.clear();
@@ -304,6 +289,209 @@ fn log_relevant_branch_counts_from_bits(
             total_branches,
             frac
         );
+    }
+}
+
+#[inline]
+fn nblocks(nsamp: usize, blk: usize) -> usize {
+    (nsamp + blk - 1) / blk
+}
+
+#[inline]
+fn block_range(bi: usize, blk: usize, nsamp: usize) -> (usize, usize) {
+    let i0 = bi * blk;
+    let i1 = (i0 + blk).min(nsamp);
+    (i0, i1)
+}
+
+/// (3) Build active_per_strip by scanning ONLY nonzero u64 words (no per-(node,strip) slicing).
+///
+/// Lists are naturally sorted by node id because `v` is outer loop.
+fn build_active_per_strip_scan_words(
+    node_bits: &[BitVec<u64, Lsb0>],
+    lens: &[f32],
+    nsamp: usize,
+    blk: usize,
+) -> Vec<Vec<usize>> {
+    let nblk = nblocks(nsamp, blk);
+    let mut active: Vec<Vec<usize>> = vec![Vec::new(); nblk];
+
+    for v in 0..lens.len() {
+        if lens[v] <= 0.0 {
+            continue;
+        }
+        let words = node_bits[v].as_raw_slice();
+        let mut touched: Vec<usize> = Vec::new();
+
+        for (wi, &w) in words.iter().enumerate() {
+            if w == 0 {
+                continue;
+            }
+            let samp0 = wi * 64;
+            let samp1 = samp0 + 63;
+            let bi0 = samp0 / blk;
+            let bi1 = samp1 / blk;
+            touched.push(bi0);
+            if bi1 != bi0 {
+                touched.push(bi1);
+            }
+        }
+
+        if touched.is_empty() {
+            continue;
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        for bi in touched {
+            if bi < nblk {
+                active[bi].push(v);
+            }
+        }
+    }
+
+    active
+}
+
+/// Collect set-bit indices in [start, end) as u16 offsets (0..end-start),
+/// scanning words with trailing_zeros and boundary masks.
+#[inline]
+fn collect_set_indices_in_range(words: &[u64], start: usize, end: usize, out: &mut Vec<u16>) {
+    out.clear();
+    if start >= end {
+        return;
+    }
+    let w0 = start >> 6;
+    let w1 = (end + 63) >> 6; // exclusive
+
+    for wi in w0..w1 {
+        let mut x = words[wi];
+
+        if wi == w0 {
+            let bit0 = start & 63;
+            if bit0 != 0 {
+                x &= (!0u64) << bit0;
+            }
+        }
+        if wi + 1 == w1 {
+            let bit1 = end & 63;
+            if bit1 != 0 {
+                x &= (1u64 << bit1) - 1;
+            }
+        }
+
+        while x != 0 {
+            let t = x.trailing_zeros() as usize;
+            let abs = (wi << 6) + t;
+            let rel = abs - start;
+            out.push(rel as u16);
+            x &= x - 1;
+        }
+    }
+}
+
+/// (5) Per-thread reusable buffers for unweighted block sweep.
+#[derive(Default)]
+struct UnwThreadBuf {
+    union: Vec<f64>,
+    shared: Vec<f64>,
+    a_idx: Vec<u16>,
+    b_idx: Vec<u16>,
+}
+
+#[inline]
+fn ensure_len_zeroed(buf: &mut Vec<f64>, n: usize) {
+    if buf.len() < n {
+        buf.resize(n, 0.0);
+    } else {
+        buf[..n].fill(0.0);
+    }
+}
+
+/// (4) Unweighted accumulate for one node into a blockpair.
+/// Uses set-index lists + row/col baselines + intersection correction.
+/// Respects upper-triangle when diagonal_block=true.
+#[inline]
+fn unweighted_accumulate_node(
+    len: f64,
+    bw: usize,
+    bh: usize,
+    diagonal_block: bool,
+    a_idx: &[u16],
+    b_idx: &[u16],
+    union: &mut [f64],
+    shared: &mut [f64],
+) {
+    if len == 0.0 {
+        return;
+    }
+    if a_idx.is_empty() && b_idx.is_empty() {
+        return;
+    }
+
+    if !diagonal_block {
+        // Row baseline: for i in A, union[i,*] += len
+        for &ii_u16 in a_idx {
+            let ii = ii_u16 as usize;
+            let row = &mut union[ii * bh..(ii + 1) * bh];
+            add_const_to_row_simd::<8>(row, len, 0);
+        }
+        // Col baseline: for j in B, union[*,j] += len
+        for &jj_u16 in b_idx {
+            let jj = jj_u16 as usize;
+            for ii in 0..bw {
+                union[ii * bh + jj] += len;
+            }
+        }
+        // Intersection correction: for (i,j) in A×B, union -= len; shared += len
+        if !a_idx.is_empty() && !b_idx.is_empty() {
+            for &ii_u16 in a_idx {
+                let ii = ii_u16 as usize;
+                let base = ii * bh;
+                for &jj_u16 in b_idx {
+                    let jj = jj_u16 as usize;
+                    let idx = base + jj;
+                    union[idx] -= len;
+                    shared[idx] += len;
+                }
+            }
+        }
+        return;
+    }
+
+    // Diagonal block: only upper triangle (j>i) matters.
+    // Row baseline (i in A): union[i, j>i] += len
+    for &ii_u16 in a_idx {
+        let ii = ii_u16 as usize;
+        let start_j = ii + 1;
+        if start_j >= bh {
+            continue;
+        }
+        let row = &mut union[ii * bh..(ii + 1) * bh];
+        add_const_to_row_simd::<8>(row, len, start_j);
+    }
+
+    // Col baseline (j in B): union[i<j, j] += len
+    for &jj_u16 in b_idx {
+        let jj = jj_u16 as usize;
+        let ii_end = jj.min(bw);
+        for ii in 0..ii_end {
+            union[ii * bh + jj] += len;
+        }
+    }
+
+    // Intersection correction for j>i
+    if !a_idx.is_empty() && !b_idx.is_empty() {
+        for &ii_u16 in a_idx {
+            let ii = ii_u16 as usize;
+            let base = ii * bh;
+            let pos = b_idx.partition_point(|&x| (x as usize) <= ii);
+            for &jj_u16 in &b_idx[pos..] {
+                let jj = jj_u16 as usize;
+                let idx = base + jj;
+                union[idx] -= len;
+                shared[idx] += len;
+            }
+        }
     }
 }
 
@@ -419,20 +607,8 @@ fn unifrac_striped_par(
     let blk = est_blk.clamp(64, 512).next_power_of_two();
     let nblk = (nsamp + blk - 1) / blk;
 
-    let mut active_per_strip: Vec<Vec<usize>> = vec![Vec::new(); nblk];
-
-    for v in 0..total {
-        let raw = node_bits[v].as_raw_slice();
-        for bi in 0..nblk {
-            let i0 = bi * blk;
-            let i1 = ((bi + 1) * blk).min(nsamp);
-            let w0 = i0 >> 6;
-            let w1 = (i1 + 63) >> 6;
-            if raw[w0..w1].iter().any(|&w| w != 0) {
-                active_per_strip[bi].push(v);
-            }
-        }
-    }
+    // (3) faster active list construction
+    let active_per_strip = build_active_per_strip_scan_words(&node_bits, lens, nsamp, blk);
     log::info!("phase-2 sparse lists built ({} strips)", nblk);
 
     // Phase 3 : block sweep (upper triangle)
@@ -444,97 +620,98 @@ fn unifrac_striped_par(
         .collect();
 
     let t3 = Instant::now();
-    pairs.into_par_iter().for_each(|(bi, bj)| {
-        let ptr = ptr;
-        let (i0, i1) = (bi * blk, ((bi + 1) * blk).min(nsamp));
-        let (j0, j1) = (bj * blk, ((bj + 1) * blk).min(nsamp));
-        let bw = i1 - i0;
-        let bh = j1 - j0;
+    pairs.into_par_iter().for_each_init(
+        UnwThreadBuf::default,
+        |buf, (bi, bj)| {
+            let ptr = ptr;
+            let (i0, i1) = block_range(bi, blk, nsamp);
+            let (j0, j1) = block_range(bj, blk, nsamp);
+            let bw = i1 - i0;
+            let bh = j1 - j0;
+            let diagonal_block = bi == bj;
 
-        let mut union = vec![0.0f64; bw * bh];
-        let mut shared = vec![0.0f64; bw * bh];
+            // (5) reuse buffers
+            ensure_len_zeroed(&mut buf.union, bw * bh);
+            ensure_len_zeroed(&mut buf.shared, bw * bh);
 
-        let list_a = &active_per_strip[bi];
-        let list_b = &active_per_strip[bj];
-        let mut ia = 0;
-        let mut ib = 0;
+            let list_a = &active_per_strip[bi];
+            let list_b = &active_per_strip[bj];
+            let mut ia = 0usize;
+            let mut ib = 0usize;
 
-        while ia < list_a.len() || ib < list_b.len() {
-            let v = match (list_a.get(ia), list_b.get(ib)) {
-                (Some(&va), Some(&vb)) => {
-                    if va < vb {
+            // Merge two sorted lists (union of active nodes)
+            while ia < list_a.len() || ib < list_b.len() {
+                let v = match (list_a.get(ia), list_b.get(ib)) {
+                    (Some(&va), Some(&vb)) => {
+                        if va < vb {
+                            ia += 1;
+                            va
+                        } else if vb < va {
+                            ib += 1;
+                            vb
+                        } else {
+                            ia += 1;
+                            ib += 1;
+                            va
+                        }
+                    }
+                    (Some(&va), None) => {
                         ia += 1;
                         va
-                    } else if vb < va {
+                    }
+                    (None, Some(&vb)) => {
                         ib += 1;
                         vb
-                    } else {
-                        ia += 1;
-                        ib += 1;
-                        va
                     }
-                }
-                (Some(&va), None) => {
-                    ia += 1;
-                    va
-                }
-                (None, Some(&vb)) => {
-                    ib += 1;
-                    vb
-                }
-                _ => unreachable!(),
-            };
+                    _ => unreachable!(),
+                };
 
-            let len = lens[v] as f64;
-            let words = node_bits[v].as_raw_slice();
+                let len = lens[v] as f64;
+                if len <= 0.0 {
+                    continue;
+                }
+                let words = node_bits[v].as_raw_slice();
 
-            for ii in 0..bw {
-                let samp_i = i0 + ii;
-                let word_i = words[samp_i >> 6];
-                let bit_i = 1u64 << (samp_i & 63);
-                let a_set = (word_i & bit_i) != 0;
+                // (4) build set-index lists for this node in the two blocks
+                collect_set_indices_in_range(words, i0, i1, &mut buf.a_idx);
+                collect_set_indices_in_range(words, j0, j1, &mut buf.b_idx);
 
-                for jj in 0..bh {
-                    let samp_j = j0 + jj;
-                    if samp_j <= samp_i {
-                        continue;
-                    }
-                    let word_j = words[samp_j >> 6];
-                    let bit_j = 1u64 << (samp_j & 63);
-                    let b_set = (word_j & bit_j) != 0;
-                    if !a_set && !b_set {
-                        continue;
-                    }
-                    let idx = ii * bh + jj;
-                    union[idx] += len;
-                    if a_set && b_set {
-                        shared[idx] += len;
+                // (4) baseline + intersection correction
+                unweighted_accumulate_node(
+                    len,
+                    bw,
+                    bh,
+                    diagonal_block,
+                    &buf.a_idx,
+                    &buf.b_idx,
+                    &mut buf.union[..bw * bh],
+                    &mut buf.shared[..bw * bh],
+                );
+            }
+
+            // write-back distances
+            unsafe {
+                let base = ptr.0.as_ptr();
+                for ii in 0..bw {
+                    let i = i0 + ii;
+                    for jj in 0..bh {
+                        let j = j0 + jj;
+                        if j <= i {
+                            continue;
+                        }
+                        let idx = ii * bh + jj;
+                        let u = buf.union[idx];
+                        if u == 0.0 {
+                            continue;
+                        }
+                        let d = 1.0 - buf.shared[idx] / u;
+                        *base.add(i * nsamp + j) = d;
+                        *base.add(j * nsamp + i) = d;
                     }
                 }
             }
-        }
-
-        unsafe {
-            let base = ptr.0.as_ptr();
-            for ii in 0..bw {
-                let i = i0 + ii;
-                for jj in 0..bh {
-                    let j = j0 + jj;
-                    if j <= i {
-                        continue;
-                    }
-                    let idx = ii * bh + jj;
-                    let u = union[idx];
-                    if u == 0.0 {
-                        continue;
-                    }
-                    let d = 1.0 - shared[idx] / u;
-                    *base.add(i * nsamp + j) = d;
-                    *base.add(j * nsamp + i) = d;
-                }
-            }
-        }
-    });
+        },
+    );
 
     drop(active_per_strip);
     drop(node_bits);
@@ -556,12 +733,12 @@ enum WeightedMode<'a> {
 }
 
 /// Sparse stripe: only nodes that are non-zero in [s0..s1)
-/// `nz` lists local non-zero columns per row.
+/// NEW: `nz` lists local non-zero columns per row.
 struct Stripe {
     nodes: Vec<usize>,
-    rows: Vec<Vec<f32>>,   // rows[k] length == bw
-    index: Vec<u32>,       // node-id -> row index (u32::MAX if absent)
-    nz: Vec<Vec<usize>>,   // rows[k] -> sorted list of local jj with >0
+    rows: Vec<Vec<f32>>, // rows[k] length == bw
+    index: Vec<u32>,     // node-id -> row index (u32::MAX if absent)
+    nz: Vec<Vec<usize>>, // rows[k] -> sorted list of local jj with >0
 }
 
 fn ensure_row_slot<'a>(
@@ -569,9 +746,9 @@ fn ensure_row_slot<'a>(
     idx_of: &mut [u32],
     nodes: &mut Vec<usize>,
     rows: &'a mut Vec<Vec<f32>>,
-    nz: &mut Vec<Vec<usize>>,      // <- NOT &'a
+    nz: &mut Vec<Vec<usize>>,
     bw: usize,
-) -> (usize, &'a mut [f32]) {      // <- return (row_idx, row_slice)
+) -> (usize, &'a mut [f32]) {
     let idx = idx_of[v];
     if idx != u32::MAX {
         let i = idx as usize;
@@ -595,7 +772,6 @@ fn build_stripe_dense(
     s0: usize,
     s1: usize,
     total: usize,
-    raw_counts: bool,
 ) -> Stripe {
     let bw = s1 - s0;
     let mut idx_of = vec![u32::MAX; total];
@@ -608,21 +784,15 @@ fn build_stripe_dense(
         let v_leaf = leaf_ids[lp];
 
         for s in s0..s1 {
+            let denom = col_sums[s];
+            if denom <= 0.0 {
+                continue;
+            }
             let val = counts[r][s];
             if val <= 0.0 {
                 continue;
             }
-
-            // choose between raw counts and normalized
-            let inc: f32 = if raw_counts {
-                val as f32
-            } else {
-                let denom = col_sums[s];
-                if denom <= 0.0 {
-                    continue;
-                }
-                (val / denom) as f32
-            };
+            let inc = (val / denom) as f32;
 
             // leaf to root accumulation
             let mut v = v_leaf;
@@ -642,7 +812,12 @@ fn build_stripe_dense(
             }
         }
     }
-    Stripe { nodes, rows, index: idx_of, nz }
+    Stripe {
+        nodes,
+        rows,
+        index: idx_of,
+        nz,
+    }
 }
 
 fn build_stripe_csr(
@@ -656,7 +831,6 @@ fn build_stripe_csr(
     s0: usize,
     s1: usize,
     total: usize,
-    raw_counts: bool,
 ) -> Stripe {
     let bw = s1 - s0;
     let mut idx_of = vec![u32::MAX; total];
@@ -675,22 +849,15 @@ fn build_stripe_csr(
             if s < s0 || s >= s1 {
                 continue;
             }
-
+            let denom = col_sums[s];
+            if denom <= 0.0 {
+                continue;
+            }
             let val = data[k];
             if val <= 0.0 {
                 continue;
             }
-
-            // choose between raw counts and normalized
-            let inc: f32 = if raw_counts {
-                val as f32
-            } else {
-                let denom = col_sums[s];
-                if denom <= 0.0 {
-                    continue;
-                }
-                (val / denom) as f32
-            };
+            let inc = (val / denom) as f32;
 
             let mut v = v_leaf;
             loop {
@@ -709,7 +876,12 @@ fn build_stripe_csr(
             }
         }
     }
-    Stripe { nodes, rows, index: idx_of, nz }
+    Stripe {
+        nodes,
+        rows,
+        index: idx_of,
+        nz,
+    }
 }
 
 #[cfg(feature = "stdsimd")]
@@ -723,7 +895,6 @@ where
     while j + LANES <= buf.len() {
         let mut v = Simd::<f64, LANES>::from_slice(&buf[j..j + LANES]);
         v += addv;
-        // stable portable_simd: store via to_array + copy_from_slice
         buf[j..j + LANES].copy_from_slice(&v.to_array());
         j += LANES;
     }
@@ -741,6 +912,14 @@ fn add_const_to_row_simd<const LANES: usize>(buf: &mut [f64], add: f64, start: u
     }
 }
 
+/// (5) Per-thread reusable buffers for weighted block sweep.
+#[derive(Default)]
+struct WThreadBuf {
+    num: Vec<f64>,
+    den: Vec<f64>,
+}
+
+// Weighted (α=1) sparse SIMD kernel
 fn unifrac_striped_par_weighted(
     _post: &[usize],
     kids: &[Vec<usize>],
@@ -750,7 +929,198 @@ fn unifrac_striped_par_weighted(
     mode: WeightedMode,
     nsamp: usize,
     col_sums: &[f64],
-    raw_counts: bool,
+) -> Vec<f64> {
+    let t_all = Instant::now();
+
+    // parent[]
+    let total = lens.len();
+    let parent: Vec<usize> = {
+        let mut p = vec![usize::MAX; total];
+        for v in 0..total {
+            for &c in &kids[v] {
+                p[c] = v;
+            }
+        }
+        p
+    };
+
+    // block geometry
+    let n_threads = rayon::current_num_threads().max(1);
+    let est_blk = ((nsamp as f64 / (2.0 * n_threads as f64)).sqrt()) as usize;
+    let blk = est_blk.clamp(64, 512).next_power_of_two();
+    let nblk = (nsamp + blk - 1) / blk;
+    log::info!(
+        "block geometry (weighted): blk={}, nblk={}, threads={}",
+        blk,
+        nblk,
+        n_threads
+    );
+
+    // (6) Precompute ALL stripes once
+    let stripes: Vec<Stripe> = (0..nblk)
+        .into_par_iter()
+        .map(|bi| {
+            let s0 = bi * blk;
+            let s1 = (s0 + blk).min(nsamp);
+            match mode {
+                WeightedMode::Dense { counts } => build_stripe_dense(
+                    counts, row2leaf, leaf_ids, &parent, col_sums, s0, s1, total,
+                ),
+                WeightedMode::Csr {
+                    indptr,
+                    indices,
+                    data,
+                } => build_stripe_csr(
+                    indptr, indices, data, row2leaf, leaf_ids, &parent, col_sums, s0, s1, total,
+                ),
+            }
+        })
+        .collect();
+
+    let dist = Arc::new(vec![0.0f64; nsamp * nsamp]);
+    let base_addr: usize = dist.as_ptr() as usize;
+
+    for bi in 0..nblk {
+        let i0 = bi * blk;
+        let i1 = (i0 + blk).min(nsamp);
+        let bw = i1 - i0;
+
+        let stripe_i = &stripes[bi];
+
+        (bi..nblk).into_par_iter().for_each_init(WThreadBuf::default, |buf, bj| {
+            let j0 = bj * blk;
+            let j1 = (j0 + blk).min(nsamp);
+            let bh = j1 - j0;
+            let diagonal_block = bj == bi;
+
+            let stripe_j = &stripes[bj];
+
+            // (5) reuse num/den buffers
+            ensure_len_zeroed(&mut buf.num, bw * bh);
+            ensure_len_zeroed(&mut buf.den, bw * bh);
+            let num = &mut buf.num[..bw * bh];
+            let den = &mut buf.den[..bw * bh];
+
+            // (A) row baseline: add len*ai across the row (and to den)
+            for &v in &stripe_i.nodes {
+                let len = lens[v] as f64;
+                if len <= 0.0 {
+                    continue;
+                }
+                let ridx_i = stripe_i.index[v] as usize;
+                let ai = &stripe_i.rows[ridx_i];
+                let nz_i = &stripe_i.nz[ridx_i];
+
+                for &ii in nz_i {
+                    let a = len * (ai[ii] as f64);
+                    if a == 0.0 {
+                        continue;
+                    }
+                    let start_j = if diagonal_block { ii + 1 } else { 0 };
+                    let row_n = &mut num[ii * bh..(ii + 1) * bh];
+                    let row_d = &mut den[ii * bh..(ii + 1) * bh];
+                    add_const_to_row_simd::<8>(row_n, a, start_j);
+                    add_const_to_row_simd::<8>(row_d, a, start_j);
+                }
+            }
+
+            // (B) column baseline: add len*aj down the column (and to den)
+            for &v in &stripe_j.nodes {
+                let len = lens[v] as f64;
+                if len <= 0.0 {
+                    continue;
+                }
+                let ridx_j = stripe_j.index[v] as usize;
+                let aj = &stripe_j.rows[ridx_j];
+                let nz_j = &stripe_j.nz[ridx_j];
+
+                for &jj in nz_j {
+                    let add = len * (aj[jj] as f64);
+                    if add == 0.0 {
+                        continue;
+                    }
+                    // respect upper triangle on diagonal blocks
+                    let ii_end = if diagonal_block {
+                        ((j0 + jj).saturating_sub(i0)).min(bw)
+                    } else {
+                        bw
+                    };
+                    let mut ii = 0usize;
+                    while ii < ii_end {
+                        let idx = ii * bh + jj;
+                        num[idx] += add;
+                        den[idx] += add;
+                        ii += 1;
+                    }
+                }
+            }
+
+            // (C) intersection correction: num -= 2*len*min(ai,aj); den unchanged
+            for &v in &stripe_i.nodes {
+                let j_idx = stripe_j.index[v];
+                if j_idx == u32::MAX {
+                    continue;
+                }
+                let len2 = 2.0 * (lens[v] as f64);
+                if len2 == 0.0 {
+                    continue;
+                }
+                let ri = stripe_i.index[v] as usize;
+                let rj = j_idx as usize;
+                let ai = &stripe_i.rows[ri];
+                let aj = &stripe_j.rows[rj];
+                let nz_i = &stripe_i.nz[ri];
+                let nz_j = &stripe_j.nz[rj];
+
+                for &ii in nz_i {
+                    let gi = i0 + ii;
+                    for &jj in nz_j {
+                        let gj = j0 + jj;
+                        if diagonal_block && gj <= gi {
+                            continue;
+                        }
+                        let m = (ai[ii] as f64).min(aj[jj] as f64);
+                        num[ii * bh + jj] -= len2 * m;
+                    }
+                }
+            }
+
+            // write-back
+            unsafe {
+                let base = base_addr as *mut f64;
+                for ii in 0..bw {
+                    let i = i0 + ii;
+                    for jj in 0..bh {
+                        let j = j0 + jj;
+                        if j <= i {
+                            continue;
+                        }
+                        let idx = ii * bh + jj;
+                        let d = if den[idx] > 0.0 { num[idx] / den[idx] } else { 0.0 };
+                        *base.add(i * nsamp + j) = d;
+                        *base.add(j * nsamp + i) = d;
+                    }
+                }
+            }
+        });
+    }
+
+    log::info!(
+        "weighted (sparse+SIMD) pass done in {} ms",
+        t_all.elapsed().as_millis()
+    );
+    Arc::try_unwrap(dist).unwrap()
+}
+
+fn unifrac_striped_par_variance_adjusted(
+    _post: &[usize],
+    kids: &[Vec<usize>],
+    lens: &[f32],
+    leaf_ids: &[usize],
+    row2leaf: &[Option<usize>],
+    mode: WeightedMode,
+    nsamp: usize,
+    col_sums: &[f64], // true per-sample totals (raw counts)
 ) -> Vec<f64> {
     // parent[]
     let total = lens.len();
@@ -778,184 +1148,14 @@ fn unifrac_striped_par_weighted(
         let i1 = (i0 + blk).min(nsamp);
         let bw = i1 - i0;
 
-        let stripe_i = match &mode {
-            WeightedMode::Dense { counts } => build_stripe_dense(
-                counts, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total, raw_counts // NEW
-            ),
-            WeightedMode::Csr { indptr, indices, data } => build_stripe_csr(
-                indptr, indices, data, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total, raw_counts // NEW
-            ),
-        };
-
-        let mode_c = mode;
-        let parent_ref = &parent;
-        let row2leaf_ref = row2leaf;
-        let leaf_ids_ref = leaf_ids;
-        let col_sums_ref = col_sums;
-        let stripe_i_ref = &stripe_i;
-
-        (bi..nblk).into_par_iter().for_each(move |bj| {
-            let (j0, j1) = (bj * blk, ((bj + 1) * blk).min(nsamp));
-            let bh = j1 - j0;
-            let diagonal_block = bj == bi;
-
-            let stripe_j = if diagonal_block {
-                Stripe {
-                    nodes: stripe_i_ref.nodes.clone(),
-                    rows: stripe_i_ref.rows.clone(),
-                    index: stripe_i_ref.index.clone(),
-                    nz: stripe_i_ref.nz.clone(),
-                }
-            } else {
-                match mode_c {
-                    WeightedMode::Dense { counts } => build_stripe_dense(
-                        counts, row2leaf_ref, leaf_ids_ref, parent_ref, col_sums_ref, j0, j1, total, raw_counts
-                    ),
-                    WeightedMode::Csr { indptr, indices, data } => build_stripe_csr(
-                        indptr, indices, data, row2leaf_ref, leaf_ids_ref, parent_ref, col_sums_ref, j0, j1, total, raw_counts
-                    ),
-                }
-            };
-
-            // num = Σ_i ℓ_i |a_i - b_i|,  den = Σ_i ℓ_i (a_i + b_i)
-            let mut num = vec![0.0f64; bw * bh];
-            let mut den = vec![0.0f64; bw * bh];
-
-            // (A) row baseline: add len*ai across row (to both num & den)
-            for &v in &stripe_i_ref.nodes {
-                let len = lens[v] as f64;
-                if len <= 0.0 { continue; }
-                let ri = stripe_i_ref.index[v] as usize;
-                let ai = &stripe_i_ref.rows[ri];
-                let nz_i = &stripe_i_ref.nz[ri];
-
-                for &ii in nz_i {
-                    let a = len * (ai[ii] as f64);
-                    if a == 0.0 { continue; }
-                    let start_j = if diagonal_block { ii + 1 } else { 0 };
-                    let row_n = &mut num[ii * bh..(ii + 1) * bh];
-                    let row_d = &mut den[ii * bh..(ii + 1) * bh];
-                    add_const_to_row_simd::<8>(row_n, a, start_j);
-                    add_const_to_row_simd::<8>(row_d, a, start_j);
-                }
-            }
-
-            // (B) column baseline: add len*aj down column (to both num & den)
-            for &v in &stripe_j.nodes {
-                let len = lens[v] as f64;
-                if len <= 0.0 { continue; }
-                let rj = stripe_j.index[v] as usize;
-                let aj = &stripe_j.rows[rj];
-                let nz_j = &stripe_j.nz[rj];
-
-                for &jj in nz_j {
-                    let add = len * (aj[jj] as f64);
-                    if add == 0.0 { continue; }
-                    let ii_end = if diagonal_block { ((j0 + jj).saturating_sub(i0)).min(bw) } else { bw };
-                    let mut ii = 0usize;
-                    while ii < ii_end {
-                        let idx = ii * bh + jj;
-                        num[idx] += add;
-                        den[idx] += add;
-                        ii += 1;
-                    }
-                }
-            }
-
-            // (C) intersection correction: num -= 2*len*min(ai,aj); den unchanged
-            for &v in &stripe_i_ref.nodes {
-                let j_idx = stripe_j.index[v];
-                if j_idx == u32::MAX { continue; }
-                let len2 = 2.0 * (lens[v] as f64);
-                if len2 == 0.0 { continue; }
-                let ri = stripe_i_ref.index[v] as usize;
-                let rj = j_idx as usize;
-                let ai = &stripe_i_ref.rows[ri];
-                let aj = &stripe_j.rows[rj];
-                let nz_i = &stripe_i_ref.nz[ri];
-                let nz_j = &stripe_j.nz[rj];
-
-                for &ii in nz_i {
-                    let gi = i0 + ii;
-                    for &jj in nz_j {
-                        let gj = j0 + jj;
-                        if diagonal_block && gj <= gi { continue; }
-                        let m = (ai[ii] as f64).min(aj[jj] as f64);
-                        num[ii * bh + jj] -= len2 * m;
-                    }
-                }
-            }
-
-            // write back normalized value
-            unsafe {
-                let base = base_addr as *mut f64;
-                for ii in 0..bw {
-                    let i = i0 + ii;
-                    for jj in 0..bh {
-                        let j = j0 + jj;
-                        if j <= i { continue; }
-                        let idx = ii * bh + jj;
-                        let d = if den[idx] > 0.0 { num[idx] / den[idx] } else { 0.0 };
-                        *base.add(i * nsamp + j) = d;
-                        *base.add(j * nsamp + i) = d;
-                    }
-                }
-            }
-        });
-    }
-
-    Arc::try_unwrap(dist).unwrap()
-}
-
-fn unifrac_striped_par_generalized(
-    _post: &[usize],
-    kids: &[Vec<usize>],
-    lens: &[f32],
-    leaf_ids: &[usize],
-    row2leaf: &[Option<usize>],
-    mode: WeightedMode,
-    nsamp: usize,
-    col_sums: &[f64],
-    alpha: f64,
-) -> Vec<f64> {
-    let total = lens.len();
-    let parent: Vec<usize> = {
-        let mut p = vec![usize::MAX; total];
-        for v in 0..total {
-            for &c in &kids[v] {
-                p[c] = v;
-            }
-        }
-        p
-    };
-
-    let n_threads = rayon::current_num_threads().max(1);
-    let est_blk = ((nsamp as f64 / (2.0 * n_threads as f64)).sqrt()) as usize;
-    let blk = est_blk.clamp(64, 512).next_power_of_two();
-    let nblk = (nsamp + blk - 1) / blk;
-
-    let dist = Arc::new(vec![0.0f64; nsamp * nsamp]);
-    let base_addr: usize = dist.as_ptr() as usize;
-
-    // α == 0 → denominator is sum of positive branch lengths (constant)
-    let lsum_alpha0: f64 = if alpha.abs() <= 1e-12 {
-        lens.iter().filter(|&&l| l > 0.0).map(|&l| l as f64).sum()
-    } else {
-        0.0
-    };
-
-    for bi in 0..nblk {
-        let i0 = bi * blk;
-        let i1 = (i0 + blk).min(nsamp);
-        let bw = i1 - i0;
-
+        // Stripe i: build *relative abundances* per branch (uses col_sums normalization)
         let stripe_i = match &mode {
             WeightedMode::Dense { counts } => {
-                build_stripe_dense(counts, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total, false)
+                build_stripe_dense(counts, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total)
             }
-            WeightedMode::Csr { indptr, indices, data } => build_stripe_csr(
-                indptr, indices, data, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total, false
-            ),
+            WeightedMode::Csr { indptr, indices, data } => {
+                build_stripe_csr(indptr, indices, data, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total)
+            }
         };
 
         let mode_c = mode;
@@ -970,237 +1170,7 @@ fn unifrac_striped_par_generalized(
             let bh = j1 - j0;
             let diagonal_block = bj == bi;
 
-            let stripe_j = if diagonal_block {
-                Stripe {
-                    nodes: stripe_i_ref.nodes.clone(),
-                    rows: stripe_i_ref.rows.clone(),
-                    index: stripe_i_ref.index.clone(),
-                    nz: stripe_i_ref.nz.clone(),
-                }
-            } else {
-                match mode_c {
-                    WeightedMode::Dense { counts } => build_stripe_dense(
-                        counts, row2leaf_ref, leaf_ids_ref, parent_ref, col_sums_ref, j0, j1, total, false
-                    ),
-                    WeightedMode::Csr { indptr, indices, data } => build_stripe_csr(
-                        indptr, indices, data, row2leaf_ref, leaf_ids_ref, parent_ref, col_sums_ref, j0, j1, total, false
-                    ),
-                }
-            };
-
-            let mut num = vec![0.0f64; bw * bh];
-            let mut den = vec![0.0f64; bw * bh];
-
-            #[inline(always)]
-            fn pow_alpha(x: f64, a: f64) -> f64 {
-                if x <= 0.0 { 0.0 }
-                else if (a - 1.0).abs() <= 1e-12 { x }
-                else if a.abs() <= 1e-12 { 1.0 }
-                else if (a - 0.5).abs() <= 1e-12 { x.sqrt() }
-                else { x.powf(a) }
-            }
-            #[inline(always)]
-            fn pow_alpha_minus1(x: f64, a: f64) -> f64 {
-                if x <= 0.0 { 0.0 }
-                else if (a - 1.0).abs() <= 1e-12 { 1.0 }
-                else if a.abs() <= 1e-12 { 1.0 / x }
-                else if (a - 0.5).abs() <= 1e-12 { 1.0 / x.sqrt() }
-                else { x.powf(a - 1.0) }
-            }
-
-            // (A) add len * ai^α across row (to both num & den for α≠0)
-            for &v in &stripe_i_ref.nodes {
-                let len = lens[v] as f64;
-                if len <= 0.0 { continue; }
-                let ri = stripe_i_ref.index[v] as usize;
-                let ai = &stripe_i_ref.rows[ri];
-                let nz_i = &stripe_i_ref.nz[ri];
-
-                for &ii in nz_i {
-                    let a = ai[ii] as f64;
-                    if a <= 0.0 { continue; }
-                    let base = len * pow_alpha(a, alpha);
-                    let start_j = if diagonal_block { ii + 1 } else { 0 };
-                    add_const_to_row_simd::<8>(&mut num[ii * bh..(ii + 1) * bh], base, start_j);
-                    if alpha.abs() > 1e-12 {
-                        add_const_to_row_simd::<8>(&mut den[ii * bh..(ii + 1) * bh], base, start_j);
-                    }
-                }
-            }
-
-            // (B) add len * aj^α down column (to both num & den for α≠0)
-            for &v in &stripe_j.nodes {
-                let len = lens[v] as f64;
-                if len <= 0.0 { continue; }
-                let rj = stripe_j.index[v] as usize;
-                let aj = &stripe_j.rows[rj];
-                let nz_j = &stripe_j.nz[rj];
-
-                for &jj in nz_j {
-                    let a = aj[jj] as f64;
-                    if a <= 0.0 { continue; }
-                    let add = len * pow_alpha(a, alpha);
-                    let ii_end = if diagonal_block { ((j0 + jj).saturating_sub(i0)).min(bw) } else { bw };
-                    let mut ii = 0usize;
-                    while ii < ii_end {
-                        let idx = ii * bh + jj;
-                        num[idx] += add;
-                        if alpha.abs() > 1e-12 {
-                            den[idx] += add;
-                        }
-                        ii += 1;
-                    }
-                }
-            }
-
-            // (C) intersection correction
-            // num += len * [ s^(α-1)|ai-aj| - (ai^α + aj^α) ]
-            // den += len * [ s^α          - (ai^α + aj^α) ]   (only if α≠0)
-            for &v in &stripe_i_ref.nodes {
-                let j_idx = stripe_j.index[v];
-                if j_idx == u32::MAX { continue; }
-                let len = lens[v] as f64;
-                if len <= 0.0 { continue; }
-                let ri = stripe_i_ref.index[v] as usize;
-                let rj = j_idx as usize;
-                let ai = &stripe_i_ref.rows[ri];
-                let aj = &stripe_j.rows[rj];
-                let nz_i = &stripe_i_ref.nz[ri];
-                let nz_j = &stripe_j.nz[rj];
-
-                for &ii in nz_i {
-                    let gi = i0 + ii;
-                    let a = ai[ii] as f64;
-                    for &jj in nz_j {
-                        let gj = j0 + jj;
-                        if diagonal_block && gj <= gi { continue; }
-                        let b = aj[jj] as f64;
-                        let s = a + b;
-                        if s <= 0.0 { continue; }
-
-                        let s_alpha  = pow_alpha(s, alpha);
-                        let s_am1    = pow_alpha_minus1(s, alpha);
-                        let a_alpha  = pow_alpha(a, alpha);
-                        let b_alpha  = pow_alpha(b, alpha);
-                        let idx = ii * bh + jj;
-
-                        num[idx] += len * (s_am1 * (a - b).abs() - (a_alpha + b_alpha));
-                        if alpha.abs() > 1e-12 {
-                            den[idx] += len * (s_alpha - (a_alpha + b_alpha));
-                        }
-                    }
-                }
-            }
-
-            // write back (normalized if α≠0; α==0 uses constant denom)
-            unsafe {
-                let base = base_addr as *mut f64;
-                for ii in 0..bw {
-                    let i = i0 + ii;
-                    for jj in 0..bh {
-                        let j = j0 + jj;
-                        if j <= i { continue; }
-                        let idx = ii * bh + jj;
-                        let d = if alpha.abs() <= 1e-12 {
-                            if lsum_alpha0 > 0.0 { num[idx] / lsum_alpha0 } else { 0.0 }
-                        } else if den[idx] > 0.0 {
-                            num[idx] / den[idx]
-                        } else {
-                            0.0
-                        };
-                        *base.add(i * nsamp + j) = d;
-                        *base.add(j * nsamp + i) = d;
-                    }
-                }
-            }
-        });
-    }
-
-    Arc::try_unwrap(dist).unwrap()
-}
-
-fn unifrac_striped_par_variance_adjusted(
-    _post: &[usize],
-    kids: &[Vec<usize>],
-    lens: &[f32],
-    leaf_ids: &[usize],
-    row2leaf: &[Option<usize>],
-    mode: WeightedMode,
-    nsamp: usize,
-    col_sums: &[f64], // true per-sample totals
-) -> Vec<f64> {
-    // Build parent[] (same as in weighted/generalized)
-    let total = lens.len();
-    let parent: Vec<usize> = {
-        let mut p = vec![usize::MAX; total];
-        for v in 0..total {
-            for &c in &kids[v] {
-                p[c] = v;
-            }
-        }
-        p
-    };
-
-    // Block geometry (same heuristic as other kernels)
-    let n_threads = rayon::current_num_threads().max(1);
-    let est_blk = ((nsamp as f64 / (2.0 * n_threads as f64)).sqrt()) as usize;
-    let blk = est_blk.clamp(64, 512).next_power_of_two();
-    let nblk = (nsamp + blk - 1) / blk;
-
-    let dist = Arc::new(vec![0.0f64; nsamp * nsamp]);
-    let base_addr = dist.as_ptr() as usize;
-
-    for bi in 0..nblk {
-        let i0 = bi * blk;
-        let i1 = (i0 + blk).min(nsamp);
-        let bw = i1 - i0;
-
-        // Stripe for block i (proportions, not raw counts)
-        let stripe_i = match &mode {
-            WeightedMode::Dense { counts } => build_stripe_dense(
-                counts,
-                row2leaf,
-                leaf_ids,
-                &parent,
-                col_sums,
-                i0,
-                i1,
-                total,
-                /*raw_counts=*/ false,
-            ),
-            WeightedMode::Csr {
-                indptr,
-                indices,
-                data,
-            } => build_stripe_csr(
-                indptr,
-                indices,
-                data,
-                row2leaf,
-                leaf_ids,
-                &parent,
-                col_sums,
-                i0,
-                i1,
-                total,
-                /*raw_counts=*/ false,
-            ),
-        };
-
-        let mode_c = mode;
-        let parent_ref = &parent;
-        let row2leaf_ref = row2leaf;
-        let leaf_ids_ref = leaf_ids;
-        let col_sums_ref = col_sums;
-        let stripe_i_ref = &stripe_i;
-
-        (bi..nblk).into_par_iter().for_each(move |bj| {
-            let (j0, j1) = (bj * blk, ((bj + 1) * blk).min(nsamp));
-            let bh = j1 - j0;
-            let diagonal_block = bj == bi;
-
-            // Stripe for block j (clone or build)
-            let stripe_j = if diagonal_block {
+            let stripe_j = if bj == bi {
                 Stripe {
                     nodes: stripe_i_ref.nodes.clone(),
                     rows: stripe_i_ref.rows.clone(),
@@ -1218,13 +1188,8 @@ fn unifrac_striped_par_variance_adjusted(
                         j0,
                         j1,
                         total,
-                        /*raw_counts=*/ false,
                     ),
-                    WeightedMode::Csr {
-                        indptr,
-                        indices,
-                        data,
-                    } => build_stripe_csr(
+                    WeightedMode::Csr { indptr, indices, data } => build_stripe_csr(
                         indptr,
                         indices,
                         data,
@@ -1235,16 +1200,14 @@ fn unifrac_striped_par_variance_adjusted(
                         j0,
                         j1,
                         total,
-                        /*raw_counts=*/ false,
                     ),
                 }
             };
 
-            // num / den for this block
             let mut num = vec![0.0f64; bw * bh];
             let mut den = vec![0.0f64; bw * bh];
 
-            // Helper: apply VAW contributions for a *single* branch v
+            // Apply one branch v to the whole block
             let mut apply_branch = |v: usize| {
                 let len = lens[v] as f64;
                 if len <= 0.0 {
@@ -1254,12 +1217,11 @@ fn unifrac_striped_par_variance_adjusted(
                 let idx_i = stripe_i_ref.index[v];
                 let idx_j = stripe_j.index[v];
 
-                // No sample in either block has this branch → skip
+                // nobody in either block has this branch
                 if idx_i == u32::MAX && idx_j == u32::MAX {
                     return;
                 }
 
-                // Pointer to per-sample proportions for branch v in each block
                 let ai_opt = if idx_i != u32::MAX {
                     Some(&stripe_i_ref.rows[idx_i as usize])
                 } else {
@@ -1283,7 +1245,6 @@ fn unifrac_striped_par_variance_adjusted(
                         }
                         let p_j = aj_opt.map(|aj| aj[jj] as f64).unwrap_or(0.0);
 
-                        // both zero → no contribution
                         if p_i == 0.0 && p_j == 0.0 {
                             continue;
                         }
@@ -1299,10 +1260,9 @@ fn unifrac_striped_par_variance_adjusted(
                             continue;
                         }
 
-                        // branch-specific counts for pair (i,j)
+                        // clade counts for the pair
                         let m = p_i * tot_i + p_j * tot_j;
                         if m <= 0.0 || m >= m_total {
-                            // zero variance in this clade
                             continue;
                         }
 
@@ -1316,18 +1276,17 @@ fn unifrac_striped_par_variance_adjusted(
                 }
             };
 
-            // Process all branches that appear in stripe_i
+            // branches present in i
             for &v in &stripe_i_ref.nodes {
                 apply_branch(v);
             }
-            // Plus branches that only appear in stripe_j
+            // plus branches only present in j
             for &v in &stripe_j.nodes {
                 if stripe_i_ref.index[v] == u32::MAX {
                     apply_branch(v);
                 }
             }
 
-            // write back normalized distances
             unsafe {
                 let base = base_addr as *mut f64;
                 for ii in 0..bw {
@@ -1338,7 +1297,289 @@ fn unifrac_striped_par_variance_adjusted(
                             continue;
                         }
                         let idx = ii * bh + jj;
-                        let d = if den[idx] > 0.0 {
+                        let d = if den[idx] > 0.0 { num[idx] / den[idx] } else { 0.0 };
+                        *base.add(i * nsamp + j) = d;
+                        *base.add(j * nsamp + i) = d;
+                    }
+                }
+            }
+        });
+    }
+
+    Arc::try_unwrap(dist).unwrap()
+}
+
+// Generalized (any α) sparse kernel
+// (left unchanged; you said ignore generalized)
+
+fn unifrac_striped_par_generalized(
+    _post: &[usize],
+    kids: &[Vec<usize>],
+    lens: &[f32],
+    leaf_ids: &[usize],
+    row2leaf: &[Option<usize>],
+    mode: WeightedMode,
+    nsamp: usize,
+    col_sums: &[f64],
+    alpha: f64,
+) -> Vec<f64> {
+    let t_all = Instant::now();
+
+    // parent[]
+    let total = lens.len();
+    let parent: Vec<usize> = {
+        let mut p = vec![usize::MAX; total];
+        for v in 0..total {
+            for &c in &kids[v] {
+                p[c] = v;
+            }
+        }
+        p
+    };
+
+    // block geometry
+    let n_threads = rayon::current_num_threads().max(1);
+    let est_blk = ((nsamp as f64 / (2.0 * n_threads as f64)).sqrt()) as usize;
+    let blk = est_blk.clamp(64, 512).next_power_of_two();
+    let nblk = (nsamp + blk - 1) / blk;
+
+    let dist = std::sync::Arc::new(vec![0.0f64; nsamp * nsamp]);
+    let base_addr: usize = dist.as_ptr() as usize;
+
+    // α==0: denominator is constant (sum of positive branch lengths)
+    let lsum_alpha0: f64 = if alpha.abs() <= 1e-12 {
+        lens.iter().filter(|&&l| l > 0.0).map(|&l| l as f64).sum()
+    } else {
+        0.0
+    };
+
+    for bi in 0..nblk {
+        let i0 = bi * blk;
+        let i1 = (i0 + blk).min(nsamp);
+        let bw = i1 - i0;
+
+        let stripe_i = match &mode {
+            WeightedMode::Dense { counts } => {
+                build_stripe_dense(counts, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total)
+            }
+            WeightedMode::Csr {
+                indptr,
+                indices,
+                data,
+            } => build_stripe_csr(
+                indptr, indices, data, row2leaf, leaf_ids, &parent, col_sums, i0, i1, total,
+            ),
+        };
+
+        let mode_c = mode;
+        let parent_ref = &parent;
+        let row2leaf_ref = row2leaf;
+        let leaf_ids_ref = leaf_ids;
+        let col_sums_ref = col_sums;
+        let stripe_i_ref = &stripe_i;
+
+        (bi..nblk).into_par_iter().for_each(move |bj| {
+            let (j0, j1) = (bj * blk, ((bj + 1) * blk).min(nsamp));
+            let bh = j1 - j0;
+            let diagonal_block = bj == bi;
+
+            let stripe_j = if bj == bi {
+                Stripe {
+                    nodes: stripe_i_ref.nodes.clone(),
+                    rows: stripe_i_ref.rows.clone(),
+                    index: stripe_i_ref.index.clone(),
+                    nz: stripe_i_ref.nz.clone(),
+                }
+            } else {
+                match mode_c {
+                    WeightedMode::Dense { counts } => build_stripe_dense(
+                        counts,
+                        row2leaf_ref,
+                        leaf_ids_ref,
+                        parent_ref,
+                        col_sums_ref,
+                        j0,
+                        j1,
+                        total,
+                    ),
+                    WeightedMode::Csr {
+                        indptr,
+                        indices,
+                        data,
+                    } => build_stripe_csr(
+                        indptr,
+                        indices,
+                        data,
+                        row2leaf_ref,
+                        leaf_ids_ref,
+                        parent_ref,
+                        col_sums_ref,
+                        j0,
+                        j1,
+                        total,
+                    ),
+                }
+            };
+
+            let mut num = vec![0.0f64; bw * bh];
+            let mut den = vec![0.0f64; bw * bh];
+
+            // Helper closures for pows
+            #[inline(always)]
+            fn pow_alpha(x: f64, a: f64) -> f64 {
+                if x <= 0.0 {
+                    0.0
+                } else if (a - 1.0).abs() <= 1e-12 {
+                    x
+                } else if a.abs() <= 1e-12 {
+                    1.0
+                } else if (a - 0.5).abs() <= 1e-12 {
+                    x.sqrt()
+                } else {
+                    x.powf(a)
+                }
+            }
+            #[inline(always)]
+            fn pow_alpha_minus1(x: f64, a: f64) -> f64 {
+                if x <= 0.0 {
+                    0.0
+                } else if (a - 1.0).abs() <= 1e-12 {
+                    1.0
+                } else if a.abs() <= 1e-12 {
+                    1.0 / x
+                } else if (a - 0.5).abs() <= 1e-12 {
+                    1.0 / x.sqrt()
+                } else {
+                    x.powf(a - 1.0)
+                }
+            }
+
+            // (A) row baseline: add len * ai^α to both num & den across the row
+            for &v in &stripe_i_ref.nodes {
+                let len = lens[v] as f64;
+                if len <= 0.0 {
+                    continue;
+                }
+                let ridx_i = stripe_i_ref.index[v] as usize;
+                let ai = &stripe_i_ref.rows[ridx_i];
+                let nz_i = &stripe_i_ref.nz[ridx_i];
+
+                for &ii in nz_i {
+                    let a = ai[ii] as f64;
+                    if a <= 0.0 {
+                        continue;
+                    }
+                    let base = len * pow_alpha(a, alpha); // = len* a^α
+                    let start_j = if diagonal_block { ii + 1 } else { 0 };
+                    let row_n = &mut num[ii * bh..(ii + 1) * bh];
+                    let row_d = &mut den[ii * bh..(ii + 1) * bh];
+                    add_const_to_row_simd::<8>(row_n, base, start_j);
+                    if alpha.abs() > 1e-12 {
+                        add_const_to_row_simd::<8>(row_d, base, start_j);
+                    }
+                }
+            }
+
+            // (B) column baseline: add len * aj^α down the column to both num & den
+            for &v in &stripe_j.nodes {
+                let len = lens[v] as f64;
+                if len <= 0.0 {
+                    continue;
+                }
+                let ridx_j = stripe_j.index[v] as usize;
+                let aj = &stripe_j.rows[ridx_j];
+                let nz_j = &stripe_j.nz[ridx_j];
+
+                for &jj in nz_j {
+                    let a = aj[jj] as f64;
+                    if a <= 0.0 {
+                        continue;
+                    }
+                    let add = len * pow_alpha(a, alpha); // = len * a^α
+                    let ii_end = if diagonal_block {
+                        ((j0 + jj).saturating_sub(i0)).min(bw)
+                    } else {
+                        bw
+                    };
+                    let mut ii = 0usize;
+                    while ii < ii_end {
+                        let idx = ii * bh + jj;
+                        num[idx] += add;
+                        if alpha.abs() > 1e-12 {
+                            den[idx] += add;
+                        }
+                        ii += 1;
+                    }
+                }
+            }
+
+            // (C) intersection correction:
+            //    add len * [ s^(α-1)|ai-aj| - (ai^α + aj^α) ] to num
+            //    add len * [ s^α          - (ai^α + aj^α) ] to den
+            for &v in &stripe_i_ref.nodes {
+                let j_idx = stripe_j.index[v];
+                if j_idx == u32::MAX {
+                    continue;
+                }
+                let len = lens[v] as f64;
+                if len <= 0.0 {
+                    continue;
+                }
+                let ri = stripe_i_ref.index[v] as usize;
+                let rj = j_idx as usize;
+                let ai = &stripe_i_ref.rows[ri];
+                let aj = &stripe_j.rows[rj];
+                let nz_i = &stripe_i_ref.nz[ri];
+                let nz_j = &stripe_j.nz[rj];
+
+                for &ii in nz_i {
+                    let gi = i0 + ii;
+                    let a = ai[ii] as f64;
+                    for &jj in nz_j {
+                        let gj = j0 + jj;
+                        if diagonal_block && gj <= gi {
+                            continue;
+                        }
+                        let b = aj[jj] as f64;
+                        let s = a + b;
+                        if s <= 0.0 {
+                            continue;
+                        }
+                        let s_alpha = pow_alpha(s, alpha);
+                        let s_am1 = pow_alpha_minus1(s, alpha);
+                        let a_alpha = pow_alpha(a, alpha);
+                        let b_alpha = pow_alpha(b, alpha);
+                        let idx = ii * bh + jj;
+
+                        let corr_num = len * (s_am1 * (a - b).abs() - (a_alpha + b_alpha));
+                        num[idx] += corr_num;
+
+                        if alpha.abs() > 1e-12 {
+                            let corr_den = len * (s_alpha - (a_alpha + b_alpha));
+                            den[idx] += corr_den;
+                        }
+                    }
+                }
+            }
+
+            // write-back
+            unsafe {
+                let base = base_addr as *mut f64;
+                for ii in 0..bw {
+                    let i = i0 + ii;
+                    for jj in 0..bh {
+                        let j = j0 + jj;
+                        if j <= i {
+                            continue;
+                        }
+                        let idx = ii * bh + jj;
+                        let d = if alpha.abs() <= 1e-12 {
+                            if lsum_alpha0 > 0.0 {
+                                num[idx] / lsum_alpha0
+                            } else {
+                                0.0
+                            }
+                        } else if den[idx] > 0.0 {
                             num[idx] / den[idx]
                         } else {
                             0.0
@@ -1351,10 +1592,16 @@ fn unifrac_striped_par_variance_adjusted(
         });
     }
 
+    log::info!(
+        "generalized (α={}) sparse pass done in {} ms",
+        alpha,
+        t_all.elapsed().as_millis()
+    );
     Arc::try_unwrap(dist).unwrap()
 }
 
 // BIOM readers
+
 fn read_biom_csr(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32>)> {
     let f = H5File::open(p).with_context(|| format!("open BIOM file {p}"))?;
 
@@ -1383,9 +1630,7 @@ fn read_biom_csr(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32
     Ok((taxa, samples, indptr, indices))
 }
 
-fn read_biom_csr_values(
-    p: &str,
-) -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32>, Vec<f64>)> {
+fn read_biom_csr_values(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<u32>, Vec<u32>, Vec<f64>)> {
     let f = H5File::open(p).with_context(|| format!("open BIOM file {p}"))?;
 
     fn read_utf8(f: &H5File, path: &str) -> Result<Vec<String>> {
@@ -1435,8 +1680,6 @@ fn main() -> Result<()> {
     let m = Command::new("unifrac-rs")
         .version("0.2.7")
         .about("Striped UniFrac via Optimal Balanced Parenthesis")
-        .after_help(UNIFRAC_CITATIONS)
-        .after_long_help(UNIFRAC_CITATIONS)
         .arg(
             Arg::new("tree")
                 .short('t')
@@ -1466,9 +1709,9 @@ fn main() -> Result<()> {
                 .action(ArgAction::SetTrue),
         )
         .arg(
-            Arg::new("raw_sample_counts")
-                .long("raw-sample-counts")
-                .help("Weighted UniFrac using raw sample counts. Applies only with --weighted. Ignored for --generalized and unweighted.")
+            Arg::new("variance_adjusted")
+                .long("vaw")
+                .help("Variance-adjusted Weighted UniFrac (VAW)")
                 .action(ArgAction::SetTrue),
         )
         .arg(
@@ -1498,12 +1741,6 @@ fn main() -> Result<()> {
                 .value_parser(clap::value_parser!(f64))
                 .default_value("0.5"),
         )
-        .arg(
-            Arg::new("variance_adjusted")
-                .long("vaw")
-                .help("Variance-adjusted Weighted UniFrac (VAW)")
-                .action(ArgAction::SetTrue),
-        )
         .group(
             ArgGroup::new("metric")
                 .args(["weighted", "generalized", "variance_adjusted"])
@@ -1517,17 +1754,7 @@ fn main() -> Result<()> {
     let generalized = *m.get_one::<bool>("generalized").unwrap_or(&false);
     let alpha = *m.get_one::<f64>("alpha").unwrap_or(&0.5);
     let weighted = *m.get_one::<bool>("weighted").unwrap_or(&false);
-    let raw_counts = *m.get_one::<bool>("raw_sample_counts").unwrap_or(&false);
-    let variance_adjusted = *m
-        .get_one::<bool>("variance_adjusted")
-        .unwrap_or(&false);
-    
-    if variance_adjusted && raw_counts {
-        log::warn!(
-            "--variance-adjusted with --raw-sample-counts is not well-defined; \
-             ignoring --raw-sample-counts and using relative abundances instead."
-        );
-    }    
+    let variance_adjusted = *m.get_one::<bool>("variance_adjusted").unwrap_or(&false);
 
     let threads = m
         .get_one::<usize>("threads")
@@ -1610,7 +1837,7 @@ fn main() -> Result<()> {
         }
     } else {
         let biom = m.get_one::<String>("biom").unwrap();
-        if weighted || generalized || variance_adjusted {
+        if weighted || generalized  || variance_adjusted{
             let (t, s, ip, idx, vals) = read_biom_csr_values(biom)?;
             taxa = t;
             samples = s;
@@ -1656,7 +1883,6 @@ fn main() -> Result<()> {
                     WeightedMode::Dense { counts: &counts },
                     nsamp,
                     &col_sums,
-                    raw_counts,
                 )
             } else {
                 unifrac_striped_par_generalized(
@@ -1697,7 +1923,6 @@ fn main() -> Result<()> {
                     },
                     nsamp,
                     &col_sums,
-                    raw_counts,
                 )
             } else {
                 unifrac_striped_par_generalized(
@@ -1717,13 +1942,53 @@ fn main() -> Result<()> {
                 )
             }
         }
+    } else if weighted {
+        let mut col_sums = vec![0.0f64; nsamp];
+        if pres_dense {
+            for r in 0..counts.len() {
+                for s in 0..nsamp {
+                    col_sums[s] += counts[r][s];
+                }
+            }
+            unifrac_striped_par_weighted(
+                &post,
+                &kids,
+                &lens,
+                &leaf_ids,
+                &row2leaf,
+                WeightedMode::Dense { counts: &counts },
+                nsamp,
+                &col_sums,
+            )
+        } else {
+            for r in 0..taxa.len() {
+                let start = indptr[r] as usize;
+                let stop = indptr[r + 1] as usize;
+                for k in start..stop {
+                    let s = indices[k] as usize;
+                    col_sums[s] += data[k];
+                }
+            }
+            unifrac_striped_par_weighted(
+                &post,
+                &kids,
+                &lens,
+                &leaf_ids,
+                &row2leaf,
+                WeightedMode::Csr {
+                    indptr: &indptr,
+                    indices: &indices,
+                    data: &data,
+                },
+                nsamp,
+                &col_sums,
+            )
+        }
     } else if variance_adjusted {
-        // VAW: always based on *counts* (TSV or BIOM), using relative abundances
-
+        // VAW: always uses relative abundances (needs true per-sample totals in col_sums)
         let mut col_sums = vec![0.0f64; nsamp];
 
         if pres_dense {
-            // TSV: counts[][] is rows x nsamp
             for r in 0..counts.len() {
                 for s in 0..nsamp {
                     col_sums[s] += counts[r][s];
@@ -1744,15 +2009,10 @@ fn main() -> Result<()> {
                 &col_sums,
             )
         } else {
-            // Sanity checks (optional)
-            debug_assert_eq!(indptr.len(), taxa.len() + 1, "indptr length mismatch");
-            debug_assert_eq!(indices.len(), data.len(), "indices/data length mismatch");
-
-            // BIOM: sum data over each column
             for r in 0..taxa.len() {
-                let a = indptr[r] as usize;
-                let b = indptr[r + 1] as usize;
-                for k in a..b {
+                let start = indptr[r] as usize;
+                let stop = indptr[r + 1] as usize;
+                for k in start..stop {
                     let s = indices[k] as usize;
                     col_sums[s] += data[k];
                 }
@@ -1775,60 +2035,7 @@ fn main() -> Result<()> {
                 nsamp,
                 &col_sums,
             )
-        }
-    } else if weighted {
-        let _col_sums = vec![0.0f64; nsamp];
-        if pres_dense {
-            let col_sums = if raw_counts {
-                vec![1.0f64; nsamp] // dummy; unused when raw_counts==true
-            } else {
-                let mut v = vec![0.0f64; nsamp];
-                for r in 0..counts.len() {
-                    for s in 0..nsamp { v[s] += counts[r][s]; }
-                }
-                v
-            };
-
-            unifrac_striped_par_weighted(
-                &post,
-                &kids,
-                &lens,
-                &leaf_ids,
-                &row2leaf,
-                WeightedMode::Dense { counts: &counts },
-                nsamp,
-                &col_sums,
-                raw_counts,
-            )
-        } else {
-            let col_sums = if raw_counts {
-                vec![1.0f64; nsamp] // dummy; unused when raw_counts==true
-            } else {
-                let mut v = vec![0.0f64; nsamp];
-                for r in 0..taxa.len() {
-                    let a = indptr[r] as usize;
-                    let b = indptr[r + 1] as usize;
-                    for k in a..b { v[indices[k] as usize] += data[k]; }
-                }
-                v
-            };
-
-            unifrac_striped_par_weighted(
-                &post,
-                &kids,
-                &lens,
-                &leaf_ids,
-                &row2leaf,
-                WeightedMode::Csr {
-                    indptr: &indptr,
-                    indices: &indices,
-                    data: &data,
-                },
-                nsamp,
-                &col_sums,
-                raw_counts,
-            )
-        }
+        } 
     } else {
         // Unweighted
         let mut masks: Vec<BitVec<u8, Lsb0>> =
