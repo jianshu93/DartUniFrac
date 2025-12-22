@@ -1559,6 +1559,7 @@ fn csr_to_csc(
         });
 
     (colptr, rowind, vals)
+}
 
 // Weighted, build sketches for normalized weighted UniFrac
 fn build_sketches_weighted(
