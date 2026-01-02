@@ -468,7 +468,7 @@ fn write_matrix_zstd(names: &[String], d: &[f32], n: usize, path: &str) -> Resul
 
 
 // Streaming distances directly from sketches (for --streaming mode)
-fn write_matrix_streaming_zstd(
+fn write_matrix_streaming_zstd_u64(
     names: &[String],
     sketches: &[Vec<u64>],
     path: &str,
@@ -556,6 +556,187 @@ fn write_matrix_streaming_zstd(
 
     Ok(())
 }
+
+fn write_matrix_streaming_zstd_u16(
+    names: &[String],
+    sketches: &[Vec<u16>],
+    path: &str,
+    block_size_opt: Option<usize>,
+    weighted_normalized: bool,
+) -> Result<()> {
+    let n = names.len();
+    assert_eq!(sketches.len(), n);
+
+    // zstd multi-threaded encoder + big buffer
+    let file = File::create(path)?;
+    let mut enc = zstd::Encoder::new(file, 0)?;
+    let zstd_threads = rayon::current_num_threads() as u32;
+    if zstd_threads > 1 {
+        enc.multithread(zstd_threads)?;
+    }
+    let mut w = BufWriter::with_capacity(16 << 20, enc.auto_finish());
+
+    // Header: "", <names...>
+    w.write_all(b"")?;
+    for name in names {
+        w.write_all(b"\t")?;
+        w.write_all(name.as_bytes())?;
+    }
+    w.write_all(b"\n")?;
+
+    // Block size: default = floor(sqrt(n))
+    let default_bs = ((n as f64).sqrt() as usize).max(1);
+    let bs = block_size_opt.unwrap_or(default_bs);
+    info!("streaming block-size = {} (n = {})", bs, n);
+
+    // Column-major block buffer: n × bs (each column j is a contiguous slice of length bs)
+    let mut block = vec![0.0f32; n * bs];
+    let dh = DistHamming;
+
+    let mut i0 = 0usize;
+    while i0 < n {
+        let h = (n - i0).min(bs);
+
+        // Fill block in parallel over columns; each `col` is a disjoint &mut [f32] (length = bs)
+        block.par_chunks_mut(bs).enumerate().for_each(|(j, col)| {
+            for bi in 0..h {
+                let i = i0 + bi;
+                let mut d: f32 = if i == j {
+                    0.0f32
+                } else {
+                    dh.eval(&sketches[i], &sketches[j]) as f32
+                };
+                // d is an unbiased estimate of d_J = 1 - Jw
+                if weighted_normalized {
+                    // Bray–Curtis / normalized weighted UniFrac:
+                    // D = (1 - Jw) / (1 + Jw) = d_J / (2 - d_J)
+                    d = if d < 2.0f32 { d / (2.0f32 - d) } else { 1.0f32 };
+                }
+                col[bi] = d; // write into column-major slot (j, bi)
+            }
+        });
+
+        // Write the block (single writer, amortized I/O)
+        let mut lines: Vec<String> = (0..h)
+            .into_par_iter()
+            .map(|bi| {
+                let i = i0 + bi;
+                let mut line = String::with_capacity(8 + n * 12);
+                line.push_str(&names[i]);
+
+                let mut fmt = ryu::Buffer::new();
+                for j in 0..n {
+                    line.push('\t');
+                    let v: f32 = block[j * bs + bi]; // column-major index (j, bi)
+                    line.push_str(fmt.format_finite(v));
+                }
+                line.push('\n');
+                line
+            })
+            .collect();
+
+        for line in &mut lines {
+            w.write_all(line.as_bytes())?;
+            line.clear();
+        }
+        w.flush()?;
+        i0 += h;
+    }
+
+    Ok(())
+}
+
+fn write_matrix_streaming_zstd_u32(
+    names: &[String],
+    sketches: &[Vec<u32>],
+    path: &str,
+    block_size_opt: Option<usize>,
+    weighted_normalized: bool,
+) -> Result<()> {
+    let n = names.len();
+    assert_eq!(sketches.len(), n);
+
+    // zstd multi-threaded encoder + big buffer
+    let file = File::create(path)?;
+    let mut enc = zstd::Encoder::new(file, 0)?;
+    let zstd_threads = rayon::current_num_threads() as u32;
+    if zstd_threads > 1 {
+        enc.multithread(zstd_threads)?;
+    }
+    let mut w = BufWriter::with_capacity(16 << 20, enc.auto_finish());
+
+    // Header: "", <names...>
+    w.write_all(b"")?;
+    for name in names {
+        w.write_all(b"\t")?;
+        w.write_all(name.as_bytes())?;
+    }
+    w.write_all(b"\n")?;
+
+    // Block size: default = floor(sqrt(n))
+    let default_bs = ((n as f64).sqrt() as usize).max(1);
+    let bs = block_size_opt.unwrap_or(default_bs);
+    info!("streaming block-size = {} (n = {})", bs, n);
+
+    // Column-major block buffer: n × bs (each column j is a contiguous slice of length bs)
+    let mut block = vec![0.0f32; n * bs];
+    let dh = DistHamming;
+
+    let mut i0 = 0usize;
+    while i0 < n {
+        let h = (n - i0).min(bs);
+
+        // Fill block in parallel over columns; each `col` is a disjoint &mut [f32] (length = bs)
+        block.par_chunks_mut(bs).enumerate().for_each(|(j, col)| {
+            for bi in 0..h {
+                let i = i0 + bi;
+                let mut d: f32 = if i == j {
+                    0.0f32
+                } else {
+                    dh.eval(&sketches[i], &sketches[j]) as f32
+                };
+                // d is an unbiased estimate of d_J = 1 - Jw
+                if weighted_normalized {
+                    // Bray–Curtis / normalized weighted UniFrac:
+                    // D = (1 - Jw) / (1 + Jw) = d_J / (2 - d_J)
+                    d = if d < 2.0f32 { d / (2.0f32 - d) } else { 1.0f32 };
+                }
+                col[bi] = d; // write into column-major slot (j, bi)
+            }
+        });
+
+        // Write the block (single writer, amortized I/O)
+        let mut lines: Vec<String> = (0..h)
+            .into_par_iter()
+            .map(|bi| {
+                let i = i0 + bi;
+                let mut line = String::with_capacity(8 + n * 12);
+                line.push_str(&names[i]);
+
+                let mut fmt = ryu::Buffer::new();
+                for j in 0..n {
+                    line.push('\t');
+                    let v: f32 = block[j * bs + bi]; // column-major index (j, bi)
+                    line.push_str(fmt.format_finite(v));
+                }
+                line.push('\n');
+                line
+            })
+            .collect();
+
+        for line in &mut lines {
+            w.write_all(line.as_bytes())?;
+            line.clear();
+        }
+        w.flush()?;
+        i0 += h;
+    }
+
+    Ok(())
+}
+
+
+
 
 // Unweighted, build sketches without node_bits (leaf→root OR per sample)
 fn build_sketches(
@@ -1997,6 +2178,41 @@ fn build_sketches_weighted_simple(
     Ok((samples, sketches_u64))
 }
 
+enum Sketches {
+    U16(Vec<Vec<u16>>),
+    U32(Vec<Vec<u32>>),
+    U64(Vec<Vec<u64>>),
+}
+
+fn trim_sketches_to_bbits(sk: Vec<Vec<u64>>, bbits: u8) -> Sketches {
+    match bbits {
+        16 => {
+            let out: Vec<Vec<u16>> = sk
+                .into_iter()
+                .map(|row| row.into_iter().map(|x| x as u16).collect())
+                .collect();
+            Sketches::U16(out)
+        }
+        32 => {
+            let out: Vec<Vec<u32>> = sk
+                .into_iter()
+                .map(|row| row.into_iter().map(|x| x as u32).collect())
+                .collect();
+            Sketches::U32(out)
+        }
+        64 => Sketches::U64(sk),
+        other => {
+            // Should not happen if main normalizes, but keep it robust.
+            warn!("trim_sketches_to_bbits: bbits={} not supported; using 16.", other);
+            let out: Vec<Vec<u16>> = sk
+                .into_iter()
+                .map(|row| row.into_iter().map(|x| x as u16).collect())
+                .collect();
+            Sketches::U16(out)
+        }
+    }
+}
+
 fn main() -> Result<()> {
     println!("\n ************** initializing logger *****************\n");
     env_logger::Builder::from_default_env().init();
@@ -2007,7 +2223,7 @@ fn main() -> Result<()> {
         .unwrap_or("🎯");
 
     let m = Command::new("dartunifrac")
-        .version("0.2.7")
+        .version("0.2.9")
         .about(format!(
             "DartUniFrac: Approximate UniFrac via Weighted MinHash {dart}{dart}{dart}"
         ))
@@ -2067,6 +2283,13 @@ fn main() -> Result<()> {
                 .help("Sketching method: dmh (DartMinHash) or ers (Efficient Rejection Sampling)")
                 .value_parser(["dmh", "ers"])
                 .default_value("dmh"),
+        )
+        .arg(
+            Arg::new("bbits")
+                .long("bbits")
+                .help("Extracting lower bits from hashes. Supported: 16 (default), 32, 64.")
+                .value_parser(clap::value_parser!(u8))
+                .default_value("16"),
         )
         .arg(
             Arg::new("seq-length")
@@ -2132,6 +2355,15 @@ fn main() -> Result<()> {
     let stream = m.get_flag("streaming");
     let block = m.get_one::<usize>("block").copied();
     let succ = m.get_flag("succ");
+    let bbits_in = *m.get_one::<u8>("bbits").unwrap();
+    let bbits: u8 = match bbits_in {
+        16 | 32 | 64 => bbits_in,
+        other => {
+            warn!("--bbits={} not supported; using 16 (supported: 16/32/64).", other);
+            16
+        }
+    };
+    info!("bbits = {}", bbits);
 
     let threads = m
         .get_one::<usize>("threads")
@@ -2174,6 +2406,7 @@ fn main() -> Result<()> {
             build_sketches_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
         }
     };
+    let sketches = trim_sketches_to_bbits(sketches_u64, bbits);
     let nsamp = samples.len();
 
     // Streaming mode: compute Hamming on the fly from sketches and stream to disk
@@ -2200,45 +2433,48 @@ fn main() -> Result<()> {
             "Streaming zstd-compressed distance matrix → {}",
             out_path_stream_str
         );
-        write_matrix_streaming_zstd(
-            &samples,
-            &sketches_u64,
-            &out_path_stream_str,
-            block,
-            weighted,
-        )?;
+        match &sketches {
+            Sketches::U16(s) => write_matrix_streaming_zstd_u16(&samples, s, &out_path_stream_str, block, weighted)?,
+            Sketches::U32(s) => write_matrix_streaming_zstd_u32(&samples, s, &out_path_stream_str, block, weighted)?,
+            Sketches::U64(s) => write_matrix_streaming_zstd_u64(&samples, s, &out_path_stream_str, block, weighted)?,
+        }
         info!("Done → {}", out_path_stream_str);
         return Ok(());
     }
 
+    macro_rules! compute_pairwise_from_sketches {
+        ($sketches:expr, $weighted:expr) => {{
+            let n = $sketches.len();
+            let dh = DistHamming;
+            let mut out = vec![0.0f32; n * n];
+
+            out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+                row[i] = 0.0f32;
+                for j in (i + 1)..n {
+                    let mut d: f32 = dh.eval(&$sketches[i], &$sketches[j]) as f32; // d_J ≈ 1 - Jw
+                    if $weighted {
+                        d = if d < 2.0f32 { d / (2.0f32 - d) } else { 1.0f32 };
+                    }
+                    row[j] = d;
+                }
+            });
+
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    let v = out[i * n + j];
+                    out[j * n + i] = v;
+                }
+            }
+            out
+        }};
+    }
+
     // Pairwise UniFrac (≈ 1 - Jaccard) via normalized Hamming on ID arrays (full N×N in f32)
     let t2 = Instant::now();
-    let dist: Vec<f32> = {
-        let n = nsamp;
-        let dh = DistHamming;
-        let mut out = vec![0.0f32; n * n];
-
-        out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
-            row[i] = 0.0f32;
-            for j in (i + 1)..n {
-                // DistHamming<u64> returns (# !=)/k ∈ [0,1]
-                let mut d: f32 = dh.eval(&sketches_u64[i], &sketches_u64[j]) as f32; // d_J ≈ 1 - Jw
-                if weighted {
-                    // normalized weighted UniFrac = Bray–Curtis transform
-                    d = if d < 2.0f32 { d / (2.0f32 - d) } else { 1.0f32 };
-                }
-                row[j] = d; // (i,j)
-            }
-        });
-
-        // Mirror upper to lower.
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let v = out[i * n + j];
-                out[j * n + i] = v;
-            }
-        }
-        out
+    let dist: Vec<f32> = match &sketches {
+        Sketches::U16(s) => compute_pairwise_from_sketches!(s, weighted),
+        Sketches::U32(s) => compute_pairwise_from_sketches!(s, weighted),
+        Sketches::U64(s) => compute_pairwise_from_sketches!(s, weighted),
     };
     info!("pairwise distances in {} ms", t2.elapsed().as_millis());
 

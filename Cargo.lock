@@ -630,8 +630,9 @@ dependencies = [
 
 [[package]]
 name = "dartminhash"
-version = "0.1.2"
-source = "git+https://github.com/jianshu93/dartminhash-rs.git#c9c882d835faa3b24b8dcea3e78031712722adc7"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a423b0d6223110ce9d0fc173e2e2cf90628a5ea7679a8d2317c58eab23a8adc"
 dependencies = [
  "mt19937",
  "rand_core 0.9.3",
@@ -913,7 +914,8 @@ dependencies = [
 [[package]]
 name = "fpcoa"
 version = "0.1.2"
-source = "git+https://github.com/jianshu93/fpcoa#8180e5770ade874dc116304e5a4fc52765bb392b"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83bb7381300dd09f70f1c11e5afc519340bada700d60774a3d10ce279ecb7747"
 dependencies = [
  "annembed",
  "lax 0.17.0",
@@ -2664,8 +2666,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "succparen"
-version = "0.0.2"
-source = "git+https://github.com/jianshu93/succparen#6dd932beb079917ddab5d198a16f492d034e1ae5"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a721ccd26ace91f2f8eb495f6d8c937679c2b6e101d32e73e7e5e1441ed6c8d"
 
 [[package]]
 name = "syn"
