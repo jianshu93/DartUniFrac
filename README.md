@@ -11,7 +11,7 @@
 
 
 # DartUniFrac: Approximate UniFrac via Weighted MinHash 🦀
-This crate provides an efficient implementation of the newly invented ***DartUniFrac*** algorithm for large-scale [UniFrac](https://en.wikipedia.org/wiki/UniFrac) computation (weighted and unweighted). We named this new algorithm DartUniFrac because the key step is to use DartMinHash or Efficient Rejection Sampling (or ERS) on branches and the DartMinHash/ERS is about "Among the first r darts thrown, return those hitting $x_i$". 
+This crate provides an efficient implementation of the newly invented ***DartUniFrac*** algorithm for large-scale [UniFrac](https://en.wikipedia.org/wiki/UniFrac) computation (weighted and unweighted). We named this new algorithm DartUniFrac because the key step is to use [DartMinHash](https://arxiv.org/abs/2005.11547) or Efficient Rejection Sampling (or [ERS](https://ojs.aaai.org/index.php/AAAI/article/view/16543)) on branches and the DartMinHash/ERS is about "Among the first r darts thrown, return those hitting $x_i$". B-bits idea from [B-bits MinHash](https://dl.acm.org/doi/abs/10.1145/1772690.1772759) can be used to reduce MinHash sketch space and accelerate computation. 
 
 
 ## Quick install and usage
@@ -159,6 +159,7 @@ Options:
       --succ                  Use succparen balanced-parentheses tree representation
   -s, --sketch <sketch-size>  Sketch size for Weighted MinHash (DartMinHash or ERS) [default: 2048]
   -m, --method <method>       Sketching method: dmh (DartMinHash) or ers (Efficient Rejection Sampling) [default: dmh] [possible values: dmh, ers]
+  --bbits <bbits>         Extracting lower bits from hashes. Supported: 16 (default), 32, 64. [default: 16]
   -l, --length <seq-length>   Per-hash independent random sequence length for ERS, must be >= 1024 [default: 4096]
   -T, --threads <threads>     Number of threads, default all logical cores
       --seed <seed>           Random seed for reproducibility [default: 1337]
