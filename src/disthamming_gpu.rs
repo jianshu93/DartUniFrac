@@ -1007,19 +1007,6 @@ pub fn write_matrix_streaming_gpu_auto<T: SketchElem>(
     }
 }
 
-
-pub fn pairwise_hamming_single_gpu_u16(
-    sketches: &[u16], n: usize, k: usize, out: &mut [f32], block_rows: usize, weighted: bool
-) -> Result<()> { pairwise_hamming_single_gpu::<u16>(sketches, n, k, out, block_rows, weighted) }
-
-pub fn pairwise_hamming_single_gpu_u32(
-    sketches: &[u32], n: usize, k: usize, out: &mut [f32], block_rows: usize, weighted: bool
-) -> Result<()> { pairwise_hamming_single_gpu::<u32>(sketches, n, k, out, block_rows, weighted) }
-
-pub fn pairwise_hamming_single_gpu_u64(
-    sketches: &[u64], n: usize, k: usize, out: &mut [f32], block_rows: usize, weighted: bool
-) -> Result<()> { pairwise_hamming_single_gpu::<u64>(sketches, n, k, out, block_rows, weighted) }
-
 pub fn pairwise_hamming_multi_gpu_u16(
     sketches: &[u16], n: usize, k: usize, out: &mut [f32], block_rows: usize, weighted: bool
 ) -> Result<()> { pairwise_hamming_multi_gpu::<u16>(sketches, n, k, out, block_rows, weighted) }
