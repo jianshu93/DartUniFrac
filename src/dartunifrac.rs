@@ -1,6 +1,6 @@
 //! BSD 3-Clause License
 //!
-//! Copyright (c) 2016-2025, UniFrac development team.
+//! Copyright (c) 2016-2026, UniFrac development team.
 //! All rights reserved.
 //!
 //! See LICENSE file for more details
