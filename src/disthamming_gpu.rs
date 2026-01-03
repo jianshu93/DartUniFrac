@@ -7,6 +7,7 @@ use std::{sync::Arc, thread, time::Instant};
 
 use cudarc::driver::{CudaContext, CudaSlice, LaunchConfig};
 use cudarc::driver::DeviceRepr;
+use cudarc::driver::PushKernelArg;
 use cudarc::nvrtc::compile_ptx;
 use log::{debug, info, warn};
 use std::io::Write;
