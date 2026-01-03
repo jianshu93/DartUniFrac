@@ -31,9 +31,10 @@ fn kernel_src_for(dtype: SketchDType) -> String {
     format!("#define ELEM_T {}\n{}", c_ty, KERNEL_SRC)
 }
 
-trait SketchElem: DeviceRepr + Copy + 'static {
+trait SketchElem: DeviceRepr + Copy + Send + Sync + 'static {
     const DTYPE: SketchDType;
 }
+
 impl SketchElem for u16 { const DTYPE: SketchDType = SketchDType::U16; }
 impl SketchElem for u32 { const DTYPE: SketchDType = SketchDType::U32; }
 impl SketchElem for u64 { const DTYPE: SketchDType = SketchDType::U64; }
