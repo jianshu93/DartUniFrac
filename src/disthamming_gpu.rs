@@ -49,6 +49,10 @@ const KERNEL_SRC: &str = r#"
 #define BK 64   // k-slab per iteration (tune: 32, 64, 128)
 #endif
 
+#ifndef STRIDE
+#define STRIDE (BK + 1)   // <-- padding to avoid bank conflicts
+#endif
+
 #ifndef ELEM_T
 #define ELEM_T unsigned long long  // default = u64
 #endif
@@ -74,7 +78,7 @@ void hamming_tile(
     //   Bs: blockDim.x cols × BK
     extern __shared__ __align__(16) unsigned char smem_raw[];
     ELEM_T* As = reinterpret_cast<ELEM_T*>(smem_raw);
-    ELEM_T* Bs = As + (size_t)blockDim.y * (size_t)BK;
+    ELEM_T* Bs = As + (size_t)blockDim.y * (size_t)STRIDE;
 
     unsigned int diff = 0u;
 
@@ -95,7 +99,7 @@ void hamming_tile(
             if (r < bw && (t0 + t) < k && gi < n) {
                 val = sketches[(size_t)gi * (size_t)k + (size_t)(t0 + t)];
             }
-            As[(size_t)r * (size_t)BK + (size_t)t] = val;
+            As[(size_t)r * (size_t)STRIDE + (size_t)t] = val;
         }
 
         // --- Load B-slab: (blockDim.x × bk) ---
@@ -108,7 +112,7 @@ void hamming_tile(
             if (c < bh && (t0 + t) < k && gj < n) {
                 val = sketches[(size_t)gj * (size_t)k + (size_t)(t0 + t)];
             }
-            Bs[(size_t)c * (size_t)BK + (size_t)t] = val;
+            Bs[(size_t)c * (size_t)STRIDE + (size_t)t] = val;
         }
 
         __syncthreads();
@@ -117,8 +121,8 @@ void hamming_tile(
         if (ii < bw && jj < bh) {
             if (!(i == j || (only_upper && j <= i))) {
                 // rows map along blockDim.y; cols along blockDim.x
-                const size_t arow = (size_t)threadIdx.y * (size_t)BK;
-                const size_t brow = (size_t)threadIdx.x * (size_t)BK;
+                const size_t arow = (size_t)threadIdx.y * (size_t)STRIDE;
+                const size_t brow = (size_t)threadIdx.x * (size_t)STRIDE;
                 #pragma unroll
                 for (int t = 0; t < bk; ++t) {
                     diff += (As[arow + (size_t)t] != Bs[brow + (size_t)t]);
@@ -243,10 +247,10 @@ fn pairwise_hamming_single_gpu<T: SketchElem>(
 
             let blk_x = 64usize; // threads along columns (j)
             let blk_y = 8usize;  // threads along rows (i)
-            let bk = 64usize; // must match BK in kernel
-
+            let bk = 64usize;        // must match BK in kernel
+            let stride = bk + 1;     // STRIDE
             // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(T)
-            let smem_bytes = ((bk * (blk_y + blk_x)) * std::mem::size_of::<T>()) as u32;
+            let smem_bytes = ((stride * (blk_y + blk_x)) * std::mem::size_of::<T>()) as u32;
 
             let cfg = LaunchConfig {
                 grid_dim: (
@@ -429,12 +433,10 @@ fn pairwise_hamming_multi_gpu<T: SketchElem>(
 
                         let blk_x = 64usize; // threads along columns (j)
                         let blk_y = 8usize;  // threads along rows (i)
-                        let bk = 64usize; // must match BK in kernel
+                        let bk = 64usize;        // BK
+                        let stride = bk + 1;     // STRIDE
 
-                        // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(T)
-                        let smem_bytes =
-                            ((bk * (blk_y + blk_x)) * std::mem::size_of::<T>())
-                                as u32;
+                        let smem_bytes = ((stride * (blk_y + blk_x)) * std::mem::size_of::<T>()) as u32;
 
                         let cfg = LaunchConfig {
                             grid_dim: (
@@ -612,11 +614,10 @@ fn write_matrix_streaming_gpu_single<T: SketchElem>(
 
             let blk_x = 64usize; // threads along columns (j)
             let blk_y = 8usize;  // threads along rows (i)
-            let bk = 64usize;    // must match BK in kernel
+            let bk = 64usize;        // BK
+            let stride = bk + 1;     // STRIDE
 
-            // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(T)
-            let smem_bytes =
-                ((bk * (blk_y + blk_x)) * std::mem::size_of::<T>()) as u32;
+            let smem_bytes = ((stride * (blk_y + blk_x)) * std::mem::size_of::<T>()) as u32;
 
             let cfg = LaunchConfig {
                 grid_dim: (
@@ -854,13 +855,10 @@ fn write_matrix_streaming_gpu_multi<T: SketchElem>(
 
                             let blk_x = 64usize; // threads along columns (j)
                             let blk_y = 8usize;  // threads along rows (i)
-                            let bk = 64usize;    // must match BK in kernel
+                            let bk = 64usize;        // BK
+                            let stride = bk + 1;     // STRIDE
 
-                            // dynamic shared memory: (BK * (blk_y + blk_x)) * sizeof(T)
-                            let smem_bytes =
-                                ((bk * (blk_y + blk_x))
-                                    * std::mem::size_of::<T>())
-                                    as u32;
+                            let smem_bytes = ((stride * (blk_y + blk_x)) * std::mem::size_of::<T>()) as u32;
 
                             let cfg = LaunchConfig {
                                 grid_dim: (
