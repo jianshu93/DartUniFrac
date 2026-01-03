@@ -156,7 +156,7 @@ fn gib(x: usize) -> f64 {
 
 /// Single-GPU, produces full n×n matrix in host CPU memory.
 /// Distances are stored as `f32` in `out_upper_tri`.
-pub fn pairwise_hamming_single_gpu<T: SketchElem>(
+fn pairwise_hamming_single_gpu<T: SketchElem>(
     sketches_flat: &[T],
     n: usize,
     k: usize,
@@ -332,7 +332,7 @@ pub fn pairwise_hamming_single_gpu<T: SketchElem>(
 }
 
 /// Multi-GPU in-memory, n*n matrix in host CPU memory (`f32` distances).
-pub fn pairwise_hamming_multi_gpu<T: SketchElem>(
+fn pairwise_hamming_multi_gpu<T: SketchElem>(
     sketches_flat: &[T],
     n: usize,
     k: usize,
@@ -963,7 +963,7 @@ fn write_matrix_streaming_gpu_multi<T: SketchElem>(
 /// GPU compute and streaming write:
 /// - if >=2 GPUs detected: multi-GPU streaming across all devices
 /// - if 1 GPU: single-GPU streaming on device 0
-pub fn write_matrix_streaming_gpu_auto<T: SketchElem>(
+fn write_matrix_streaming_gpu_auto<T: SketchElem>(
     names: &[String],
     sketches_flat: &[T],
     n: usize,
