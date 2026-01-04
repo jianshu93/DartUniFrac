@@ -112,8 +112,8 @@ We first created a few libraries for the best performance of DartUniFrac impleme
 ## Install
 ### Pre-compiled on Linux (x86-64)
 ```bash
-wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.8/dartunifrac_Linux_x86-64_v0.2.8.zip
-unzip dartunifrac_Linux_x86-64_v0.2.8.zip
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.9/dartunifrac_Linux_x86-64_v0.2.9.zip
+unzip dartunifrac_Linux_x86-64_v0.2.9.zip
 chmod a+x ./dartunifrac
 ./dartunifrac -h
 ```
@@ -194,6 +194,17 @@ dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048
 ```
 
 ## GPU support (DartUniFrac-GPU branch, Linux only)
+### Pre-built binary
+
+```bash
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.9/dartunifrac-cuda_Linux_x86-64_v0.2.9.zip
+unzip dartunifrac-cuda_Linux_x86-64_v0.2.9.zip
+chmod a+x ./dartunifrac-cuda
+./dartunifrac-cuda -h
+
+```
+
+### Compiling from source
 First, you need to install Rust here:
 ```bash
 ### Install rust first, see here: https://rustup.rs, after run it, run:
@@ -255,7 +266,7 @@ $ RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ag_emp_even500.biom --weight
 [2025-12-01T07:03:55Z INFO  dartunifrac_cuda] sketching starting...
 [2025-12-01T07:03:56Z INFO  dartunifrac_cuda] sketching done.
 [2025-12-01T07:03:57Z INFO  dartunifrac_cuda] CUDA detected (4 devices). Computing pairwise distances on GPUs …
-[2025-12-01T07:04:02Z INFO  dartunifrac_cuda] pairwise distances (GPU) in 4574 ms
+[2025-12-01T07:04:02Z INFO  dartunifrac_cuda] pairwise distances (GPU) in 2574 ms
 [2025-12-01T07:04:02Z INFO  dartunifrac_cuda] Writing uncompressed output → unifrac.tsv
 [2025-12-01T07:05:08Z INFO  dartunifrac_cuda] Done → unifrac.tsv
 
