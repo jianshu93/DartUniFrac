@@ -112,8 +112,8 @@ We first created a few libraries for the best performance of DartUniFrac impleme
 ## Install
 ### Pre-compiled on Linux (x86-64)
 ```bash
-wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.8/dartunifrac_Linux_x86-64_v0.2.8.zip
-unzip dartunifrac_Linux_x86-64_v0.2.8.zip
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.9/dartunifrac_Linux_x86-64_v0.2.9.zip
+unzip dartunifrac_Linux_x86-64_v0.2.9.zip
 chmod a+x ./dartunifrac
 ./dartunifrac -h
 ```
@@ -159,6 +159,7 @@ Options:
       --succ                  Use succparen balanced-parentheses tree representation
   -s, --sketch <sketch-size>  Sketch size for Weighted MinHash (DartMinHash or ERS) [default: 2048]
   -m, --method <method>       Sketching method: dmh (DartMinHash) or ers (Efficient Rejection Sampling) [default: dmh] [possible values: dmh, ers]
+  --bbits <bbits>         Extracting lower bits from hashes. Supported: 16 (default), 32, 64. [default: 16]
   -l, --length <seq-length>   Per-hash independent random sequence length for ERS, must be >= 1024 [default: 4096]
   -T, --threads <threads>     Number of threads, default all logical cores
       --seed <seed>           Random seed for reproducibility [default: 1337]
@@ -193,6 +194,17 @@ dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048
 ```
 
 ## GPU support (DartUniFrac-GPU branch, Linux only)
+### Pre-built binary
+
+```bash
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.9/dartunifrac-cuda_Linux_x86-64_v0.2.9.zip
+unzip dartunifrac-cuda_Linux_x86-64_v0.2.9.zip
+chmod a+x ./dartunifrac-cuda
+./dartunifrac-cuda -h
+
+```
+
+### Compiling from source
 First, you need to install Rust here:
 ```bash
 ### Install rust first, see here: https://rustup.rs, after run it, run:
@@ -210,7 +222,7 @@ cargo build --release --features intel-mkl-static,stdsimd,cuda
 ./target/release/dartunifrac-cuda -h
 
 ```
-### Use Nvidia HPC SDK (recommented)
+### Use Nvidia HPC SDK (recommended)
 You can also use bioconda to manage dependencies and compile from source (recommended). See how to install bioconda [here](https://www.anaconda.com/docs/getting-started/miniconda/install)
 
 On Linux:
@@ -254,7 +266,7 @@ $ RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ag_emp_even500.biom --weight
 [2025-12-01T07:03:55Z INFO  dartunifrac_cuda] sketching starting...
 [2025-12-01T07:03:56Z INFO  dartunifrac_cuda] sketching done.
 [2025-12-01T07:03:57Z INFO  dartunifrac_cuda] CUDA detected (4 devices). Computing pairwise distances on GPUs …
-[2025-12-01T07:04:02Z INFO  dartunifrac_cuda] pairwise distances (GPU) in 4574 ms
+[2025-12-01T07:04:02Z INFO  dartunifrac_cuda] pairwise distances (GPU) in 2574 ms
 [2025-12-01T07:04:02Z INFO  dartunifrac_cuda] Writing uncompressed output → unifrac.tsv
 [2025-12-01T07:05:08Z INFO  dartunifrac_cuda] Done → unifrac.tsv
 
