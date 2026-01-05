@@ -1017,7 +1017,7 @@ fn write_matrix_streaming_gpu_multi<T: SketchElem>(
                         let send_start = Instant::now();
                         for ii in 0..bw {
                             let i = i0 + ii;
-                            let mut s = lines[ii].clone();
+                            let mut s = std::mem::take(&mut lines[ii]); // move String out, leaves empty
                             s.push('\n');
                             tx.send((i, s)).expect("send row to writer");
                         }
