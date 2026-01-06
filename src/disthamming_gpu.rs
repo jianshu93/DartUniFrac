@@ -1,17 +1,17 @@
 //! CUDA: in-memory pairwise (single/multi GPU) hamming & automatic streaming writer.
 //! Distances are stored as `f32` (float) to halve memory vs f64.
+//
 
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeMap;
-use std::{sync::Arc, thread, time::Instant};
-
-use cudarc::driver::{CudaContext, CudaSlice, LaunchConfig};
-use cudarc::driver::DeviceRepr;
-use cudarc::driver::PushKernelArg;
+use cudarc::driver::{CudaContext, CudaSlice, DeviceRepr, LaunchConfig};
 use cudarc::nvrtc::compile_ptx;
 use log::{debug, info, warn};
+use std::collections::BTreeMap;
 use std::io::Write;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug)]
 pub enum SketchDType {
@@ -74,9 +74,7 @@ const KERNEL_SRC: &str = r#"
 #define ELEM_T unsigned long long
 #endif
 
-// ------------------------
 // Generic kernel: ELEM_T compare
-// ------------------------
 extern "C" __global__
 void hamming_tile(
     const ELEM_T* __restrict__ sketches, // [n*k], row-major
@@ -84,7 +82,7 @@ void hamming_tile(
     int i0, int j0,
     int bw, int bh,
     float* __restrict__ out, // [bw*bh], row-major, ldo = bh
-    int only_upper // 1 => only write j>i, 0 => write full tile
+    int only_upper // 1 => only write j>i, 0 => write full tile (including diagonal=0)
 ){
     const int jj = blockIdx.x * blockDim.x + threadIdx.x; // 0..bh-1
     const int ii = blockIdx.y * blockDim.y + threadIdx.y; // 0..bw-1
@@ -131,7 +129,8 @@ void hamming_tile(
         __syncthreads();
 
         if (ii < bw && jj < bh) {
-            if (!(i == j || (only_upper && j <= i))) {
+            // compute only if we will write something and not diagonal
+            if (!(only_upper && j <= i) && (i != j)) {
                 const size_t arow = (size_t)threadIdx.y * (size_t)STRIDE;
                 const size_t brow = (size_t)threadIdx.x * (size_t)STRIDE;
                 #pragma unroll
@@ -145,15 +144,14 @@ void hamming_tile(
     }
 
     if (ii < bw && jj < bh) {
-        if (!(i == j || (only_upper && j <= i))) {
-            out[(size_t)ii * (size_t)bh + (size_t)jj] = (float)diff / (float)k;
+        if (!(only_upper && j <= i)) {
+            out[(size_t)ii * (size_t)bh + (size_t)jj] =
+                (i == j) ? 0.0f : ((float)diff / (float)k);
         }
     }
 }
 
-// ------------------------
 // u16-packed kernel helpers
-// ------------------------
 __device__ __forceinline__ unsigned long long pack_u16x4(const unsigned short* p) {
     // Safe w.r.t. alignment: four 16-bit loads (aligned to 2).
     return  (unsigned long long)p[0]
@@ -190,7 +188,7 @@ void hamming_tile_u16_packed(
     int i0, int j0,
     int bw, int bh,
     float* __restrict__ out, // [bw*bh], row-major, ldo = bh
-    int only_upper
+    int only_upper // 1 => only write j>i, 0 => write full tile (including diagonal=0)
 ){
     const int jj = blockIdx.x * blockDim.x + threadIdx.x;
     const int ii = blockIdx.y * blockDim.y + threadIdx.y;
@@ -249,14 +247,16 @@ void hamming_tile_u16_packed(
 
         __syncthreads();
 
-        if (ii < bw && jj < bh && !(i == j || (only_upper && j <= i))) {
-            const size_t arow = (size_t)threadIdx.y * (size_t)STRIDE16;
-            const size_t brow = (size_t)threadIdx.x * (size_t)STRIDE16;
+        if (ii < bw && jj < bh) {
+            if (!(only_upper && j <= i) && (i != j)) {
+                const size_t arow = (size_t)threadIdx.y * (size_t)STRIDE16;
+                const size_t brow = (size_t)threadIdx.x * (size_t)STRIDE16;
 
-            #pragma unroll
-            for (int t = 0; t < bk; ++t) {
-                unsigned long long x = As[arow + (size_t)t] ^ Bs[brow + (size_t)t];
-                diff += mismatch_u16x4_from_xor(x);
+                #pragma unroll
+                for (int t = 0; t < bk; ++t) {
+                    unsigned long long x = As[arow + (size_t)t] ^ Bs[brow + (size_t)t];
+                    diff += mismatch_u16x4_from_xor(x);
+                }
             }
         }
 
@@ -264,19 +264,22 @@ void hamming_tile_u16_packed(
     }
 
     // Handle remainder krem (0..3) with scalar u16 compares (only if needed)
-    if (krem && ii < bw && jj < bh && !(i == j || (only_upper && j <= i))) {
-        const int base = (k4 << 2); // 4*k4
-        const unsigned short* ai = sketches + (size_t)i*(size_t)k + (size_t)base;
-        const unsigned short* bj = sketches + (size_t)j*(size_t)k + (size_t)base;
-        #pragma unroll
-        for (int t = 0; t < 3; ++t) {
-            if (t < krem) diff += (ai[t] != bj[t]);
+    if (krem && ii < bw && jj < bh) {
+        if (!(only_upper && j <= i) && (i != j)) {
+            const int base = (k4 << 2); // 4*k4
+            const unsigned short* ai = sketches + (size_t)i*(size_t)k + (size_t)base;
+            const unsigned short* bj = sketches + (size_t)j*(size_t)k + (size_t)base;
+            #pragma unroll
+            for (int t = 0; t < 3; ++t) {
+                if (t < krem) diff += (ai[t] != bj[t]);
+            }
         }
     }
 
     if (ii < bw && jj < bh) {
-        if (!(i == j || (only_upper && j <= i))) {
-            out[(size_t)ii * (size_t)bh + (size_t)jj] = (float)diff / (float)k;
+        if (!(only_upper && j <= i)) {
+            out[(size_t)ii * (size_t)bh + (size_t)jj] =
+                (i == j) ? 0.0f : ((float)diff / (float)k);
         }
     }
 }
@@ -286,8 +289,6 @@ void hamming_tile_u16_packed(
 pub fn device_count() -> Result<usize> {
     Ok(CudaContext::device_count()? as usize)
 }
-
-// In-memory GPU computation
 
 #[inline]
 fn mib(x: usize) -> f64 {
@@ -323,7 +324,6 @@ fn pairwise_hamming_single_gpu<T: SketchElem>(
     mut block_rows: usize,
     weighted_normalized: bool,
 ) -> Result<()> {
-    // Sanity
     if sketches_flat.len() != n * k {
         bail!(
             "sketches_flat length mismatch: got {}, expected {}",
@@ -362,6 +362,7 @@ fn pairwise_hamming_single_gpu<T: SketchElem>(
     let ctx = CudaContext::new(0)?;
     let stream = ctx.default_stream();
 
+    // Compile PTX once
     let ptx = compile_ptx(&kernel_src_for(T::DTYPE))?;
     let module = ctx.load_module(ptx)?;
     let func_name = kernel_name_for(T::DTYPE);
@@ -449,9 +450,8 @@ fn pairwise_hamming_single_gpu<T: SketchElem>(
             launch.arg(&only_upper_i32);
 
             unsafe { launch.launch(cfg) }?;
-            // IMPORTANT: no explicit synchronize here; D2H on the same stream is already ordered.
+            // stream-ordered D2H is sufficient
 
-            // Copy back (cudarc copies full slice)
             stream.memcpy_dtoh(&d_tile, &mut h_tile)?;
 
             // Scatter into final matrix (upper + mirror lower)
@@ -474,6 +474,11 @@ fn pairwise_hamming_single_gpu<T: SketchElem>(
                 }
             }
         }
+    }
+
+    // Ensure diagonal is 0 regardless of how caller allocated `out_upper_tri`
+    for i in 0..n {
+        out_upper_tri[i * n + i] = 0.0;
     }
     Ok(())
 }
@@ -517,7 +522,7 @@ fn pairwise_hamming_multi_gpu<T: SketchElem>(
         );
     }
 
-    // upper-triangular tiles
+    // Build upper-triangular tiles
     let nb = (n + block_rows - 1) / block_rows;
     let mut tiles = Vec::<(usize, usize)>::new();
     tiles.reserve(nb * nb / 2 + nb);
@@ -527,25 +532,34 @@ fn pairwise_hamming_multi_gpu<T: SketchElem>(
         }
     }
 
+    // Compile PTX once, share across workers
+    let ptx = Arc::new(compile_ptx(&kernel_src_for(T::DTYPE))?);
+
     let tiles = Arc::new(tiles);
+    let next = Arc::new(AtomicUsize::new(0));
     let sk_arc: Arc<Vec<T>> = Arc::new(sketches_flat.to_vec());
+
+    // Raw pointer to output (writes are non-overlapping per tile)
     let out_addr: usize = out_upper_tri.as_mut_ptr() as usize;
+
     let n_arc = n;
     let k_arc = k;
     let br_arc = block_rows;
     let weighted = weighted_normalized;
 
-    thread::scope(|scope| {
+    std::thread::scope(|scope| {
         for dev_id in 0..ng {
             let tiles = Arc::clone(&tiles);
+            let next = Arc::clone(&next);
             let sk = Arc::clone(&sk_arc);
+            let ptx = Arc::clone(&ptx);
+
             scope.spawn(move || {
                 let inner = || -> Result<()> {
                     let ctx = CudaContext::new(dev_id)?;
                     let stream = ctx.default_stream();
 
-                    let ptx = compile_ptx(&kernel_src_for(T::DTYPE))?;
-                    let module = ctx.load_module(ptx)?;
+                    let module = ctx.load_module((*ptx).clone())?;
                     let func_name = kernel_name_for(T::DTYPE);
                     let func = module.load_function(func_name)?;
 
@@ -560,10 +574,12 @@ fn pairwise_hamming_multi_gpu<T: SketchElem>(
                     let k_i32 = k_arc as i32;
                     let only_upper_i32 = 1i32;
 
-                    for (tix, &(bi, bj)) in tiles.iter().enumerate() {
-                        if tix % ng != dev_id {
-                            continue;
+                    loop {
+                        let tix = next.fetch_add(1, Ordering::Relaxed);
+                        if tix >= tiles.len() {
+                            break;
                         }
+                        let (bi, bj) = tiles[tix];
 
                         let i0 = bi * br_arc;
                         let i1 = (i0 + br_arc).min(n_arc);
@@ -604,8 +620,6 @@ fn pairwise_hamming_multi_gpu<T: SketchElem>(
                         launch.arg(&only_upper_i32);
 
                         unsafe { launch.launch(cfg) }?;
-                        // no explicit synchronize; D2H is stream-ordered
-
                         stream.memcpy_dtoh(&d_tile, &mut h_tile)?;
 
                         // host write-back (upper + mirror lower)
@@ -628,14 +642,22 @@ fn pairwise_hamming_multi_gpu<T: SketchElem>(
                             }
                         }
                     }
+
                     Ok(())
                 };
+
                 if let Err(e) = inner() {
                     panic!("GPU worker {} failed: {e:?}", dev_id);
                 }
             });
         }
     });
+
+    // Ensure diagonal is 0 regardless of how caller allocated `out_upper_tri`
+    for i in 0..n {
+        out_upper_tri[i * n + i] = 0.0;
+    }
+
     Ok(())
 }
 
@@ -654,6 +676,7 @@ fn write_matrix_streaming_gpu_single<T: SketchElem>(
     let ctx = CudaContext::new(gpu_id)?;
     let stream = ctx.default_stream();
 
+    // Compile PTX once
     let ptx = compile_ptx(&kernel_src_for(T::DTYPE))?;
     let module = ctx.load_module(ptx)?;
     let func_name = kernel_name_for(T::DTYPE);
@@ -726,7 +749,7 @@ fn write_matrix_streaming_gpu_single<T: SketchElem>(
 
         let mut lines: Vec<String> = (0..bw)
             .map(|ii| {
-                let mut s = String::with_capacity(32);
+                let mut s = String::with_capacity(64);
                 s.push_str(&names[i0 + ii]);
                 s
             })
@@ -767,18 +790,26 @@ fn write_matrix_streaming_gpu_single<T: SketchElem>(
             launch.arg(&only_upper_i32);
 
             unsafe { launch.launch(cfg) }?;
-            // no explicit synchronize; D2H is stream-ordered
-
             stream.memcpy_dtoh(&d_tile, &mut h_tile)?;
 
+            // reserve once per tile append to reduce realloc churn
+            let reserve_hint = bh.saturating_mul(12);
+
             for ii in 0..bw {
-                let row_off = ii * bh;
                 let line = &mut lines[ii];
+                line.reserve(reserve_hint);
+
+                let row_off = ii * bh;
+                let gi = i0 + ii;
+
                 for jj in 0..bh {
-                    let mut d = h_tile[row_off + jj];
+                    let gj = j0 + jj;
+                    let mut d = if gi == gj { 0.0f32 } else { h_tile[row_off + jj] };
+
                     if weighted_normalized {
                         d = if d < 2.0f32 { d / (2.0f32 - d) } else { 1.0f32 };
                     }
+
                     line.push('\t');
                     line.push_str(fmt.format_finite(d));
                 }
@@ -835,6 +866,9 @@ fn write_matrix_streaming_gpu_multi<T: SketchElem>(
     let names_arc = Arc::new(names.to_vec());
     let sketches_arc: Arc<Vec<T>> = Arc::new(sketches_flat.to_vec());
 
+    // Compile PTX once, shared across worker threads
+    let ptx = Arc::new(compile_ptx(&kernel_src_for(T::DTYPE))?);
+
     let (tx, rx) = mpsc::sync_channel::<(usize, String)>(ng * 2);
 
     let names_for_writer = Arc::clone(&names_arc);
@@ -854,6 +888,7 @@ fn write_matrix_streaming_gpu_multi<T: SketchElem>(
                 std::fs::File::create(&path_str)?,
             ))
         };
+
         let t_writer_start = Instant::now();
 
         writer.write_all(b"")?;
@@ -874,6 +909,7 @@ fn write_matrix_streaming_gpu_multi<T: SketchElem>(
             }
         }
         writer.flush()?;
+
         let writer_ms = t_writer_start.elapsed().as_millis();
         info!(
             "gpu-streaming(multi): writer finished all {} rows in {} ms",
@@ -888,14 +924,14 @@ fn write_matrix_streaming_gpu_multi<T: SketchElem>(
             let tx = tx.clone();
             let names = Arc::clone(&names_arc);
             let sketches = Arc::clone(&sketches_arc);
+            let ptx = Arc::clone(&ptx);
 
             scope.spawn(move || {
                 let inner = || -> Result<()> {
                     let ctx = CudaContext::new(dev_id)?;
                     let stream = ctx.default_stream();
 
-                    let ptx = compile_ptx(&kernel_src_for(T::DTYPE))?;
-                    let module = ctx.load_module(ptx)?;
+                    let module = ctx.load_module((*ptx).clone())?;
                     let func_name = kernel_name_for(T::DTYPE);
                     let func = module.load_function(func_name)?;
 
@@ -944,7 +980,7 @@ fn write_matrix_streaming_gpu_multi<T: SketchElem>(
 
                         let mut lines: Vec<String> = (0..bw)
                             .map(|ii| {
-                                let mut s = String::with_capacity(32);
+                                let mut s = String::with_capacity(64);
                                 s.push_str(&names[i0 + ii]);
                                 s
                             })
@@ -985,18 +1021,26 @@ fn write_matrix_streaming_gpu_multi<T: SketchElem>(
                             launch.arg(&only_upper_i32);
 
                             unsafe { launch.launch(cfg) }?;
-                            // no explicit synchronize; D2H is stream-ordered
-
                             stream.memcpy_dtoh(&d_tile, &mut h_tile)?;
 
+                            let reserve_hint = bh.saturating_mul(12);
+
                             for ii in 0..bw {
-                                let row_off = ii * bh;
                                 let line = &mut lines[ii];
+                                line.reserve(reserve_hint);
+
+                                let row_off = ii * bh;
+                                let gi = i0 + ii;
+
                                 for jj in 0..bh {
-                                    let mut d = h_tile[row_off + jj];
+                                    let gj = j0 + jj;
+                                    let mut d =
+                                        if gi == gj { 0.0f32 } else { h_tile[row_off + jj] };
+
                                     if weighted_normalized {
                                         d = if d < 2.0f32 { d / (2.0f32 - d) } else { 1.0f32 };
                                     }
+
                                     line.push('\t');
                                     line.push_str(fmt.format_finite(d));
                                 }
@@ -1017,7 +1061,7 @@ fn write_matrix_streaming_gpu_multi<T: SketchElem>(
                         let send_start = Instant::now();
                         for ii in 0..bw {
                             let i = i0 + ii;
-                            let mut s = std::mem::take(&mut lines[ii]); // move String out, leaves empty
+                            let mut s = std::mem::take(&mut lines[ii]); // move String out
                             s.push('\n');
                             tx.send((i, s)).expect("send row to writer");
                         }
@@ -1035,6 +1079,7 @@ fn write_matrix_streaming_gpu_multi<T: SketchElem>(
 
                     Ok(())
                 };
+
                 if let Err(e) = inner() {
                     panic!("multi-GPU streaming worker on device {dev_id} failed: {e:?}");
                 }
@@ -1095,6 +1140,7 @@ fn write_matrix_streaming_gpu_auto<T: SketchElem>(
         )
     }
 }
+
 
 pub fn pairwise_hamming_multi_gpu_u16(
     sketches: &[u16],
