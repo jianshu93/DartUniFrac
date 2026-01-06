@@ -5,6 +5,7 @@
 use anyhow::{bail, Context, Result};
 use cudarc::driver::{CudaContext, CudaSlice, DeviceRepr, LaunchConfig};
 use cudarc::nvrtc::compile_ptx;
+use cudarc::driver::PushKernelArg;
 use log::{debug, info, warn};
 use std::collections::BTreeMap;
 use std::io::Write;
