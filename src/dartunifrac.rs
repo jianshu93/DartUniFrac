@@ -2419,15 +2419,14 @@ fn main() -> Result<()> {
                     .long("tile-cols")
                     .help("Number of columns per GPU tile in gpu-streaming mode")
                     .value_parser(clap::value_parser!(usize))
-                    .default_value("2048"),
+                    .default_value("1024"),
             )
             .arg(
                 Arg::new("tile-rows")
                     .long("tile-rows")
                     .help("Number of rows per GPU tile in gpu-streaming mode")
                     .value_parser(clap::value_parser!(usize))
-                    // 1028 rows: safe for 256G RAM, easy to bump up
-                    .default_value("2048"),
+                    .default_value("1024"),
             );
     }
 
