@@ -46,7 +46,7 @@ if [ "x${NV_URL}" == "x" ]; then
       NV_ARCH=aarch64
     fi
   fi
-  NV_URL=https://developer.download.nvidia.com/hpc-sdk/25.11/nvhpc_2025_2511_Linux_${NV_ARCH}_cuda_multi.tar.gz
+  NV_URL=https://developer.download.nvidia.com/hpc-sdk/25.1/nvhpc_2025_251_Linux_${NV_ARCH}_cuda_multi.tar.gz
 fi
 
 echo "Downloading the NVIDIA HPC SDK"
