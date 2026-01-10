@@ -216,6 +216,9 @@ rustup default nightly
 ### CUDA Toolkit
 We provide Nvidia GPU support via CUDA Toolkit (CUDA v12.9.1 or later must be installed and in system library path, see how to install [here](https://developer.nvidia.com/cuda-downloads?target_os=Linux&target_arch=x86_64)) on Linux (x86-64 tested). It will fall back to CPU if no GPU device is detected. Only the Hamming distance computation step benefits from GPU. It is optimized for Nvidia A100 but also works for RTX series. You need to compile from source. 
 ```bash
+### check driver version, cuda 12.6 or before or 13.0 or later were not tested.
+nvidia-smi --version
+### clone
 git clone --branch DartUniFrac-GPU https://github.com/jianshu93/DartUniFrac.git
 cd DartUniFrac
 cargo build --release --features intel-mkl-static,stdsimd,cuda
