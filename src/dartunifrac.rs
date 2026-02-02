@@ -173,9 +173,68 @@ fn collect_children<N: NndOne>(
 }
 
 // for recording per-worker accumulators
-struct WorkerAccum {
-    acc: Vec<f32>,
+struct WorkerSeen {
+    stamp: Vec<u32>,
+    cur: u32,
     touched: Vec<usize>,
+}
+
+impl WorkerSeen {
+    fn new(n: usize) -> Self {
+        Self { stamp: vec![0u32; n], cur: 1, touched: Vec::new() }
+    }
+    #[inline]
+    fn next_sample(&mut self) {
+        self.cur = self.cur.wrapping_add(1);
+        if self.cur == 0 {
+            // wrapped: clear stamp
+            self.stamp.fill(0);
+            self.cur = 1;
+        }
+        self.touched.clear();
+    }
+    #[inline]
+    fn mark_seen(&mut self, v: usize) -> bool {
+        // returns true if v was newly seen in this sample
+        if self.stamp[v] == self.cur {
+            false
+        } else {
+            self.stamp[v] = self.cur;
+            self.touched.push(v);
+            true
+        }
+    }
+}
+
+struct WorkerAcc {
+    stamp: Vec<u32>,
+    acc: Vec<f32>,
+    cur: u32,
+    touched: Vec<usize>,
+}
+
+impl WorkerAcc {
+    fn new(n: usize) -> Self {
+        Self { stamp: vec![0u32; n], acc: vec![0f32; n], cur: 1, touched: Vec::new() }
+    }
+    #[inline]
+    fn next_sample(&mut self) {
+        self.cur = self.cur.wrapping_add(1);
+        if self.cur == 0 {
+            self.stamp.fill(0);
+            self.cur = 1;
+        }
+        self.touched.clear();
+    }
+    #[inline]
+    fn add(&mut self, v: usize, inc: f32) {
+        if self.stamp[v] != self.cur {
+            self.stamp[v] = self.cur;
+            self.acc[v] = 0.0;
+            self.touched.push(v);
+        }
+        self.acc[v] += inc;
+    }
 }
 
 /// Simple Newick-based parent + branch-length extractor.
@@ -271,22 +330,11 @@ fn build_sketches_simple(
             .par_iter_mut()
             .enumerate()
             .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize],
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
-                    // Reset only touched nodes
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
+                || WorkerSeen::new(total_usize),
+                |st, (s, out)| {
                     out.clear();
+                    st.next_sample();
 
-                    let seen = &mut state.acc;
-                    let touched = &mut state.touched;
-
-                    // scan taxa rows for this sample
                     for (r, lopt) in row2leaf.iter().enumerate() {
                         if mat[r][s] <= 0.0 {
                             continue;
@@ -297,24 +345,18 @@ fn build_sketches_simple(
                         };
                         let mut v = leaf_ids_ref[lp];
 
-                        // walk to root until we hit an already-seen node
                         loop {
-                            if seen[v] != 0.0 {
-                                break;
+                            if !st.mark_seen(v) {
+                                break; // already visited this node for this sample
                             }
-                            seen[v] = 1.0;
-                            touched.push(v);
-
                             let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
+                            if p == usize::MAX { break; }
                             v = p;
                         }
                     }
 
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
+                    out.reserve(st.touched.len());
+                    for &v in st.touched.iter() {
                         let lw = lens_ref[v];
                         if lw > 0.0 {
                             out.push((v as u64, lw));
@@ -356,22 +398,11 @@ fn build_sketches_simple(
             .par_iter_mut()
             .enumerate()
             .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize],
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
-                    // Reset only touched nodes
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
+                || WorkerSeen::new(total_usize),
+                |st, (s, out)| {
                     out.clear();
+                    st.next_sample();
 
-                    let seen = &mut state.acc;
-                    let touched = &mut state.touched;
-
-                    // iterate only the nonzeros in column s
                     for kk in colptr[s]..colptr[s + 1] {
                         let r = rowind[kk];
                         let lp = match row2leaf[r] {
@@ -381,22 +412,17 @@ fn build_sketches_simple(
                         let mut v = leaf_ids_ref[lp];
 
                         loop {
-                            if seen[v] != 0.0 {
+                            if !st.mark_seen(v) {
                                 break;
                             }
-                            seen[v] = 1.0;
-                            touched.push(v);
-
                             let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
+                            if p == usize::MAX { break; }
                             v = p;
                         }
                     }
 
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
+                    out.reserve(st.touched.len());
+                    for &v in st.touched.iter() {
                         let lw = lens_ref[v];
                         if lw > 0.0 {
                             out.push((v as u64, lw));
@@ -563,26 +589,19 @@ fn build_sketches_weighted_simple(
             .par_iter_mut()
             .enumerate()
             .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize],
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
+                || WorkerAcc::new(total_usize),
+                |st, (s, out)| {
+                    out.clear();
+
                     let denom = col_sums[s];
                     if denom == 0.0 {
+                        st.next_sample(); // advance stamp anyway (keeps logic simple)
                         return;
                     }
 
-                    // reset only touched entries
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
-                    out.clear();
+                    st.next_sample();
 
-                    let acc = &mut state.acc;
-                    let touched = &mut state.touched;
-
+                    // scatter from leaves, climb to root
                     for (r, lopt) in row2leaf.iter().enumerate() {
                         let lp = match lopt {
                             Some(v) => *v,
@@ -599,21 +618,16 @@ fn build_sketches_weighted_simple(
 
                         let mut v = leaf_ids_ref[lp];
                         loop {
-                            if acc[v] == 0.0 {
-                                touched.push(v);
-                            }
-                            acc[v] += inc;
+                            st.add(v, inc);
                             let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
+                            if p == usize::MAX { break; }
                             v = p;
                         }
                     }
 
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
-                        let a = acc[v] as f64;
+                    out.reserve(st.touched.len());
+                    for &v in st.touched.iter() {
+                        let a = st.acc[v] as f64;
                         if a > 0.0 {
                             let lw = lens_ref[v];
                             if lw > 0.0 {
@@ -665,57 +679,42 @@ fn build_sketches_weighted_simple(
             .par_iter_mut()
             .enumerate()
             .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize],
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
+                || WorkerAcc::new(total_usize),
+                |st, (s, out)| {
+                    out.clear();
+
                     let denom = col_sums[s];
                     if denom == 0.0 {
-                        // nothing for this sample
+                        st.next_sample();
                         return;
                     }
 
-                    // Reset only previously-touched entries in this worker's acc buffer.
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
-                    out.clear();
+                    st.next_sample();
 
-                    let acc = &mut state.acc;
-                    let touched = &mut state.touched;
-
-                    // iterate only nnz in column s
                     for kk in colptr[s]..colptr[s + 1] {
                         let r = rowind[kk];
                         let lp = match row2leaf[r] {
                             Some(v) => v,
                             None => continue,
                         };
-                        let mut v = leaf_ids_ref[lp];
 
                         let inc = (vals[kk] / denom) as f32;
                         if inc == 0.0 {
                             continue;
                         }
 
+                        let mut v = leaf_ids_ref[lp];
                         loop {
-                            if acc[v] == 0.0 {
-                                touched.push(v);
-                            }
-                            acc[v] += inc;
+                            st.add(v, inc);
                             let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
+                            if p == usize::MAX { break; }
                             v = p;
                         }
                     }
 
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
-                        let a = acc[v] as f64;
+                    out.reserve(st.touched.len());
+                    for &v in st.touched.iter() {
+                        let a = st.acc[v] as f64;
                         if a > 0.0 {
                             let lw = lens_ref[v];
                             if lw > 0.0 {
@@ -1453,20 +1452,10 @@ fn build_sketches(
             .par_iter_mut()
             .enumerate()
             .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize], // used as seen[ ]: 0.0/1.0
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
-                    // reset only touched entries
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
+                || WorkerSeen::new(total_usize),
+                |st, (s, out)| {
                     out.clear();
-
-                    let seen = &mut state.acc;
-                    let touched = &mut state.touched;
+                    st.next_sample();
 
                     for (r, lopt) in row2leaf.iter().enumerate() {
                         if mat[r][s] <= 0.0 {
@@ -1479,22 +1468,17 @@ fn build_sketches(
                         let mut v = leaf_ids_ref[lp];
 
                         loop {
-                            if seen[v] != 0.0 {
-                                break;
+                            if !st.mark_seen(v) {
+                                break; // already visited this node for this sample
                             }
-                            seen[v] = 1.0;
-                            touched.push(v);
-
                             let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
+                            if p == usize::MAX { break; }
                             v = p;
                         }
                     }
 
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
+                    out.reserve(st.touched.len());
+                    for &v in st.touched.iter() {
                         let lw = lens_ref[v];
                         if lw > 0.0 {
                             out.push((v as u64, lw));
@@ -1532,19 +1516,10 @@ fn build_sketches(
             .par_iter_mut()
             .enumerate()
             .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize], // used as seen[ ]: 0.0/1.0
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
+                || WorkerSeen::new(total_usize),
+                |st, (s, out)| {
                     out.clear();
-
-                    let seen = &mut state.acc;
-                    let touched = &mut state.touched;
+                    st.next_sample();
 
                     for kk in colptr[s]..colptr[s + 1] {
                         let r = rowind[kk];
@@ -1555,22 +1530,17 @@ fn build_sketches(
                         let mut v = leaf_ids_ref[lp];
 
                         loop {
-                            if seen[v] != 0.0 {
+                            if !st.mark_seen(v) {
                                 break;
                             }
-                            seen[v] = 1.0;
-                            touched.push(v);
-
                             let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
+                            if p == usize::MAX { break; }
                             v = p;
                         }
                     }
 
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
+                    out.reserve(st.touched.len());
+                    for &v in st.touched.iter() {
                         let lw = lens_ref[v];
                         if lw > 0.0 {
                             out.push((v as u64, lw));
@@ -1788,26 +1758,19 @@ fn build_sketches_weighted(
             .par_iter_mut()
             .enumerate()
             .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize],
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
+                || WorkerAcc::new(total_usize),
+                |st, (s, out)| {
+                    out.clear();
+
                     let denom = col_sums[s];
                     if denom == 0.0 {
+                        st.next_sample(); // advance stamp anyway (keeps logic simple)
                         return;
                     }
 
-                    // reset only touched entries
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
-                    out.clear();
+                    st.next_sample();
 
-                    let acc = &mut state.acc;
-                    let touched = &mut state.touched;
-
+                    // scatter from leaves, climb to root
                     for (r, lopt) in row2leaf.iter().enumerate() {
                         let lp = match lopt {
                             Some(v) => *v,
@@ -1817,7 +1780,6 @@ fn build_sketches_weighted(
                         if val <= 0.0 {
                             continue;
                         }
-
                         let inc = (val / denom) as f32;
                         if inc == 0.0 {
                             continue;
@@ -1825,22 +1787,16 @@ fn build_sketches_weighted(
 
                         let mut v = leaf_ids_ref[lp];
                         loop {
-                            if acc[v] == 0.0 {
-                                touched.push(v);
-                            }
-                            acc[v] += inc;
-
+                            st.add(v, inc);
                             let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
+                            if p == usize::MAX { break; }
                             v = p;
                         }
                     }
 
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
-                        let a = acc[v] as f64;
+                    out.reserve(st.touched.len());
+                    for &v in st.touched.iter() {
+                        let a = st.acc[v] as f64;
                         if a > 0.0 {
                             let lw = lens_ref[v];
                             if lw > 0.0 {
@@ -1890,24 +1846,17 @@ fn build_sketches_weighted(
             .par_iter_mut()
             .enumerate()
             .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize],
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
+                || WorkerAcc::new(total_usize),
+                |st, (s, out)| {
+                    out.clear();
+
                     let denom = col_sums[s];
                     if denom == 0.0 {
+                        st.next_sample();
                         return;
                     }
 
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
-                    out.clear();
-
-                    let acc = &mut state.acc;
-                    let touched = &mut state.touched;
+                    st.next_sample();
 
                     for kk in colptr[s]..colptr[s + 1] {
                         let r = rowind[kk];
@@ -1923,22 +1872,16 @@ fn build_sketches_weighted(
 
                         let mut v = leaf_ids_ref[lp];
                         loop {
-                            if acc[v] == 0.0 {
-                                touched.push(v);
-                            }
-                            acc[v] += inc;
-
+                            st.add(v, inc);
                             let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
+                            if p == usize::MAX { break; }
                             v = p;
                         }
                     }
 
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
-                        let a = acc[v] as f64;
+                    out.reserve(st.touched.len());
+                    for &v in st.touched.iter() {
+                        let a = st.acc[v] as f64;
                         if a > 0.0 {
                             let lw = lens_ref[v];
                             if lw > 0.0 {
