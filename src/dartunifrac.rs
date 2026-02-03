@@ -174,12 +174,8 @@ struct WorkerAccum {
     touched: Vec<usize>,
 }
 
-/// Simple Newick-based parent + branch-length extractor.
-///
-/// - `parent[v]` = parent node id of v, or usize::MAX if v is root.
-/// - `lens[v]`   = branch length from parent[v] to v (0.0 for root if absent).
 fn build_parent_and_lens_simple(t: &NwkTree) -> (Vec<usize>, Vec<f64>) {
-    // find max node id so we can size vectors
+    // find max node id so we can size vectors (NodeID is indexable)
     let mut max_id = 0usize;
     for v in t.nodes() {
         if v > max_id {
@@ -188,18 +184,46 @@ fn build_parent_and_lens_simple(t: &NwkTree) -> (Vec<usize>, Vec<f64>) {
     }
     let total = max_id + 1;
 
-    let mut parent = vec![usize::MAX; total];
+    // lengths: store branch length on the child node id (edge parent->child)
     let mut lens = vec![0.0f64; total];
-
     for v in t.nodes() {
         lens[v] = t[v].branch().copied().unwrap_or(0.0) as f64;
+    }
+
+    // parents: compute by rooted traversal to avoid parent-overwrite / undirected adjacency issues
+    let mut parent = vec![usize::MAX; total];
+    let mut visited = vec![false; total];
+
+    let root = t.root();
+    visited[root] = true;
+    parent[root] = usize::MAX;
+
+    let mut stack = vec![root];
+    while let Some(v) = stack.pop() {
         for &c in t[v].children() {
+            // If the underlying representation ever includes back-edges or shared adjacency,
+            // this prevents assigning the wrong direction / overwriting an existing parent.
+            if visited[c] {
+                continue;
+            }
+            visited[c] = true;
             parent[c] = v;
+            stack.push(c);
         }
     }
+
+    // sanity check: everything reachable from root should be visited.
+    // If this trips, the tree is disconnected or `children()` isn't the right neighbor API.
+    debug_assert!(
+        t.nodes().all(|v| visited[v]),
+        "Tree traversal did not visit all nodes from root; parent pointers would be incomplete."
+    );
+
+    // Root has no incoming edge in UniFrac; prevent accidental inclusion if root has a branch length
+    // lens[root] = 0.0;
+
     (parent, lens)
 }
-
 // TSV unweighted
 fn read_table(p: &str) -> Result<(Vec<String>, Vec<String>, Vec<Vec<f64>>)> {
     let f = File::open(p)?;
