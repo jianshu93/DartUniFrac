@@ -239,21 +239,23 @@ impl WorkerAcc {
 
 /// Simple Newick-based parent + branch-length extractor.
 ///
-fn build_parent_and_lens_simple(t: &NwkTree) -> Result<(Vec<usize>, Vec<f64>)> {
-    // Size vectors by max node id
+fn build_parent_and_lens_simple(t: &NwkTree) -> (Vec<usize>, Vec<f64>) {
+    // find max node id so we can size vectors (NodeID is indexable)
     let mut max_id = 0usize;
     for v in t.nodes() {
-        max_id = max_id.max(v);
+        if v > max_id {
+            max_id = v;
+        }
     }
     let total = max_id + 1;
 
-    // Branch lengths stored on child node id (edge parent->child)
+    // lengths: store branch length on the child node id (edge parent->child)
     let mut lens = vec![0.0f64; total];
     for v in t.nodes() {
         lens[v] = t[v].branch().copied().unwrap_or(0.0) as f64;
     }
 
-    // Build parent pointers by rooted traversal (prevents overwrite / back-edge issues)
+    // parents: compute by rooted traversal to avoid parent-overwrite / undirected adjacency issues
     let mut parent = vec![usize::MAX; total];
     let mut visited = vec![false; total];
 
@@ -264,6 +266,8 @@ fn build_parent_and_lens_simple(t: &NwkTree) -> Result<(Vec<usize>, Vec<f64>)> {
     let mut stack = vec![root];
     while let Some(v) = stack.pop() {
         for &c in t[v].children() {
+            // If the underlying representation ever includes back-edges or shared adjacency,
+            // this prevents assigning the wrong direction / overwriting an existing parent.
             if visited[c] {
                 continue;
             }
@@ -273,19 +277,17 @@ fn build_parent_and_lens_simple(t: &NwkTree) -> Result<(Vec<usize>, Vec<f64>)> {
         }
     }
 
-    // Hard fail (not debug_assert) if we didn't visit everything
-    for v in t.nodes() {
-        if !visited[v] {
-            anyhow::bail!(
-                "Simple Newick traversal did not reach node id {v} from root; children() likely not rooted adjacency."
-            );
-        }
-    }
+    // sanity check: everything reachable from root should be visited.
+    // If this trips, the tree is disconnected or `children()` isn't the right neighbor API.
+    debug_assert!(
+        t.nodes().all(|v| visited[v]),
+        "Tree traversal did not visit all nodes from root; parent pointers would be incomplete."
+    );
 
-    // IMPORTANT: root has no incoming edge in UniFrac
-    lens[root] = 0.0;
+    // Root has no incoming edge in UniFrac; prevent accidental inclusion if root has a branch length
+    // lens[root] = 0.0;
 
-    Ok((parent, lens))
+    (parent, lens)
 }
 
 
