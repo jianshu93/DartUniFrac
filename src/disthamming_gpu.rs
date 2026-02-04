@@ -75,7 +75,9 @@ const KERNEL_SRC: &str = r#"
 #define ELEM_T unsigned long long
 #endif
 
+// ------------------------------------
 // Generic kernel: ELEM_T compare
+// ------------------------------------
 extern "C" __global__
 void hamming_tile(
     const ELEM_T* __restrict__ sketches, // [n*k], row-major
@@ -103,10 +105,12 @@ void hamming_tile(
     for (int t0 = 0; t0 < k; t0 += BK) {
         const int bk = min(BK, k - t0);
 
+        // Load A slab: blockDim.y rows × bk cols
         const int totalA = blockDim.y * bk;
         for (int idx = tid; idx < totalA; idx += tpb) {
-            const int r   = idx / bk;
-            const int t   = idx - r*bk;
+            const int r = idx / bk;
+            const int t = idx - r*bk;
+
             const int tile_row_base = i0 + (int)blockIdx.y * (int)blockDim.y;
             const int gi = tile_row_base + r;
 
@@ -117,10 +121,12 @@ void hamming_tile(
             As[(size_t)r * (size_t)STRIDE + (size_t)t] = val;
         }
 
+        // Load B slab: blockDim.x cols × bk rows
         const int totalB = blockDim.x * bk;
         for (int idx = tid; idx < totalB; idx += tpb) {
-            const int c   = idx / bk;
-            const int t   = idx - c*bk;
+            const int c = idx / bk;
+            const int t = idx - c*bk;
+
             const int tile_col_base = j0 + (int)blockIdx.x * (int)blockDim.x;
             const int gj = tile_col_base + c;
 
@@ -156,7 +162,9 @@ void hamming_tile(
     }
 }
 
+// ------------------------------------
 // u16-packed kernel helpers
+// ------------------------------------
 __device__ __forceinline__ unsigned long long pack_u16x4(const unsigned short* p) {
     // Safe w.r.t. alignment: four 16-bit loads (aligned to 2).
     return  (unsigned long long)p[0]
@@ -174,10 +182,10 @@ __device__ __forceinline__ unsigned mismatch_u16x4_from_xor(unsigned long long x
     return 4u - zeros;              // mismatching lanes
 }
 
-// ------------------------
-// Optimized u16 kernel: packs 4×u16 => u64, compares packed words, counts mismatches per lane.
+// ------------------------------------
+// Optimized u16 kernel: packs 4×u16 => u64
 // Shared memory is u64 to avoid u16 bank-conflict pathologies.
-// ------------------------
+// ------------------------------------
 #ifndef BK16
 #define BK16 64  // number of packed u64 words per slab
 #endif
@@ -223,28 +231,31 @@ void hamming_tile_u16_packed(
         for (int idx = tid; idx < totalA; idx += tpb) {
             const int r  = idx / bk;
             const int t  = idx - r*bk;
+
             const int tile_row_base = i0 + (int)blockIdx.y * (int)blockDim.y;
             const int gi = tile_row_base + r;
 
             unsigned long long v = 0ULL;
             if ((gi >= i0) && (gi < i0 + bw) && gi < n) {
-                const int off = ((t0 + t) << 2);
+                const int off = ((t0 + t) << 2); // *4 u16
                 const unsigned short* base = sketches + (size_t)gi*(size_t)k + (size_t)off;
                 v = pack_u16x4(base);
             }
             As[(size_t)r*(size_t)STRIDE16 + (size_t)t] = v;
+        } // <-- IMPORTANT: close A-load loop
 
         // Load B slab: (blockDim.x × bk) packed u64 words
         const int totalB = blockDim.x * bk;
         for (int idx = tid; idx < totalB; idx += tpb) {
             const int c  = idx / bk;
             const int t  = idx - c*bk;
+
             const int tile_col_base = j0 + (int)blockIdx.x * (int)blockDim.x;
             const int gj = tile_col_base + c;
 
             unsigned long long v = 0ULL;
             if ((gj >= j0) && (gj < j0 + bh) && gj < n) {
-                const int off = ((t0 + t) << 2);
+                const int off = ((t0 + t) << 2); // *4 u16
                 const unsigned short* base = sketches + (size_t)gj*(size_t)k + (size_t)off;
                 v = pack_u16x4(base);
             }
