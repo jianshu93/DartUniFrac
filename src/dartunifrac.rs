@@ -239,31 +239,55 @@ impl WorkerAcc {
 
 /// Simple Newick-based parent + branch-length extractor.
 ///
-/// - `parent[v]` = parent node id of v, or usize::MAX if v is root.
-/// - `lens[v]`   = branch length from parent[v] to v (0.0 for root if absent).
-fn build_parent_and_lens_simple(t: &NwkTree) -> (Vec<usize>, Vec<f64>) {
-    // First pass: find max node id so we can size the vectors
+fn build_parent_and_lens_simple(t: &NwkTree) -> Result<(Vec<usize>, Vec<f64>)> {
+    // Size vectors by max node id
     let mut max_id = 0usize;
     for v in t.nodes() {
-        if v > max_id {
-            max_id = v;
-        }
+        max_id = max_id.max(v);
     }
     let total = max_id + 1;
 
-    let mut parent = vec![usize::MAX; total];
+    // Branch lengths stored on child node id (edge parent->child)
     let mut lens = vec![0.0f64; total];
-
-    // Second pass: fill parent + branch length
     for v in t.nodes() {
         lens[v] = t[v].branch().copied().unwrap_or(0.0) as f64;
+    }
+
+    // Build parent pointers by rooted traversal (prevents overwrite / back-edge issues)
+    let mut parent = vec![usize::MAX; total];
+    let mut visited = vec![false; total];
+
+    let root = t.root();
+    visited[root] = true;
+    parent[root] = usize::MAX;
+
+    let mut stack = vec![root];
+    while let Some(v) = stack.pop() {
         for &c in t[v].children() {
+            if visited[c] {
+                continue;
+            }
+            visited[c] = true;
             parent[c] = v;
+            stack.push(c);
         }
     }
 
-    (parent, lens)
+    // Hard fail (not debug_assert) if we didn't visit everything
+    for v in t.nodes() {
+        if !visited[v] {
+            anyhow::bail!(
+                "Simple Newick traversal did not reach node id {v} from root; children() likely not rooted adjacency."
+            );
+        }
+    }
+
+    // IMPORTANT: root has no incoming edge in UniFrac
+    lens[root] = 0.0;
+
+    Ok((parent, lens))
 }
+
 
 // Unweighted, build sketches using simple Newick tree parsing (no succparen)
 fn build_sketches_simple(
