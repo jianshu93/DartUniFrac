@@ -75,9 +75,7 @@ const KERNEL_SRC: &str = r#"
 #define ELEM_T unsigned long long
 #endif
 
-// ------------------------------------
 // Generic kernel: ELEM_T compare
-// ------------------------------------
 extern "C" __global__
 void hamming_tile(
     const ELEM_T* __restrict__ sketches, // [n*k], row-major
@@ -162,9 +160,7 @@ void hamming_tile(
     }
 }
 
-// ------------------------------------
 // u16-packed kernel helpers
-// ------------------------------------
 __device__ __forceinline__ unsigned long long pack_u16x4(const unsigned short* p) {
     // Safe w.r.t. alignment: four 16-bit loads (aligned to 2).
     return  (unsigned long long)p[0]
@@ -182,10 +178,8 @@ __device__ __forceinline__ unsigned mismatch_u16x4_from_xor(unsigned long long x
     return 4u - zeros;              // mismatching lanes
 }
 
-// ------------------------------------
 // Optimized u16 kernel: packs 4×u16 => u64
 // Shared memory is u64 to avoid u16 bank-conflict pathologies.
-// ------------------------------------
 #ifndef BK16
 #define BK16 64  // number of packed u64 words per slab
 #endif
