@@ -112,8 +112,8 @@ We first created a few libraries for the best performance of DartUniFrac impleme
 ## Install
 ### Pre-compiled on Linux (x86-64)
 ```bash
-wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.9/dartunifrac_Linux_x86-64_v0.2.9.zip
-unzip dartunifrac_Linux_x86-64_v0.2.9.zip
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.3.0/dartunifrac_Linux_x86-64_v0.3.0.zip
+unzip dartunifrac_Linux_x86-64_v0.3.0.zip
 chmod a+x ./dartunifrac
 ./dartunifrac -h
 ```
@@ -197,8 +197,8 @@ dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048
 ### Pre-built binary
 
 ```bash
-wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.9/dartunifrac-cuda_Linux_x86-64_v0.2.9.zip
-unzip dartunifrac-cuda_Linux_x86-64_v0.2.9.zip
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.3.0/dartunifrac-cuda_Linux_x86-64_v0.3.0.zip
+unzip dartunifrac-cuda_Linux_x86-64_v0.3.0.zip
 chmod a+x ./dartunifrac-cuda
 ./dartunifrac-cuda -h
 
