@@ -107,9 +107,11 @@ void hamming_tile(
         for (int idx = tid; idx < totalA; idx += tpb) {
             const int r   = idx / bk;
             const int t   = idx - r*bk;
-            const int gi  = i0 + r;
+            const int tile_row_base = i0 + (int)blockIdx.y * (int)blockDim.y;
+            const int gi = tile_row_base + r;
+
             ELEM_T val = (ELEM_T)0;
-            if (r < bw && (t0 + t) < k && gi < n) {
+            if ((gi >= i0) && (gi < i0 + bw) && (t0 + t) < k && gi < n) {
                 val = sketches[(size_t)gi * (size_t)k + (size_t)(t0 + t)];
             }
             As[(size_t)r * (size_t)STRIDE + (size_t)t] = val;
@@ -119,9 +121,11 @@ void hamming_tile(
         for (int idx = tid; idx < totalB; idx += tpb) {
             const int c   = idx / bk;
             const int t   = idx - c*bk;
-            const int gj  = j0 + c;
+            const int tile_col_base = j0 + (int)blockIdx.x * (int)blockDim.x;
+            const int gj = tile_col_base + c;
+
             ELEM_T val = (ELEM_T)0;
-            if (c < bh && (t0 + t) < k && gj < n) {
+            if ((gj >= j0) && (gj < j0 + bh) && (t0 + t) < k && gj < n) {
                 val = sketches[(size_t)gj * (size_t)k + (size_t)(t0 + t)];
             }
             Bs[(size_t)c * (size_t)STRIDE + (size_t)t] = val;
@@ -219,26 +223,27 @@ void hamming_tile_u16_packed(
         for (int idx = tid; idx < totalA; idx += tpb) {
             const int r  = idx / bk;
             const int t  = idx - r*bk;
-            const int gi = i0 + r;
+            const int tile_row_base = i0 + (int)blockIdx.y * (int)blockDim.y;
+            const int gi = tile_row_base + r;
 
             unsigned long long v = 0ULL;
-            if (r < bw && gi < n) {
-                const int off = ((t0 + t) << 2); // *4 u16
+            if ((gi >= i0) && (gi < i0 + bw) && gi < n) {
+                const int off = ((t0 + t) << 2);
                 const unsigned short* base = sketches + (size_t)gi*(size_t)k + (size_t)off;
                 v = pack_u16x4(base);
             }
             As[(size_t)r*(size_t)STRIDE16 + (size_t)t] = v;
-        }
 
         // Load B slab: (blockDim.x × bk) packed u64 words
         const int totalB = blockDim.x * bk;
         for (int idx = tid; idx < totalB; idx += tpb) {
             const int c  = idx / bk;
             const int t  = idx - c*bk;
-            const int gj = j0 + c;
+            const int tile_col_base = j0 + (int)blockIdx.x * (int)blockDim.x;
+            const int gj = tile_col_base + c;
 
             unsigned long long v = 0ULL;
-            if (c < bh && gj < n) {
+            if ((gj >= j0) && (gj < j0 + bh) && gj < n) {
                 const int off = ((t0 + t) << 2);
                 const unsigned short* base = sketches + (size_t)gj*(size_t)k + (size_t)off;
                 v = pack_u16x4(base);
