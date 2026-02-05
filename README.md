@@ -20,14 +20,14 @@ On Linux or MacOS (CPU)
 conda install -c bioconda -c conda-forge dartunifrac
 ```
 
-Linux only (GPU), NVIDIA driver version >12.6 or later. 
+Linux only (GPU), NVIDIA driver version >=12.6 or later. 
 
 ```bash
 conda install -c bioconda -c conda-forge dartunifrac-gpu
 
 ```
 
-Or if you have older driver (before 12.3), you can use the pre-built binary on Linux
+Or if you have older driver (before 12.4), you can use the pre-built binary on Linux
 
 ```bash
 wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.3.0/dartunifrac-cuda_Linux_x86-64_v0.3.0.zip
