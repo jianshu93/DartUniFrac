@@ -14,17 +14,39 @@
 This crate provides an efficient implementation of the newly invented ***DartUniFrac*** algorithm for large-scale [UniFrac](https://en.wikipedia.org/wiki/UniFrac) computation (weighted and unweighted). We named this new algorithm DartUniFrac because the key step is to use [DartMinHash](https://arxiv.org/abs/2005.11547) or Efficient Rejection Sampling (or [ERS](https://ojs.aaai.org/index.php/AAAI/article/view/16543)) on branches and the DartMinHash/ERS algorithm is about "Among the first r darts thrown, return those hitting $x_i$". B-bits idea from [B-bits MinHash](https://dl.acm.org/doi/abs/10.1145/1772690.1772759) can be used to reduce DartMinHash sketch space and accelerate computation. 
 
 
-## Quick install and usage
+## Quick install and usage 
 On Linux or MacOS (CPU)
 ```bash
 conda install -c bioconda -c conda-forge dartunifrac
 ```
-Linux only (GPU)
+
+Linux only (GPU), NVIDIA driver version >12.6 or later. 
+
 ```bash
 conda install -c bioconda -c conda-forge dartunifrac-gpu
+
 ```
 
+Or if you have older driver (before 12.3), you can use the pre-built binary on Linux
 
+```bash
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.3.0/dartunifrac-cuda_Linux_x86-64_v0.3.0.zip
+unzip dartunifrac-cuda_Linux_x86-64_v0.3.0.zip
+chmod a+x ./dartunifrac-cuda
+./dartunifrac-cuda -h
+
+```
+
+You can check you NVIDIA GPU driver version like this:
+```bash
+nvcc --version
+
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2023 NVIDIA Corporation
+Built on Fri_Sep__8_19:17:24_PDT_2023
+Cuda compilation tools, release 12.3, V12.3.52
+Build cuda_12.3.r12.3/compiler.33281558_0
+```
 
 Run on example data
 ```bash
