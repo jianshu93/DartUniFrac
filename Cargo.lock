@@ -81,8 +81,8 @@ dependencies = [
 
 [[package]]
 name = "anndists"
-version = "0.1.3"
-source = "git+https://github.com/jean-pierreBoth/anndists#2a54a9a106192f239a6b615ee35f33613f9cdd07"
+version = "0.1.4"
+source = "git+https://github.com/jianshu93/anndists#fcc7337c918b9eae4206b15de6b7102a2fd0f1d6"
 dependencies = [
  "anyhow",
  "cfg-if",
@@ -641,9 +641,9 @@ dependencies = [
 
 [[package]]
 name = "dartunifrac"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
- "anndists 0.1.3 (git+https://github.com/jean-pierreBoth/anndists)",
+ "anndists 0.1.4",
  "anyhow",
  "bitvec",
  "clap",
@@ -1115,7 +1115,7 @@ version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22884c1debedfe585612f1f6da7bfe257f557639143cac270a8ac2f8702de750"
 dependencies = [
- "anndists 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "anndists 0.1.3",
  "anyhow",
  "bincode 1.3.3",
  "cfg-if",
