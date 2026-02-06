@@ -155,6 +155,11 @@ git clone https://github.com/jianshu93/DartUniFrac.git
 cd DartUniFrac
 #### You must have CMake installed to compile HDF5 from source. This is for BIOM format input. You also need zstd installed and library files in system path for compression.
 ### Linux
+### install rustup here: https://rustup.rs
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup toolchain install nightly-2026-01-01
+rustup default nightly-2026-01-01
+
 cargo build --release --features intel-mkl-static,stdsimd
 ### macos
 cargo build --release --features macos-accelerate,stdsimd
