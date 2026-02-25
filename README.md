@@ -235,8 +235,8 @@ chmod a+x ./dartunifrac-cuda
 First, you need to install Rust here:
 ```bash
 ### Install rust first, see here: https://rustup.rs, after run it, run:
-rustup install nightly
-rustup default nightly
+rustup install nightly-2026-01-01
+rustup default nightly-2026-01-01
 
 ```
 
