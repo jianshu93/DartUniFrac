@@ -40,7 +40,7 @@ use succparen::{
 };
 
 #[cfg(feature = "stdsimd")]
-use core::simd::{LaneCount, Simd, SupportedLaneCount};
+use std::simd::{LaneCount, Simd, SupportedLaneCount};
 
 // Plain new-type – automatically `Copy`.
 #[derive(Clone, Copy)]
