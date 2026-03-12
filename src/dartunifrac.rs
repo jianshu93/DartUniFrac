@@ -48,7 +48,7 @@ use ndarray::{Array1, Array2};
 const UNIFRAC_CITATIONS: &str = r#"
 Citations:
   For DartUniFrac, please see:
-    Zhao et al. 2025; DOI:
+    Zhao, J., McDonald, D., Sfiligoi, I., Lladser, M.E., Patel, L., Weng, Y., Khatib, L., Degregori, S., Gonzalez, A., Lozupone, C. and Knight, R., 2026. Enabling Megascale Microbiome Analysis with DartUniFrac. bioRxiv, pp.2026-03. doi: https://doi.org/10.64898/2026.03.01.708916
 "#;
 
 type NwkTree = newick::NewickTree;
