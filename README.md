@@ -487,4 +487,4 @@ We want to thank [Tobias Christiani](https://www.linkedin.com/in/tobias-christia
 
 ## References
 
-Zhao, J., McDonald, D., Sfiligoi, I., Lladser, M.E., Patel, L., Weng, Y., Khatib, L., Degregori, S., Gonzalez, A., Lozupone, C. and Knight, R., 2026. Enabling Megascale Microbiome Analysis with DartUniFrac. bioRxiv, pp.2026-03.
+Zhao, J., McDonald, D., Sfiligoi, I., Lladser, M.E., Patel, L., Weng, Y., Khatib, L., Degregori, S., Gonzalez, A., Lozupone, C. and Knight, R., 2026. Enabling Megascale Microbiome Analysis with DartUniFrac. bioRxiv, pp.2026-03. doi: https://doi.org/10.64898/2026.03.01.708916
