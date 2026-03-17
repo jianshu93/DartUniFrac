@@ -15,11 +15,28 @@ This crate provides an efficient implementation of the newly invented ***DartUni
 
 
 ## Quick install and usage 
-On Linux or MacOS (CPU)
+### CPU
+On Linux or MacOS (CPU) via bioconda
 ```bash
 conda install -c bioconda -c conda-forge dartunifrac
 ```
+Pre-built binaries on Linux
+```bash
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.3.0/dartunifrac_Linux_x86-64_v0.3.0.zip
+unzip dartunifrac_Linux_x86-64_v0.3.0.zip
+chmod a+x ./dartunifrac
+./dartunifrac -h
+```
 
+macOS via Homebrew: 
+```bash
+## install homebrew first: https://brew.sh
+brew tap jianshu93/DartUniFrac
+brew install DartUniFrac
+dartunifrac -h
+```
+
+### GPU
 Linux only (GPU), NVIDIA driver version >=12.6 or later. 
 
 ```bash
