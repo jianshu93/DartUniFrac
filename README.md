@@ -65,7 +65,7 @@ Cuda compilation tools, release 12.3, V12.3.52
 Build cuda_12.3.r12.3/compiler.33281558_0
 ```
 
-Run on example data
+Run on example data (1,186 samples, ~100,000 taxa)
 ```bash
 wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/GWMC_16S_otutab.biom
 wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/GWMC_rep_seqs_all.tre
