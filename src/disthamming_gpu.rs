@@ -34,7 +34,8 @@ fn kernel_src_for(dtype: SketchDType) -> String {
 fn kernel_name_for(dtype: SketchDType) -> &'static str {
     match dtype {
         SketchDType::U16 => "hamming_tile_u16_packed",
-        SketchDType::U32 | SketchDType::U64 => "hamming_tile",
+        SketchDType::U32 => "hamming_tile_u32_packed",
+        SketchDType::U64 => "hamming_tile",
     }
 }
 
@@ -56,12 +57,15 @@ impl SketchElem for u64 {
 /// out: [bw*bh] row-major, leading dim = bh
 ///
 /// Notes:
-/// - `hamming_tile` is the generic kernel (ELEM_T = u32/u64; also works for u16 but is slow).
-/// - `hamming_tile_u16_packed` is optimized for u16 by packing 4×u16 into one u64 lane and
-///   counting mismatching u16 lanes via bit tricks + popcount.
-/// - For best performance, the u16-packed kernel uses shared memory as u64 to avoid u16 bank issues.
-///
+/// - `hamming_tile` is the generic kernel (used for u64; also works for u16/u32 but is slower).
+/// - `hamming_tile_u16_packed` packs 4×u16 into one u64 lane and counts mismatching u16 lanes
+///   via bit tricks + popcount.
+/// - `hamming_tile_u32_packed` packs 2×u32 into one u64 lane and counts mismatching u32 lanes
+///   via simple 32-bit half checks.
+/// - Packed kernels use shared memory as u64 to reduce bandwidth pressure and avoid narrow-type
+///   shared-memory patholog
 /// NOTE: distances are `float` (f32) here.
+
 const KERNEL_SRC: &str = r#"
 #ifndef BK
 #define BK 64   // for generic kernel: elements per slab
@@ -138,7 +142,6 @@ void hamming_tile(
         __syncthreads();
 
         if (ii < bw && jj < bh) {
-            // compute only if we will write something and not diagonal
             if (!(only_upper && j <= i) && (i != j)) {
                 const size_t arow = (size_t)threadIdx.y * (size_t)STRIDE;
                 const size_t brow = (size_t)threadIdx.x * (size_t)STRIDE;
@@ -160,9 +163,9 @@ void hamming_tile(
     }
 }
 
-// u16-packed kernel helpers
+// u16 packed helpers
+
 __device__ __forceinline__ unsigned long long pack_u16x4(const unsigned short* p) {
-    // Safe w.r.t. alignment: four 16-bit loads (aligned to 2).
     return  (unsigned long long)p[0]
          | ((unsigned long long)p[1] << 16)
          | ((unsigned long long)p[2] << 32)
@@ -170,16 +173,12 @@ __device__ __forceinline__ unsigned long long pack_u16x4(const unsigned short* p
 }
 
 __device__ __forceinline__ unsigned mismatch_u16x4_from_xor(unsigned long long x) {
-    // Mark zero bytes in x (classic "hasZeroByte" trick)
     unsigned long long m = (x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL;
-    // A 16-bit lane is zero if both bytes are zero -> AND the byte-high bits with shifted version
     unsigned long long w = (m & (m >> 8)) & 0x0080008000800080ULL;
-    unsigned zeros = __popcll(w);   // 0..4 zero 16-bit lanes (i.e., equal lanes)
-    return 4u - zeros;              // mismatching lanes
+    unsigned zeros = __popcll(w);
+    return 4u - zeros;
 }
 
-// Optimized u16 kernel: packs 4×u16 => u64
-// Shared memory is u64 to avoid u16 bank-conflict pathologies.
 #ifndef BK16
 #define BK16 64  // number of packed u64 words per slab
 #endif
@@ -195,7 +194,7 @@ void hamming_tile_u16_packed(
     int i0, int j0,
     int bw, int bh,
     float* __restrict__ out, // [bw*bh], row-major, ldo = bh
-    int only_upper // 1 => only write j>i, 0 => write full tile (including diagonal=0)
+    int only_upper
 ){
     const int jj = blockIdx.x * blockDim.x + threadIdx.x;
     const int ii = blockIdx.y * blockDim.y + threadIdx.y;
@@ -203,9 +202,8 @@ void hamming_tile_u16_packed(
     const int i = i0 + ii;
     const int j = j0 + jj;
 
-    // Number of packed u64 words
-    const int k4   = (k >> 2); // k/4
-    const int krem = (k & 3);  // remainder (0..3)
+    const int k4   = (k >> 2);
+    const int krem = (k & 3);
 
     extern __shared__ __align__(16) unsigned char smem_raw[];
     unsigned long long* As = reinterpret_cast<unsigned long long*>(smem_raw);
@@ -216,11 +214,9 @@ void hamming_tile_u16_packed(
     const int tpb = blockDim.x * blockDim.y;
     const int tid = threadIdx.y * blockDim.x + threadIdx.x;
 
-    // Packed slabs over k4
     for (int t0 = 0; t0 < k4; t0 += BK16) {
         const int bk = min(BK16, k4 - t0);
 
-        // Load A slab: (blockDim.y × bk) packed u64 words
         const int totalA = blockDim.y * bk;
         for (int idx = tid; idx < totalA; idx += tpb) {
             const int r  = idx / bk;
@@ -231,14 +227,13 @@ void hamming_tile_u16_packed(
 
             unsigned long long v = 0ULL;
             if ((gi >= i0) && (gi < i0 + bw) && gi < n) {
-                const int off = ((t0 + t) << 2); // *4 u16
+                const int off = ((t0 + t) << 2);
                 const unsigned short* base = sketches + (size_t)gi*(size_t)k + (size_t)off;
                 v = pack_u16x4(base);
             }
             As[(size_t)r*(size_t)STRIDE16 + (size_t)t] = v;
-        } // <-- IMPORTANT: close A-load loop
+        }
 
-        // Load B slab: (blockDim.x × bk) packed u64 words
         const int totalB = blockDim.x * bk;
         for (int idx = tid; idx < totalB; idx += tpb) {
             const int c  = idx / bk;
@@ -249,7 +244,7 @@ void hamming_tile_u16_packed(
 
             unsigned long long v = 0ULL;
             if ((gj >= j0) && (gj < j0 + bh) && gj < n) {
-                const int off = ((t0 + t) << 2); // *4 u16
+                const int off = ((t0 + t) << 2);
                 const unsigned short* base = sketches + (size_t)gj*(size_t)k + (size_t)off;
                 v = pack_u16x4(base);
             }
@@ -274,16 +269,135 @@ void hamming_tile_u16_packed(
         __syncthreads();
     }
 
-    // Handle remainder krem (0..3) with scalar u16 compares (only if needed)
     if (krem && ii < bw && jj < bh) {
         if (!(only_upper && j <= i) && (i != j)) {
-            const int base = (k4 << 2); // 4*k4
+            const int base = (k4 << 2);
             const unsigned short* ai = sketches + (size_t)i*(size_t)k + (size_t)base;
             const unsigned short* bj = sketches + (size_t)j*(size_t)k + (size_t)base;
             #pragma unroll
             for (int t = 0; t < 3; ++t) {
                 if (t < krem) diff += (ai[t] != bj[t]);
             }
+        }
+    }
+
+    if (ii < bw && jj < bh) {
+        if (!(only_upper && j <= i)) {
+            out[(size_t)ii * (size_t)bh + (size_t)jj] =
+                (i == j) ? 0.0f : ((float)diff / (float)k);
+        }
+    }
+}
+
+// u32 packed
+__device__ __forceinline__ unsigned long long pack_u32x2(const unsigned int* p) {
+    return  (unsigned long long)p[0]
+         | ((unsigned long long)p[1] << 32);
+}
+
+__device__ __forceinline__ unsigned mismatch_u32x2_from_xor(unsigned long long x) {
+    unsigned mism = 0u;
+    mism += ((unsigned int)(x & 0xffffffffULL)) != 0u;
+    mism += ((unsigned int)(x >> 32)) != 0u;
+    return mism;
+}
+
+#ifndef BK32
+#define BK32 64  // number of packed u64 words per slab (each word = 2 x u32)
+#endif
+
+#ifndef STRIDE32
+#define STRIDE32 (BK32 + 1)
+#endif
+
+extern "C" __global__
+void hamming_tile_u32_packed(
+    const unsigned int* __restrict__ sketches, // [n*k] u32, row-major
+    int n, int k,                              // k in u32 elements
+    int i0, int j0,
+    int bw, int bh,
+    float* __restrict__ out, // [bw*bh], row-major, ldo = bh
+    int only_upper
+){
+    const int jj = blockIdx.x * blockDim.x + threadIdx.x;
+    const int ii = blockIdx.y * blockDim.y + threadIdx.y;
+
+    const int i = i0 + ii;
+    const int j = j0 + jj;
+
+    const int k2   = (k >> 1); // k/2 packed words
+    const int krem = (k & 1);  // remainder 0..1
+
+    extern __shared__ __align__(16) unsigned char smem_raw[];
+    unsigned long long* As = reinterpret_cast<unsigned long long*>(smem_raw);
+    unsigned long long* Bs = As + (size_t)blockDim.y * (size_t)STRIDE32;
+
+    unsigned int diff = 0u;
+
+    const int tpb = blockDim.x * blockDim.y;
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+
+    for (int t0 = 0; t0 < k2; t0 += BK32) {
+        const int bk = min(BK32, k2 - t0);
+
+        const int totalA = blockDim.y * bk;
+        for (int idx = tid; idx < totalA; idx += tpb) {
+            const int r = idx / bk;
+            const int t = idx - r * bk;
+
+            const int tile_row_base = i0 + (int)blockIdx.y * (int)blockDim.y;
+            const int gi = tile_row_base + r;
+
+            unsigned long long v = 0ULL;
+            if ((gi >= i0) && (gi < i0 + bw) && gi < n) {
+                const int off = ((t0 + t) << 1); // *2 u32
+                const unsigned int* base = sketches + (size_t)gi * (size_t)k + (size_t)off;
+                v = pack_u32x2(base);
+            }
+            As[(size_t)r * (size_t)STRIDE32 + (size_t)t] = v;
+        }
+
+        const int totalB = blockDim.x * bk;
+        for (int idx = tid; idx < totalB; idx += tpb) {
+            const int c = idx / bk;
+            const int t = idx - c * bk;
+
+            const int tile_col_base = j0 + (int)blockIdx.x * (int)blockDim.x;
+            const int gj = tile_col_base + c;
+
+            unsigned long long v = 0ULL;
+            if ((gj >= j0) && (gj < j0 + bh) && gj < n) {
+                const int off = ((t0 + t) << 1); // *2 u32
+                const unsigned int* base = sketches + (size_t)gj * (size_t)k + (size_t)off;
+                v = pack_u32x2(base);
+            }
+            Bs[(size_t)c * (size_t)STRIDE32 + (size_t)t] = v;
+        }
+
+        __syncthreads();
+
+        if (ii < bw && jj < bh) {
+            if (!(only_upper && j <= i) && (i != j)) {
+                const size_t arow = (size_t)threadIdx.y * (size_t)STRIDE32;
+                const size_t brow = (size_t)threadIdx.x * (size_t)STRIDE32;
+
+                #pragma unroll
+                for (int t = 0; t < bk; ++t) {
+                    unsigned long long x = As[arow + (size_t)t] ^ Bs[brow + (size_t)t];
+                    diff += mismatch_u32x2_from_xor(x);
+                }
+            }
+        }
+
+        __syncthreads();
+    }
+
+    if (krem && ii < bw && jj < bh) {
+        if (!(only_upper && j <= i) && (i != j)) {
+            const int base = (k2 << 1); // 2*k2
+            const unsigned int* ai = sketches + (size_t)i * (size_t)k + (size_t)base;
+            const unsigned int* bj = sketches + (size_t)j * (size_t)k + (size_t)base;
+            diff += (ai[0] != bj[0]);
         }
     }
 
@@ -312,14 +426,14 @@ fn gib(x: usize) -> f64 {
 
 fn shared_mem_bytes_for<T: SketchElem>(blk_x: usize, blk_y: usize) -> u32 {
     match T::DTYPE {
-        // u16 packed kernel uses u64 in shared memory with BK16/STRIDE16
-        SketchDType::U16 => {
-            let stride_words = 64usize + 1; // STRIDE16 with BK16=64
+        // packed kernels use u64 shared memory
+        SketchDType::U16 | SketchDType::U32 => {
+            let stride_words = 64usize + 1;
             ((stride_words * (blk_y + blk_x)) * 8usize) as u32
         }
-        // generic kernel uses ELEM_T in shared memory with BK/STRIDE
-        SketchDType::U32 | SketchDType::U64 => {
-            let stride = 64usize + 1; // STRIDE with BK=64
+        // generic u64 kernel uses ELEM_T in shared memory
+        SketchDType::U64 => {
+            let stride = 64usize + 1;
             ((stride * (blk_y + blk_x)) * std::mem::size_of::<T>()) as u32
         }
     }
