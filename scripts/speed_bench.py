@@ -3,33 +3,35 @@ import argparse
 from io import StringIO
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
-# ---- Font/theme per your snippet ----
-mpl.rcParams.update({
-    "font.family"     : "sans-serif",
-    "font.sans-serif" : ["Helvetica"],   # system fallback handled automatically
-    "font.size"       : 20,              # <--- main control for larger text
-    "axes.titlesize"  : 20,              # axes title size
-    "axes.labelsize"  : 20,              # x/y label size
-    "xtick.labelsize" : 20,              # x tick label size
-    "ytick.labelsize" : 20,              # y tick label size
-    "legend.fontsize" : 20,
-    "text.color"      : "black",
-    "axes.labelcolor" : "black",
-    "axes.edgecolor"  : "black",
-    "xtick.color"     : "black",
-    "ytick.color"     : "black",
-    "axes.facecolor"  : "white",
-    "figure.facecolor": "white",
-    "axes.grid"       : False,
-    "grid.color"      : "0.7",
-    "grid.linestyle"  : "--",
-    "grid.linewidth"  : 0.1,
-})
+mpl.rcParams.update(
+    {
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Helvetica"],  # system fallback handled automatically
+        "font.size": 20,  #  main control for larger text
+        "axes.titlesize": 20,  # axes title size
+        "axes.labelsize": 20,  # x/y label size
+        "xtick.labelsize": 20,  # x tick label size
+        "ytick.labelsize": 20,  # y tick label size
+        "legend.fontsize": 20,
+        "text.color": "black",
+        "axes.labelcolor": "black",
+        "axes.edgecolor": "black",
+        "xtick.color": "black",
+        "ytick.color": "black",
+        "axes.facecolor": "white",
+        "figure.facecolor": "white",
+        "axes.grid": False,
+        "grid.color": "0.7",
+        "grid.linestyle": "--",
+        "grid.linewidth": 0.1,
+    }
+)
+
 
 def load_bench_df(path: str | None) -> pd.DataFrame:
     expected = ["samples", "DartUniFrac", "unifrac-binaries", "Striped_UniFrac"]
@@ -47,6 +49,7 @@ def load_bench_df(path: str | None) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df.dropna(subset=expected).reset_index(drop=True)
 
+
 def plot_time_on_x(df: pd.DataFrame, out_pdf: str) -> None:
     from matplotlib.ticker import ScalarFormatter
 
@@ -54,9 +57,9 @@ def plot_time_on_x(df: pd.DataFrame, out_pdf: str) -> None:
     markers = ["o", "s", "^"]
 
     # Colors for the three categories
-    time_color   = "#1f77b4"  # blue
-    mem_color    = "#d62728"  # red
-    striped_color = "#2ca02c" # green
+    time_color = "#1f77b4"  # blue
+    mem_color = "#d62728"  # red
+    striped_color = "#2ca02c"  # green
 
     color_map = {
         "DartUniFrac": time_color,
@@ -99,22 +102,30 @@ def plot_time_on_x(df: pd.DataFrame, out_pdf: str) -> None:
     plt.savefig(out_pdf, bbox_inches="tight")
     plt.close(fig)
 
+
 def main():
     ap = argparse.ArgumentParser(
         description="Plot: samples on X, time on Y (log); one curve per method."
     )
     ap.add_argument(
-        "-i", "--input", type=str, default=None,
-        help="Path to TSV/CSV with columns: samples, DartUniFrac, unifrac-binaries, Striped_UniFrac"
+        "-i",
+        "--input",
+        type=str,
+        default=None,
+        help="Path to TSV/CSV with columns: samples, DartUniFrac, unifrac-binaries, Striped_UniFrac",
     )
     ap.add_argument(
-        "-o", "--output", type=str, default="dartunifrac_benchmark_time_x.pdf",
-        help="Output PDF filename"
+        "-o",
+        "--output",
+        type=str,
+        default="dartunifrac_benchmark_time_x.pdf",
+        help="Output PDF filename",
     )
     args = ap.parse_args()
 
     df = load_bench_df(args.input)
     plot_time_on_x(df, args.output)
+
 
 if __name__ == "__main__":
     main()

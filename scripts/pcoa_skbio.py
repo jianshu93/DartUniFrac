@@ -1,7 +1,8 @@
 import sys
 import time
-import pandas as pd
+
 import numpy as np
+import pandas as pd
 from skbio import DistanceMatrix
 from skbio.stats.ordination import pcoa
 
@@ -11,7 +12,7 @@ if len(sys.argv) != 3:
     sys.exit(1)
 
 DIST_FILE = sys.argv[1]
-OUT_FILE  = sys.argv[2]
+OUT_FILE = sys.argv[2]
 
 t_start = time.time()
 print(f"[INFO] Starting PCoA pipeline on {DIST_FILE}")
@@ -20,8 +21,10 @@ print(f"[INFO] Starting PCoA pipeline on {DIST_FILE}")
 t_read_start = time.time()
 dist_df = pd.read_csv(DIST_FILE, sep="\t", index_col=0)
 t_read_end = time.time()
-print(f"[INFO] Loaded distance matrix with shape {dist_df.shape} in "
-      f"{t_read_end - t_read_start:.2f} s")
+print(
+    f"[INFO] Loaded distance matrix with shape {dist_df.shape} in "
+    f"{t_read_end - t_read_start:.2f} s"
+)
 
 # sanity checks
 if dist_df.shape[0] != dist_df.shape[1]:
@@ -33,13 +36,11 @@ if not np.allclose(np.diag(dist_df), 0.0, atol=1e-12):
     print("[WARN] Diagonal values are not all zero.")
 
 # ---------------------------------------------------------------------
-# 2) Convert to a scikit-bio DistanceMatrix object 
+# 2) Convert to a scikit-bio DistanceMatrix object
 # ---------------------------------------------------------------------
 dm = DistanceMatrix(dist_df.values, ids=dist_df.index)
 
-# ---------------------------------------------------------------------
-# 3) Run fast PCoA (randomized SVD) by default
-# ---------------------------------------------------------------------
+# Run fast PCoA (randomized SVD) by default
 t_pcoa_start = time.time()
 try:
     # fast PCoA: randomized SVD, first two dimensions only
@@ -51,12 +52,12 @@ except TypeError:
     ordination = pcoa(dm)
     method_used = "eigh"
 t_pcoa_end = time.time()
-print(f"[INFO] PCoA (method='{method_used}') completed in "
-      f"{t_pcoa_end - t_pcoa_start:.2f} s")
+print(
+    f"[INFO] PCoA (method='{method_used}') completed in "
+    f"{t_pcoa_end - t_pcoa_start:.2f} s"
+)
 
-# ---------------------------------------------------------------------
-# 4) Extract first two axes (same as before)
-# ---------------------------------------------------------------------
+# Extract first two axes (same as before)
 coords_df = ordination.samples.iloc[:, :2]
 coords_df.columns = ["PCo1", "PCo2"]
 
@@ -66,9 +67,7 @@ print(f"\nPCo1 explains {var_exp.iloc[0]:.2f}% variance")
 print(f"PCo2 explains {var_exp.iloc[1]:.2f}% variance\n")
 print(coords_df.head(), "\n")
 
-# ---------------------------------------------------------------------
-# 5) Save results (same as before, but filename from CLI)
-# ---------------------------------------------------------------------
+# Save results (same as before, but filename from CLI)
 coords_df.to_csv(OUT_FILE, sep="\t")
 print(f"[INFO] Full coordinates written to: {OUT_FILE}")
 

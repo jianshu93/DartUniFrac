@@ -1,93 +1,118 @@
 #!/usr/bin/env python3
-import sys
 import argparse
+import sys
+
 import matplotlib as mpl
-import pandas as pd
 import matplotlib.pyplot as plt
+import pandas as pd
 from matplotlib import colors as mcolors
 from matplotlib.lines import Line2D
 
+mpl.rcParams.update(
+    {
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Helvetica"],  # system fallback handled automatically
+        "font.size": 20,  # <--- main control for larger text
+        "axes.titlesize": 20,  # axes title size
+        "axes.labelsize": 20,  # x/y label size
+        "xtick.labelsize": 20,  # x tick label size
+        "ytick.labelsize": 20,  # y tick label size
+        "legend.fontsize": 20,
+        "text.color": "black",
+        "axes.labelcolor": "black",
+        "axes.edgecolor": "black",
+        "xtick.color": "black",
+        "ytick.color": "black",
+        "axes.facecolor": "white",
+        "figure.facecolor": "white",
+        "axes.grid": False,
+        "grid.color": "0.7",
+        "grid.linestyle": "--",
+        "grid.linewidth": 0.1,
+    }
+)
 
-# ---- Font/theme per your snippet ----
-mpl.rcParams.update({
-    "font.family"     : "sans-serif",
-    "font.sans-serif" : ["Helvetica"],   # system fallback handled automatically
-    "font.size"       : 20,              # <--- main control for larger text
-    "axes.titlesize"  : 20,              # axes title size
-    "axes.labelsize"  : 20,              # x/y label size
-    "xtick.labelsize" : 20,              # x tick label size
-    "ytick.labelsize" : 20,              # y tick label size
-    "legend.fontsize" : 20, 
-    "text.color"      : "black",
-    "axes.labelcolor" : "black",
-    "axes.edgecolor"  : "black",
-    "xtick.color"     : "black",
-    "ytick.color"     : "black",
-    "axes.facecolor"  : "white",
-    "figure.facecolor": "white",
-    "axes.grid"       : False,
-    "grid.color"      : "0.7",
-    "grid.linestyle"  : "--",
-    "grid.linewidth"  : 0.1,
-})
 
 def main():
-    p = argparse.ArgumentParser(description='Plot DartMH vs ERS runtime vs sparsity for different sketch sizes.')
-    p.add_argument('data', nargs='?', help='Input CSV/TSV; if omitted, read from stdin.')
-    p.add_argument('--out', default='dartmh_ers_runtime.png', help='Output PNG filename.')
+    p = argparse.ArgumentParser(
+        description="Plot DartMH vs ERS runtime vs sparsity for different sketch sizes."
+    )
+    p.add_argument(
+        "data", nargs="?", help="Input CSV/TSV; if omitted, read from stdin."
+    )
+    p.add_argument(
+        "--out", default="dartmh_ers_runtime.png", help="Output PNG filename."
+    )
     args = p.parse_args()
 
     # Read data
     if args.data:
-        df = pd.read_csv(args.data, sep=None, engine='python')
+        df = pd.read_csv(args.data, sep=None, engine="python")
     else:
-        df = pd.read_csv(sys.stdin, sep=None, engine='python')
+        df = pd.read_csv(sys.stdin, sep=None, engine="python")
 
     # Normalize and verify columns
     df = df.rename(columns={c: c.strip() for c in df.columns})
-    required = {'Sparsity', 'sketch', 'DartMH', 'ERS'}
+    required = {"Sparsity", "sketch", "DartMH", "ERS"}
     missing = required - set(df.columns)
     if missing:
         raise SystemExit(f"Missing columns: {missing}")
 
     # Types
-    df['Sparsity'] = df['Sparsity'].astype(float)
-    df['sketch']   = df['sketch'].astype(int)
-    df['DartMH']   = df['DartMH'].astype(float)
-    df['ERS']      = df['ERS'].astype(float)
+    df["Sparsity"] = df["Sparsity"].astype(float)
+    df["sketch"] = df["sketch"].astype(int)
+    df["DartMH"] = df["DartMH"].astype(float)
+    df["ERS"] = df["ERS"].astype(float)
 
-    ks = sorted(df['sketch'].unique())
-    cmap = plt.get_cmap('tab10')  # palette for k colors
+    ks = sorted(df["sketch"].unique())
+    cmap = plt.get_cmap("tab10")  # palette for k colors
 
     fig, ax = plt.subplots(figsize=(6, 5))
 
     # Plot lines: same color per k, different marker per algorithm
     for i, k in enumerate(ks):
         color = cmap(i % 10)
-        sub = df[df['sketch'] == k].sort_values('Sparsity')
+        sub = df[df["sketch"] == k].sort_values("Sparsity")
 
-        ax.plot(sub['Sparsity'], sub['DartMH'],
-                marker='o', linestyle='-', color=color, linewidth=1.8,
-                label=None)
-        ax.plot(sub['Sparsity'], sub['ERS'],
-                marker='^', linestyle='-', color=color, linewidth=1.8,
-                label=None)
+        ax.plot(
+            sub["Sparsity"],
+            sub["DartMH"],
+            marker="o",
+            linestyle="-",
+            color=color,
+            linewidth=1.8,
+            label=None,
+        )
+        ax.plot(
+            sub["Sparsity"],
+            sub["ERS"],
+            marker="^",
+            linestyle="-",
+            color=color,
+            linewidth=1.8,
+            label=None,
+        )
 
-    ax.set_xscale('log')
-    ax.set_xlabel('Sparsity (fraction nonzeros)')
-    ax.set_ylabel('Runtime (s)')
-    ax.set_title('DartMH vs ERS — runtime vs sparsity by sketch size')
+    ax.set_xscale("log")
+    ax.set_xlabel("Sparsity (fraction nonzeros)")
+    ax.set_ylabel("Runtime (s)")
+    ax.set_title("DartMH vs ERS — runtime vs sparsity by sketch size")
 
     # Build legends: shapes for algorithms, colors for k
     alg_handles = [
-        Line2D([0], [0], color='black', marker='o', linestyle='-', label='DartMH'),
-        Line2D([0], [0], color='black', marker='^', linestyle='-', label='ERS'),
+        Line2D([0], [0], color="black", marker="o", linestyle="-", label="DartMH"),
+        Line2D([0], [0], color="black", marker="^", linestyle="-", label="ERS"),
     ]
-    k_handles = [Line2D([0], [0], color=cmap(i % 10), lw=2, label=f'k={k}') for i, k in enumerate(ks)]
+    k_handles = [
+        Line2D([0], [0], color=cmap(i % 10), lw=2, label=f"k={k}")
+        for i, k in enumerate(ks)
+    ]
 
-    leg1 = ax.legend(handles=alg_handles, title='Algorithm', loc='upper left', fontsize=8)
+    leg1 = ax.legend(
+        handles=alg_handles, title="Algorithm", loc="upper left", fontsize=8
+    )
     ax.add_artist(leg1)
-    ax.legend(handles=k_handles, title='Sketch size', ncol=1, fontsize=8)
+    ax.legend(handles=k_handles, title="Sketch size", ncol=1, fontsize=8)
 
     fig.tight_layout()
     fig.savefig(args.out, dpi=600)
@@ -95,5 +120,6 @@ def main():
     if sys.stdout.isatty():
         plt.show()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

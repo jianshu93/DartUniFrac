@@ -22,38 +22,36 @@ import re
 import sys
 from pathlib import Path
 
+import matplotlib as mpl
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+from scipy.linalg import orthogonal_procrustes
+from scipy.spatial import procrustes
 from skbio import DistanceMatrix
 from skbio.stats.ordination import pcoa
-from scipy.spatial import procrustes
-from scipy.linalg import orthogonal_procrustes
-import matplotlib as mpl
 
-mpl.rcParams.update({
-    # font
-    "font.family"     : "sans-serif",
-    "font.sans-serif" : ["Helvetica"],   # fall-back handled automatically
-    "text.color"      : "black",
-    # axes & ticks
-    "axes.labelcolor" : "black",
-    "axes.edgecolor"  : "black",
-    "xtick.color"     : "black",
-    "ytick.color"     : "black",
-    "axes.facecolor"  : "white",
-    "figure.facecolor": "white",
-    # grid (light grey, thin, dashed - similar to ggplot2::theme_bw)
-    "axes.grid"       : False,
-    "grid.color"      : "0.7",
-    "grid.linestyle"  : "--",
-    "grid.linewidth"  : 0.1,
-})
+mpl.rcParams.update(
+    {
+        # font
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Helvetica"],  # fall-back handled automatically
+        "text.color": "black",
+        # axes & ticks
+        "axes.labelcolor": "black",
+        "axes.edgecolor": "black",
+        "xtick.color": "black",
+        "ytick.color": "black",
+        "axes.facecolor": "white",
+        "figure.facecolor": "white",
+        # grid (light grey, thin, dashed - similar to ggplot2::theme_bw)
+        "axes.grid": False,
+        "grid.color": "0.7",
+        "grid.linestyle": "--",
+        "grid.linewidth": 0.1,
+    }
+)
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# I/O helpers
-# ──────────────────────────────────────────────────────────────────────────────
 
 def read_distance_matrix(tsv_path: str) -> pd.DataFrame:
     df = pd.read_csv(tsv_path, sep="\t", index_col=0)
@@ -66,7 +64,9 @@ def read_distance_matrix(tsv_path: str) -> pd.DataFrame:
     return df
 
 
-def parse_approx_pcoa_table(pcoa_tsv_path: str) -> tuple[pd.DataFrame, pd.Series | None]:
+def parse_approx_pcoa_table(
+    pcoa_tsv_path: str,
+) -> tuple[pd.DataFrame, pd.Series | None]:
     """
     Parse your approximate PCoA TSV that contains:
       - Block 1: header 'PC1..' and per-sample coordinates
@@ -89,8 +89,10 @@ def parse_approx_pcoa_table(pcoa_tsv_path: str) -> tuple[pd.DataFrame, pd.Series
     coords_df = coords_df.apply(pd.to_numeric, errors="coerce")
     if coords_df.isna().any().any():
         nbad = int(coords_df.isna().sum().sum())
-        print(f"[WARN] {nbad} NA values in coordinates after parsing; rows with NA will be dropped.",
-              file=sys.stderr)
+        print(
+            f"[WARN] {nbad} NA values in coordinates after parsing; rows with NA will be dropped.",
+            file=sys.stderr,
+        )
         coords_df = coords_df.dropna(axis=0, how="any")
 
     # Block 2 (optional) = proportion_explained row
@@ -104,24 +106,22 @@ def parse_approx_pcoa_table(pcoa_tsv_path: str) -> tuple[pd.DataFrame, pd.Series
     return coords_df, prop
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# PCoA + Procrustes
-# ──────────────────────────────────────────────────────────────────────────────
-
 def run_skbio_pcoa(dm_df: pd.DataFrame):
     dm = DistanceMatrix(dm_df.values.astype(float), ids=list(dm_df.index))
     ord_res = pcoa(dm)
     eigvals = ord_res.eigvals
     n_neg = int((eigvals < 0).sum())
     if n_neg > 0:
-        print(f"[INFO] PCoA has {n_neg} negative eigenvalue(s); distance may be non-Euclidean.",
-              file=sys.stderr)
+        print(
+            f"[INFO] PCoA has {n_neg} negative eigenvalue(s); distance may be non-Euclidean.",
+            file=sys.stderr,
+        )
     return ord_res
 
 
 def match_and_slice_axes(approx_df: pd.DataFrame, skbio_ord, k: int | None):
     ids_approx = list(approx_df.index)
-    ids_skbio  = list(skbio_ord.samples.index)
+    ids_skbio = list(skbio_ord.samples.index)
     common = [i for i in ids_approx if i in ids_skbio]
     if len(common) < 3:
         sys.exit("[ERROR] Fewer than 3 shared samples; Procrustes not meaningful.")
@@ -133,7 +133,10 @@ def match_and_slice_axes(approx_df: pd.DataFrame, skbio_ord, k: int | None):
     max_k = min(A_full.shape[1], B_full.shape[1])
     k_use = min(3, max_k) if k is None else min(k, max_k)
     if k_use < 2:
-        print(f"[INFO] Only {k_use} axis available; Procrustes will use {k_use}.", file=sys.stderr)
+        print(
+            f"[INFO] Only {k_use} axis available; Procrustes will use {k_use}.",
+            file=sys.stderr,
+        )
 
     A = A_full[:, :k_use]
     B = B_full[:, :k_use]
@@ -159,8 +162,13 @@ def procrustes_with_permutations(A, B, n_perm=0, seed=0):
                 count += 1
         pval = (count + 1) / (n_perm + 1)  # conservative
 
-    return {"disparity": float(disparity), "pval": float(pval) if not np.isnan(pval) else np.nan,
-            "mtx1": mtx1, "mtx2": mtx2, "resid": resid}
+    return {
+        "disparity": float(disparity),
+        "pval": float(pval) if not np.isnan(pval) else np.nan,
+        "mtx1": mtx1,
+        "mtx2": mtx2,
+        "resid": resid,
+    }
 
 
 def orthogonal_map(A, B):
@@ -180,10 +188,6 @@ def orthogonal_map(A, B):
     R, _ = orthogonal_procrustes(B_std, A_std)
     return A.mean(axis=0), na, B.mean(axis=0), nb, R
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Plots
-# ──────────────────────────────────────────────────────────────────────────────
 
 def plot2d(m1, m2, ids, out_png):
     if m1.shape[1] < 2:
@@ -220,11 +224,16 @@ def plot3d(m1, m2, ids, out_png):
     fig = plt.figure(figsize=(8, 7), dpi=140)
     ax = fig.add_subplot(111, projection="3d")
     ax.scatter(m1[:, 0], m1[:, 1], m1[:, 2], label="Approx (aligned)", s=25)
-    ax.scatter(m2[:, 0], m2[:, 1], m2[:, 2], label="scikit-bio (aligned)", s=25, marker="x")
+    ax.scatter(
+        m2[:, 0], m2[:, 1], m2[:, 2], label="scikit-bio (aligned)", s=25, marker="x"
+    )
     for i in range(m1.shape[0]):
-        ax.plot([m1[i, 0], m2[i, 0]],
-                [m1[i, 1], m2[i, 1]],
-                [m1[i, 2], m2[i, 2]], linewidth=0.5)
+        ax.plot(
+            [m1[i, 0], m2[i, 0]],
+            [m1[i, 1], m2[i, 1]],
+            [m1[i, 2], m2[i, 2]],
+            linewidth=0.5,
+        )
     ax.set_xlabel("Axis 1 (aligned)")
     ax.set_ylabel("Axis 2 (aligned)")
     ax.set_zlabel("Axis 3 (aligned)")
@@ -236,33 +245,51 @@ def plot3d(m1, m2, ids, out_png):
     plt.close(fig)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Main
-# ──────────────────────────────────────────────────────────────────────────────
-
 def main():
-    ap = argparse.ArgumentParser(description="Procrustes test: custom PCoA vs scikit-bio PCoA from the same distance.")
-    ap.add_argument("--dist", required=True, help="TSV square distance matrix used by both methods")
-    ap.add_argument("--approx-pcoa", required=True, help="Your approximate PCoA TSV (coords + optional proportion_explained)")
-    ap.add_argument("--axes", type=int, default=None, help="Number of axes to compare (default: min(3, available))")
-    ap.add_argument("--permutations", type=int, default=0, help="Permutation test count (e.g., 999). 0 disables.")
+    ap = argparse.ArgumentParser(
+        description="Procrustes test: custom PCoA vs scikit-bio PCoA from the same distance."
+    )
+    ap.add_argument(
+        "--dist", required=True, help="TSV square distance matrix used by both methods"
+    )
+    ap.add_argument(
+        "--approx-pcoa",
+        required=True,
+        help="Your approximate PCoA TSV (coords + optional proportion_explained)",
+    )
+    ap.add_argument(
+        "--axes",
+        type=int,
+        default=None,
+        help="Number of axes to compare (default: min(3, available))",
+    )
+    ap.add_argument(
+        "--permutations",
+        type=int,
+        default=0,
+        help="Permutation test count (e.g., 999). 0 disables.",
+    )
     ap.add_argument("--seed", type=int, default=0, help="RNG seed for permutations")
     ap.add_argument("--out", required=True, help="Output prefix")
-    ap.add_argument("--plot", action="store_true", help="Save 2D plot of aligned coordinates")
-    ap.add_argument("--plot3d", action="store_true", help="Save 3D plot of aligned coordinates")
+    ap.add_argument(
+        "--plot", action="store_true", help="Save 2D plot of aligned coordinates"
+    )
+    ap.add_argument(
+        "--plot3d", action="store_true", help="Save 3D plot of aligned coordinates"
+    )
     args = ap.parse_args()
 
     outp = Path(args.out)
     outp.parent.mkdir(parents=True, exist_ok=True)
 
-    # 1) Read inputs
+    # Read inputs
     dm = read_distance_matrix(args.dist)
     approx_coords, approx_prop = parse_approx_pcoa_table(args.approx_pcoa)
 
-    # 2) Run scikit-bio PCoA on the same distance
+    # Run scikit-bio PCoA on the same distance
     ord_skbio = run_skbio_pcoa(dm)
 
-    # 3) Match IDs and slice axes
+    # Match IDs and slice axes
     A, B, shared_ids, k_use = match_and_slice_axes(approx_coords, ord_skbio, args.axes)
     print(f"[INFO] Shared samples: {len(shared_ids)}  |  Axes used: {k_use}")
 
@@ -270,16 +297,21 @@ def main():
     def var_str_from_series(s: pd.Series | None, k: int):
         if s is None:
             return "N/A (not provided)"
-        vals = [float(s.get(f"PC{i+1}", np.nan)) * 100 for i in range(k)]
-        return ", ".join([f"Axis{i+1}: {v:.2f}%" for i, v in enumerate(vals)])
+        vals = [float(s.get(f"PC{i + 1}", np.nan)) * 100 for i in range(k)]
+        return ", ".join([f"Axis{i + 1}: {v:.2f}%" for i, v in enumerate(vals)])
+
     def var_str_skbio(ord_res, k):
         pe = ord_res.proportion_explained.iloc[:k] * 100
-        return ", ".join([f"Axis{i+1}: {pe.iloc[i]:.2f}%" for i in range(len(pe))])
+        return ", ".join([f"Axis{i + 1}: {pe.iloc[i]:.2f}%" for i in range(len(pe))])
 
-    print(f"[INFO] Approx variance explained (first {k_use}): {var_str_from_series(approx_prop, k_use)}")
-    print(f"[INFO] scikit-bio variance explained (first {k_use}): {var_str_skbio(ord_skbio, k_use)}")
+    print(
+        f"[INFO] Approx variance explained (first {k_use}): {var_str_from_series(approx_prop, k_use)}"
+    )
+    print(
+        f"[INFO] scikit-bio variance explained (first {k_use}): {var_str_skbio(ord_skbio, k_use)}"
+    )
 
-    # 4) Procrustes test (+ permutations)
+    # Procrustes test (+ permutations)
     res = procrustes_with_permutations(A, B, n_perm=args.permutations, seed=args.seed)
     disparity = res["disparity"]
     r2 = 1.0 - disparity  # heuristic with SciPy normalization
@@ -291,15 +323,25 @@ def main():
         print(f"Permutation p-value (n={args.permutations}): {res['pval']:.6f}")
     print("==================\n")
 
-    # 5) Save aligned coordinates & residuals
-    m1_df = pd.DataFrame(res["mtx1"], index=shared_ids, columns=[f"A{i+1}" for i in range(res["mtx1"].shape[1])])
-    m2_df = pd.DataFrame(res["mtx2"], index=shared_ids, columns=[f"A{i+1}" for i in range(res["mtx2"].shape[1])])
-    resid_df = pd.DataFrame({"sample_id": shared_ids, "residual_distance": res["resid"]})
+    # Save aligned coordinates & residuals
+    m1_df = pd.DataFrame(
+        res["mtx1"],
+        index=shared_ids,
+        columns=[f"A{i + 1}" for i in range(res["mtx1"].shape[1])],
+    )
+    m2_df = pd.DataFrame(
+        res["mtx2"],
+        index=shared_ids,
+        columns=[f"A{i + 1}" for i in range(res["mtx2"].shape[1])],
+    )
+    resid_df = pd.DataFrame(
+        {"sample_id": shared_ids, "residual_distance": res["resid"]}
+    )
     m1_df.to_csv(f"{outp}.aligned_approx.tsv", sep="\t")
     m2_df.to_csv(f"{outp}.aligned_skbio.tsv", sep="\t")
     resid_df.to_csv(f"{outp}.residuals.tsv", sep="\t", index=False)
 
-    # 6) Export explicit orthogonal map (optional debugging/repro)
+    # Export explicit orthogonal map (optional debugging/repro)
     try:
         meanA, scaleA, meanB, scaleB, R = orthogonal_map(A, B)
         np.savetxt(f"{outp}.R.txt", R, fmt="%.8f")
@@ -310,7 +352,7 @@ def main():
     except Exception as e:
         print(f"[WARN] Could not compute/export orthogonal map: {e}", file=sys.stderr)
 
-    # 7) Plots
+    # Plots
     if args.plot:
         png2d = f"{outp}.aligned_2d.png"
         plot2d(res["mtx1"], res["mtx2"], shared_ids, png2d)
@@ -320,14 +362,16 @@ def main():
         plot3d(res["mtx1"], res["mtx2"], shared_ids, png3d)
         print(f"[INFO] Saved 3D plot: {png3d}")
 
-    # 8) Summary
+    # Summary
     with open(f"{outp}.summary.txt", "w") as fh:
         fh.write(f"Shared samples: {len(shared_ids)}\n")
         fh.write(f"Axes used: {k_use}\n")
         fh.write(f"Disparity (M^2): {disparity:.6f}\n")
         fh.write(f"Procrustes R^2 ≈ 1 - M^2: {r2:.6f}\n")
         if args.permutations > 0:
-            fh.write(f"Permutation p-value (n={args.permutations}): {res['pval']:.6f}\n")
+            fh.write(
+                f"Permutation p-value (n={args.permutations}): {res['pval']:.6f}\n"
+            )
 
     print(f"[DONE] Outputs written with prefix: {outp}")
 
