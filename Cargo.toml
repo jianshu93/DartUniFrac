@@ -18,6 +18,11 @@ path = "src/dartunifrac.rs"
 name = "striped_unifrac"
 path = "src/striped_unifrac.rs"
 
+[[bin]]
+
+name = "emdunifrac"
+path = "src/emdunifrac.rs"
+
 [dependencies]
 emojis = "0.7"
 anyhow = "1"
