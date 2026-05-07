@@ -1593,7 +1593,7 @@ fn main() -> Result<()> {
     #[cfg(feature = "cuda")]
     let gpu_opts = GpuOptions {
         devices: Vec::new(),   // empty => stripe_cu.rs auto-picks how many GPUs to use
-        block_rows: 512,
+        block_rows: 1024,
         block_dim_x: 16,
         block_dim_y: 16,
     };
