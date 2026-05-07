@@ -266,17 +266,19 @@ pub fn unifrac_striped_unweighted_gpu(
 
 // Public API: Weighted GPU (normalized only)
 //
-// This path is intentionally NOT the sparse-atomic prototype.  It follows the
-// same algebra used by fast weighted UniFrac implementations:
+// This version keeps the diagonal-distance-stripe structure, but fixes the
+// previous dense branch-batch scan.  For each branch batch it builds a compact
+// per-sample bitset over the branch rows in that batch.  A CUDA thread assigned
+// to sample pair (k,l) first intersects the two bitsets and only visits branch
+// rows present in BOTH samples.  This preserves the normalized weighted UniFrac
+// min-sum identity while avoiding a dense scan over every branch in every batch.
 //
 //   den(i,j) = sample_sum[i] + sample_sum[j]
-//   num(i,j) = den(i,j) - 2 * Σ_v len[v] * min(p[v,i], p[v,j])
-//   d(i,j)   = num / den
+//   d(i,j)   = 1 - 2 * Σ_v len[v] * min(p[v,i], p[v,j]) / den(i,j)
 //
-// where sample_sum[s] = Σ_v len[v] * p[v,s].  For each tile, the CUDA kernel
-// only loops over branches that are present in both sample stripes.  This keeps
-// the GPU path dense/thread-per-pair, avoids global atomics, and avoids scanning
-// branch rows that can only contribute through the precomputed denominator.
+// Branches active in fewer than two samples are excluded from the shared-min
+// accumulation, because min(p[v,i], p[v,j]) is always zero for those branches;
+// they still contribute correctly to sample_sum and therefore to the denominator.
 
 pub fn unifrac_striped_weighted_gpu(
     kids: &[Vec<usize>],
@@ -313,8 +315,7 @@ pub fn unifrac_striped_weighted_gpu(
         p
     };
 
-    // This block size is only used for the one-time branch embedding build.
-    // The weighted CUDA compute below is diagonal-stripe based, not rectangular-tile based.
+    // Used only for one-time branch embedding construction.
     let blk = opts
         .block_rows
         .max(1)
@@ -329,7 +330,7 @@ pub fn unifrac_striped_weighted_gpu(
     }
 
     info!(
-        "GPU(weighted diagonal): nsamp={} embed_blk={} nblk={} diag_stripes={} visible_gpus={} using_gpus={:?}",
+        "GPU(weighted diagonal-bitset): nsamp={} embed_blk={} nblk={} diag_stripes={} visible_gpus={} using_gpus={:?}",
         nsamp,
         blk,
         nblk,
@@ -338,10 +339,8 @@ pub fn unifrac_striped_weighted_gpu(
         devices
     );
 
-    // Compile PTX once.
     let ptx = Arc::new(compile_ptx(KERNEL_SRC).context("nvrtc compile PTX")?);
 
-    // Share table.
     let dense_counts: Option<Arc<Vec<Vec<f64>>>> = match table {
         InputTable::DenseCounts(c) => Some(Arc::new(c.to_vec())),
         _ => None,
@@ -368,8 +367,6 @@ pub fn unifrac_striped_weighted_gpu(
     let col_sums = Arc::new(col_sums.to_vec());
     let lens_f32 = Arc::new(lens.to_vec());
 
-    // Build sample stripes once on CPU.  These are used only to assemble branch batches;
-    // the GPU compute itself does not revisit rectangular stripe pairs.
     let t_stripes = Instant::now();
     let stripes: Vec<Stripe> = (0..nblk)
         .into_par_iter()
@@ -406,14 +403,14 @@ pub fn unifrac_striped_weighted_gpu(
         .collect();
 
     info!(
-        "GPU(weighted diagonal): precomputed {} embedding stripes in {} ms",
+        "GPU(weighted diagonal-bitset): precomputed {} embedding stripes in {} ms",
         nblk,
         t_stripes.elapsed().as_millis()
     );
 
-    // Active positive-length nodes, and sample_sums[s] = Σ_v len[v] * p[v,s].
-    // The final denominator is den(i,j) = sample_sums[i] + sample_sums[j].
-    let mut active = vec![false; total];
+    // sample_sums[s] = Σ_v len[v] * p[v,s]
+    // active_counts[v] = number of samples where branch v has p[v,s] > 0.
+    let mut active_counts = vec![0u32; total];
     let mut sample_sums = vec![0.0f32; nsamp];
     for (bi, stripe) in stripes.iter().enumerate() {
         let s0 = bi * blk;
@@ -424,28 +421,36 @@ pub fn unifrac_striped_weighted_gpu(
             if len <= 0.0 {
                 continue;
             }
-            active[v] = true;
             let row0 = ri * width;
             for c in 0..width {
                 let x = stripe.rows[row0 + c];
-                if x != 0.0 {
+                if x > 0.0 {
+                    active_counts[v] += 1;
                     sample_sums[s0 + c] += len * x;
                 }
             }
         }
     }
 
-    let active_nodes: Vec<u32> = active
+    // Safe shared-min pruning: branches in only one sample can never have min>0
+    // for any pair.  Their denominator contribution is already in sample_sums.
+    let active_nodes: Vec<u32> = active_counts
         .iter()
         .enumerate()
-        .filter_map(|(v, &a)| {
-            if a && lens_f32[v] > 0.0 {
+        .filter_map(|(v, &cnt)| {
+            if cnt >= 2 && lens_f32[v] > 0.0 {
                 Some(v as u32)
             } else {
                 None
             }
         })
         .collect();
+
+    let skipped_singletons = active_counts
+        .iter()
+        .enumerate()
+        .filter(|&(v, &cnt)| cnt == 1 && lens_f32[v] > 0.0)
+        .count();
 
     let branch_batch: usize = std::env::var("UNIFRAC_CUDA_BRANCH_BATCH")
         .ok()
@@ -454,8 +459,9 @@ pub fn unifrac_striped_weighted_gpu(
         .clamp(64, 16384);
 
     info!(
-        "GPU(weighted diagonal): active positive branches={} branch_batch={}",
+        "GPU(weighted diagonal-bitset): shared-min branches={} skipped_single_sample_branches={} branch_batch={}",
         active_nodes.len(),
+        skipped_singletons,
         branch_batch
     );
 
@@ -464,21 +470,19 @@ pub fn unifrac_striped_weighted_gpu(
     let sample_sums = Arc::new(sample_sums);
     let lens_f32 = Arc::clone(&lens_f32);
 
-    // One full float matrix on device accumulates shared min-sums over branch batches.
-    // This intentionally trades GPU memory for avoiding per-tile branch/row-map copies.
-    // For 25,145 samples this is ~2.53 GB as f32.
     let dist = Arc::new(vec![0.0f64; nsamp * nsamp]);
     let out_ptr = DistPtr(unsafe { NonNull::new_unchecked(dist.as_ptr() as *mut f64) });
 
-    // Current implementation uses one GPU for the full resident matrix.  Multiple GPUs can be
-    // added later by splitting diagonal ranges, but this version avoids inter-GPU reduction.
+    // Single-GPU resident output matrix.  Multiple GPUs would require splitting
+    // diagonal ranges or reducing shared-min matrices, which is intentionally not
+    // done here.
     let dev_id = devices[0];
     let ctx = CudaContext::new(dev_id)?;
     let stream = ctx.default_stream();
     let module = ctx.load_module((*ptx).clone())?;
     let f_accum = module
-        .load_function("unifrac_weighted_diag_accum_minsum_f32")
-        .context("load kernel unifrac_weighted_diag_accum_minsum_f32")?;
+        .load_function("unifrac_weighted_diag_accum_minsum_bitset_f32")
+        .context("load kernel unifrac_weighted_diag_accum_minsum_bitset_f32")?;
     let f_norm = module
         .load_function("unifrac_weighted_diag_normalize_f32")
         .context("load kernel unifrac_weighted_diag_normalize_f32")?;
@@ -494,8 +498,6 @@ pub fn unifrac_striped_weighted_gpu(
     let block_y = opts.block_dim_y.max(1);
     let diag_count = nsamp.saturating_sub(1) as u32;
 
-    // Process branch batches.  Each batch is materialized as dense branch-major
-    // [batch_nodes x nsamp] only once, uploaded, and then used by a diagonal-pair kernel.
     let t_batches = Instant::now();
     let nbatches = (active_nodes.len() + branch_batch - 1) / branch_batch;
 
@@ -503,12 +505,12 @@ pub fn unifrac_striped_weighted_gpu(
         let b1 = (b0 + branch_batch).min(active_nodes.len());
         let cur = b1 - b0;
         let batch_id = b0 / branch_batch + 1;
+        let words_per_sample = (cur + 63) >> 6;
 
         let mut h_emb = vec![0.0f32; cur * nsamp];
+        let mut h_masks = vec![0u64; nsamp * words_per_sample];
         let mut h_lens = vec![0.0f32; cur];
-        let mut h_sample_has_batch = vec![0u8; nsamp];
 
-        // Map global node id -> local batch row.
         let mut local_of = vec![u32::MAX; total];
         for (local, &nid) in active_nodes[b0..b1].iter().enumerate() {
             let v = nid as usize;
@@ -516,7 +518,8 @@ pub fn unifrac_striped_weighted_gpu(
             h_lens[local] = lens_f32[v];
         }
 
-        // Assemble dense embedded branch batch from the one-time CPU stripes.
+        // Dense values are still branch-major for coalesced-ish pair reads, but
+        // the kernel uses h_masks to visit only common nonzero branch rows.
         for (bi, stripe) in stripes.iter().enumerate() {
             let s0 = bi * blk;
             let width = stripe.width;
@@ -526,12 +529,15 @@ pub fn unifrac_striped_weighted_gpu(
                     continue;
                 }
                 let local = local as usize;
+                let word = local >> 6;
+                let bit = local & 63;
+                let bit_mask = 1u64 << bit;
                 let src0 = ri * width;
                 let dst0 = local * nsamp + s0;
                 h_emb[dst0..dst0 + width].copy_from_slice(&stripe.rows[src0..src0 + width]);
                 for c in 0..width {
                     if stripe.rows[src0 + c] > 0.0 {
-                        h_sample_has_batch[s0 + c] = 1;
+                        h_masks[(s0 + c) * words_per_sample + word] |= bit_mask;
                     }
                 }
             }
@@ -539,9 +545,10 @@ pub fn unifrac_striped_weighted_gpu(
 
         let d_emb: CudaSlice<f32> = stream.clone_htod(h_emb.as_slice())?;
         let d_lens_batch: CudaSlice<f32> = stream.clone_htod(h_lens.as_slice())?;
-        let d_sample_has_batch: CudaSlice<u8> = stream.clone_htod(h_sample_has_batch.as_slice())?;
+        let d_masks: CudaSlice<u64> = stream.clone_htod(h_masks.as_slice())?;
 
         let cur_i32 = cur as i32;
+        let words_i32 = words_per_sample as i32;
         let cfg = LaunchConfig {
             grid_dim: (
                 ((nsamp as u32 + block_x - 1) / block_x),
@@ -555,28 +562,29 @@ pub fn unifrac_striped_weighted_gpu(
         let mut launch = stream.launch_builder(&f_accum);
         launch.arg(&d_emb);
         launch.arg(&d_lens_batch);
-        launch.arg(&d_sample_has_batch);
+        launch.arg(&d_masks);
         launch.arg(&cur_i32);
+        launch.arg(&words_i32);
         launch.arg(&n_i32);
         launch.arg(&mut d_shared);
         unsafe { launch.launch(cfg) }?;
 
         if batch_id == 1 || batch_id == nbatches || (batch_id & 7) == 0 {
             info!(
-                "GPU(weighted diagonal): processed branch batch {}/{} ({} branches)",
+                "GPU(weighted diagonal-bitset): processed branch batch {}/{} ({} branches, {} bitset words/sample)",
                 batch_id,
                 nbatches,
-                cur
+                cur,
+                words_per_sample
             );
         }
     }
 
     info!(
-        "GPU(weighted diagonal): accumulated branch batches in {} ms",
+        "GPU(weighted diagonal-bitset): accumulated branch batches in {} ms",
         t_batches.elapsed().as_millis()
     );
 
-    // Convert shared min-sums into distances in-place in d_shared upper triangle.
     let cfg_norm = LaunchConfig {
         grid_dim: (
             ((nsamp as u32 + block_x - 1) / block_x),
@@ -592,7 +600,6 @@ pub fn unifrac_striped_weighted_gpu(
     launch.arg(&mut d_shared);
     unsafe { launch.launch(cfg_norm) }?;
 
-    // Copy the upper-triangular f32 result back and scatter to symmetric f64 host output.
     let t_copy = Instant::now();
     let mut h_mat = vec![0.0f32; matrix_elems];
     stream.memcpy_dtoh(&d_shared, &mut h_mat)?;
@@ -602,11 +609,11 @@ pub fn unifrac_striped_weighted_gpu(
     drop(h_mat);
 
     info!(
-        "GPU(weighted diagonal): copied/scattered output in {} ms",
+        "GPU(weighted diagonal-bitset): copied/scattered output in {} ms",
         t_copy.elapsed().as_millis()
     );
     info!(
-        "GPU(weighted diagonal): total wall time {} ms",
+        "GPU(weighted diagonal-bitset): total wall time {} ms",
         t_all.elapsed().as_millis()
     );
 
@@ -725,6 +732,51 @@ void unifrac_weighted_tile_minsum_f32(
     out[(size_t)ii * (size_t)bh + (size_t)jj] = d;
 }
 
+
+extern "C" __global__
+void unifrac_weighted_diag_accum_minsum_bitset_f32(
+    const float* __restrict__ emb,          // [num_nodes * n], branch-major
+    const float* __restrict__ lens_batch,   // [num_nodes]
+    const unsigned long long* __restrict__ masks, // [n * words_per_sample], bit r set iff emb[r,n] > 0
+    int num_nodes,
+    int words_per_sample,
+    int n,
+    float* __restrict__ shared              // [n * n], upper triangle accumulated min-sum
+){
+    int k = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    int d = (int)(blockIdx.y * blockDim.y + threadIdx.y) + 1;
+    if (k >= n || d >= n) return;
+
+    int l = k + d;
+    if (l >= n) return;
+
+    const unsigned long long* mk = masks + (size_t)k * (size_t)words_per_sample;
+    const unsigned long long* ml = masks + (size_t)l * (size_t)words_per_sample;
+
+    float acc = 0.0f;
+    for (int w = 0; w < words_per_sample; ++w) {
+        unsigned long long common = mk[w] & ml[w];
+        while (common != 0ULL) {
+            int bit = __ffsll((long long)common) - 1;
+            int r = (w << 6) + bit;
+            if (r < num_nodes) {
+                float len = lens_batch[(size_t)r];
+                if (len > 0.0f) {
+                    size_t base = (size_t)r * (size_t)n;
+                    float a = emb[base + (size_t)k];
+                    float b = emb[base + (size_t)l];
+                    float m = a < b ? a : b;
+                    // Since r is in the intersection bitset, m should be >0;
+                    // keep the check for numerical/defensive safety.
+                    if (m > 0.0f) acc += len * m;
+                }
+            }
+            common &= (common - 1ULL);
+        }
+    }
+
+    shared[(size_t)k * (size_t)n + (size_t)l] += acc;
+}
 
 extern "C" __global__
 void unifrac_weighted_diag_accum_minsum_f32(
