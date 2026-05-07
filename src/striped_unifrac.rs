@@ -257,16 +257,32 @@ fn log_relevant_branch_counts_from_bits(
     if node_bits.is_empty() {
         return;
     }
+
     let total = lens.len();
     let nsamp = node_bits[0].len();
-    let total_branches = lens.iter().filter(|&&l| l > 0.0).count();
+
+    // Count only positive-length branches that are active in at least one sample.
+    // This excludes tree taxa that are absent from the feature table / all samples.
+    let total_relevant_branches = (0..total)
+        .filter(|&v| {
+            lens[v] > 0.0 && node_bits[v].as_raw_slice().iter().any(|&w| w != 0)
+        })
+        .count();
+
     let mut rel_counts = vec![0u32; nsamp];
 
     for v in 0..total {
         if lens[v] <= 0.0 {
             continue;
         }
+
         let words = node_bits[v].as_raw_slice();
+
+        // Skip branches with no observed descendant taxa in any sample.
+        if !words.iter().any(|&w| w != 0) {
+            continue;
+        }
+
         for (wi, &w0) in words.iter().enumerate() {
             let mut w = w0;
             while w != 0 {
@@ -279,14 +295,20 @@ fn log_relevant_branch_counts_from_bits(
             }
         }
     }
+
     for s in 0..nsamp {
         let cnt = rel_counts[s] as usize;
-        let frac = (cnt as f64) / (total_branches as f64);
+        let frac = if total_relevant_branches > 0 {
+            (cnt as f64) / (total_relevant_branches as f64)
+        } else {
+            0.0
+        };
+
         log::info!(
             "sample {}: relevant branches = {} / {} = {}",
             s,
             rel_counts[s],
-            total_branches,
+            total_relevant_branches,
             frac
         );
     }
