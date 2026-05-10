@@ -499,6 +499,10 @@ You will see some log like this:
 This is a dense example where $\alpha$ is almost 75% so L can be small. For real-world large-scale datasets, $\alpha$ can be as small as 0.001, so a default L=4096 should cover average sparsity around 0.001. In practice, ERS should not be used for very sparse data because as L increases, it is signigicantly slower than DartMinHash. 
 
 
+## Application note
+
+In practice, a sketch size around 2,000 to 3,000 is good enough for making biological conclusions from analysis such as PERAMOVA and PCoA based on DartUniFrac. However, users may need to increase the sketch size for analysis such as hierarchical clustering and high recall nearest neighbor search tasks. 
+
 ## Acknowledgements
 We want to thank [Tobias Christiani](https://www.linkedin.com/in/tobias-christiani/?originalSubdomain=no),  [Otmar Ertl](https://www.linkedin.com/in/otmar-ertl/?originalSubdomain=at) and [Xiaoyun Li](https://lixiaoyun0239.github.io/cv/) for their helpful comments on DartMinHash and Efficient Rejection Sampling, respectively. We want to thank Yuhan(Sherlyn) Weng for helping with DartUniFrac logo design.
 
