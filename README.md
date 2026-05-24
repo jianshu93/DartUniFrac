@@ -77,6 +77,9 @@ dartunifrac-cuda -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted
 ### obtain the truth via striped unifrac algorithm (SIMD supported), extremely slow at the million-sample scale
 striped_unifrac -t ./GWMC_rep_seqs_all.tre -m ./GWMC_16S_otutab.biom --weighted -o unifrac_weighted_striped.tsv
 
+### EMDUniFrac to obtain taxa contribution
+emdunifrac -t ./GWMC_rep_seqs_all.tre -i ./GWMC_16S_otutab.biom --weighted --input-format biom --contrib-output contribution.txt -o emd_unifrac_dist.tsv --norm-output norm_factor.tsv
+
 ```
 
 GPU on example data:
@@ -312,7 +315,7 @@ $ RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ag_emp_even500.biom --weight
 [2025-12-01T07:03:57Z INFO  dartunifrac_cuda] CUDA detected (4 devices). Computing pairwise distances on GPUs …
 [2025-12-01T07:04:02Z INFO  dartunifrac_cuda] pairwise distances (GPU) in 2574 ms
 [2025-12-01T07:04:02Z INFO  dartunifrac_cuda] Writing uncompressed output → unifrac.tsv
-[2025-12-01T07:05:08Z INFO  dartunifrac_cuda] Done → unifrac.tsv
+[2025-12-01T07:04:12Z INFO  dartunifrac_cuda] Done → unifrac.tsv
 
 ```
 
@@ -501,7 +504,7 @@ This is a dense example where $\alpha$ is almost 75% so L can be small. For real
 
 ## Application note
 
-In practice, a sketch size around 2,000 to 3,000 is good enough for making biological conclusions from analysis such as PERAMOVA and PCoA based on DartUniFrac. However, users may need to increase the sketch size for analysis such as hierarchical clustering and high recall nearest neighbor search tasks. 
+In practice, a sketch size around 2,000 to 3,000 is good enough for drawing biological conclusions from analysis such as PERAMOVA and PCoA based on DartUniFrac. However, users may need to increase the sketch size for analysis such as hierarchical clustering and high recall nearest neighbor search tasks. 
 
 ## Acknowledgements
 We want to thank [Tobias Christiani](https://www.linkedin.com/in/tobias-christiani/?originalSubdomain=no),  [Otmar Ertl](https://www.linkedin.com/in/otmar-ertl/?originalSubdomain=at) and [Xiaoyun Li](https://lixiaoyun0239.github.io/cv/) for their helpful comments on DartMinHash and Efficient Rejection Sampling, respectively. We want to thank Yuhan(Sherlyn) Weng for helping with DartUniFrac logo design.
