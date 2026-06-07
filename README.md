@@ -32,6 +32,7 @@ macOS via Homebrew:
 ```bash
 ## install homebrew first: https://brew.sh
 brew tap jianshu93/DartUniFrac
+brew trust --formula jianshu93/DartUniFrac/DartUniFrac
 brew install DartUniFrac
 dartunifrac -h
 ```
