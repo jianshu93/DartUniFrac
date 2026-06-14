@@ -28,7 +28,7 @@ use log::{info, warn};
 use rayon::prelude::*;
 
 use anndists::dist::{DistHamming, Distance};
-use dartminhash::{DartMinHash, ErsWmh, rng_utils::mt_from_seed};
+use dartminhash::{DartMinHash, ErsWmh, TreeMinHash, rng_utils::mt_from_seed};
 use hdf5::{File as H5File, types::VarLenUnicode};
 use newick::{Newick, NodeID, one_from_string};
 use succparen::{
@@ -172,6 +172,15 @@ fn collect_children<N: NndOne>(
 struct WorkerAccum {
     acc: Vec<f32>,
     touched: Vec<usize>,
+}
+
+fn sketch_with_tree_minhash(wsets: &[Vec<(u64, f64)>], k: usize, seed: u64) -> Vec<Vec<u64>> {
+    let mut rng = mt_from_seed(seed);
+    let tmh = TreeMinHash::new_mt(&mut rng, k as u64);
+    wsets
+        .par_iter()
+        .map(|ws| tmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
+        .collect()
 }
 
 fn build_parent_and_lens_simple(t: &NwkTree) -> (Vec<usize>, Vec<f64>) {
@@ -1021,7 +1030,9 @@ fn build_sketches(
             .par_iter()
             .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
             .collect()
-    } else {
+    } else if method == "tmh" {
+        sketch_with_tree_minhash(&wsets, k, seed)
+    } else if method == "ers" {
         let caps: Vec<f64> = active_edges.iter().map(|&v| lens[v]).collect();
         let ers = ErsWmh::new_mt(&mut rng, &caps, k as u64);
         wsets
@@ -1033,6 +1044,8 @@ fn build_sketches(
                     .collect()
             })
             .collect()
+    } else {
+        anyhow::bail!("unsupported sketching method: {method}");
     };
     info!("sketching done.");
 
@@ -1392,7 +1405,9 @@ fn build_sketches_weighted(
             .par_iter()
             .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
             .collect()
-    } else {
+    } else if method == "tmh" {
+        sketch_with_tree_minhash(&wsets, k, seed)
+    } else if method == "ers" {
         let t_caps = Instant::now();
         let d = active_edges.len();
 
@@ -1437,6 +1452,8 @@ fn build_sketches_weighted(
         );
 
         sketches
+    } else {
+        anyhow::bail!("unsupported sketching method: {method}");
     };
     info!("sketching done.");
 
@@ -1822,7 +1839,9 @@ fn build_sketches_simple(
             .par_iter()
             .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
             .collect()
-    } else {
+    } else if method == "tmh" {
+        sketch_with_tree_minhash(&wsets, k, seed)
+    } else if method == "ers" {
         let caps: Vec<f64> = active_edges.iter().map(|&v| lens[v]).collect();
         let ers = ErsWmh::new_mt(&mut rng, &caps, k as u64);
         wsets
@@ -1834,6 +1853,8 @@ fn build_sketches_simple(
                     .collect()
             })
             .collect()
+    } else {
+        anyhow::bail!("unsupported sketching method: {method}");
     };
     info!("(simple) sketching done.");
 
@@ -2141,7 +2162,9 @@ fn build_sketches_weighted_simple(
             .par_iter()
             .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
             .collect()
-    } else {
+    } else if method == "tmh" {
+        sketch_with_tree_minhash(&wsets, k, seed)
+    } else if method == "ers" {
         // tight caps: m_i = max_s (ℓ_v * A_v[s]) over samples for that edge
         let t_caps = Instant::now();
         let d = active_edges.len();
@@ -2196,6 +2219,8 @@ fn build_sketches_weighted_simple(
         );
 
         sketches
+    } else {
+        anyhow::bail!("unsupported sketching method: {method}");
     };
     info!("(simple) sketching done.");
 
@@ -2296,7 +2321,7 @@ fn main() -> Result<()> {
             Arg::new("sketch-size")
                 .short('s')
                 .long("sketch")
-                .help("Sketch size for Weighted MinHash (DartMinHash or ERS)")
+                .help("Sketch size for Weighted MinHash (DartMinHash, TreeMinHash, or ERS)")
                 .value_parser(clap::value_parser!(usize))
                 .default_value("2048"),
         )
@@ -2304,8 +2329,8 @@ fn main() -> Result<()> {
             Arg::new("method")
                 .long("method")
                 .short('m')
-                .help("Sketching method: dmh (DartMinHash) or ers (Efficient Rejection Sampling)")
-                .value_parser(["dmh", "ers"])
+                .help("Sketching method: dmh (DartMinHash), tmh (TreeMinHash), or ers (Efficient Rejection Sampling)")
+                .value_parser(["dmh", "tmh", "ers"])
                 .default_value("dmh"),
         )
         .arg(
@@ -2402,6 +2427,9 @@ fn main() -> Result<()> {
     info!("{} threads will be used ", rayon::current_num_threads());
 
     info!("method={method}   k={k}   seed={seed}");
+    if method == "tmh" {
+        info!("TreeMinHash enabled");
+    }
     if method == "ers" {
         info!("ERS L={ers_l}");
     }
