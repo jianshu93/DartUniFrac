@@ -1100,7 +1100,9 @@ fn csr_to_csc(
     (colptr, rowind, vals)
 }
 
-// Weighted, build sketches for normalized weighted UniFrac
+// Weighted, build sketches for weighted UniFrac.
+// By default, input table values are converted to relative abundance per sample.
+// If raw_counts is true, raw table counts are passed into branch accumulation directly.
 fn build_sketches_weighted(
     tree_file: &str,
     input_tsv: Option<&str>,
@@ -1109,6 +1111,7 @@ fn build_sketches_weighted(
     method: &str,
     ers_l: u64,
     seed: u64,
+    raw_counts: bool,
 ) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
     // Load tree & balanced parens
     let raw = std::fs::read_to_string(tree_file).context("read newick")?;
@@ -1187,7 +1190,7 @@ fn build_sketches_weighted(
                 },
                 |state, (s, out)| {
                     let denom = col_sums[s];
-                    if denom == 0.0 {
+                    if !raw_counts && denom == 0.0 {
                         return;
                     }
 
@@ -1211,7 +1214,7 @@ fn build_sketches_weighted(
                             continue;
                         }
 
-                        let inc = (val / denom) as f32;
+                        let inc = if raw_counts { val } else { val / denom } as f32;
                         if inc == 0.0 {
                             continue;
                         }
@@ -1289,7 +1292,7 @@ fn build_sketches_weighted(
                 },
                 |state, (s, out)| {
                     let denom = col_sums[s];
-                    if denom == 0.0 {
+                    if !raw_counts && denom == 0.0 {
                         return;
                     }
 
@@ -1309,7 +1312,7 @@ fn build_sketches_weighted(
                             None => continue,
                         };
 
-                        let inc = (vals[kk] / denom) as f32;
+                        let inc = if raw_counts { vals[kk] } else { vals[kk] / denom } as f32;
                         if inc == 0.0 {
                             continue;
                         }
@@ -1861,7 +1864,9 @@ fn build_sketches_simple(
     Ok((samples, sketches_u64))
 }
 
-// Weighted, build sketches for normalized weighted UniFrac using simple Newick tree parsing
+// Weighted, build sketches for weighted UniFrac using simple Newick tree parsing.
+// By default, input table values are converted to relative abundance per sample.
+// If raw_counts is true, raw table counts are passed into branch accumulation directly.
 fn build_sketches_weighted_simple(
     tree_file: &str,
     input_tsv: Option<&str>,
@@ -1870,6 +1875,7 @@ fn build_sketches_weighted_simple(
     method: &str,
     ers_l: u64,
     seed: u64,
+    raw_counts: bool,
 ) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
     // Load tree
     let raw = std::fs::read_to_string(tree_file).context("read newick")?;
@@ -1939,7 +1945,7 @@ fn build_sketches_weighted_simple(
                 },
                 |state, (s, out)| {
                     let denom = col_sums[s];
-                    if denom == 0.0 {
+                    if !raw_counts && denom == 0.0 {
                         return;
                     }
 
@@ -1962,7 +1968,7 @@ fn build_sketches_weighted_simple(
                         if val <= 0.0 {
                             continue;
                         }
-                        let inc = (val / denom) as f32;
+                        let inc = if raw_counts { val } else { val / denom } as f32;
                         if inc == 0.0 {
                             continue;
                         }
@@ -2041,8 +2047,8 @@ fn build_sketches_weighted_simple(
                 },
                 |state, (s, out)| {
                     let denom = col_sums[s];
-                    if denom == 0.0 {
-                        // nothing for this sample
+                    if !raw_counts && denom == 0.0 {
+                        // nothing for this sample in relative-abundance mode
                         return;
                     }
 
@@ -2065,7 +2071,7 @@ fn build_sketches_weighted_simple(
                         };
                         let mut v = leaf_ids_ref[lp];
 
-                        let inc = (vals[kk] / denom) as f32;
+                        let inc = if raw_counts { vals[kk] } else { vals[kk] / denom } as f32;
                         if inc == 0.0 {
                             continue;
                         }
@@ -2308,7 +2314,13 @@ fn main() -> Result<()> {
         .arg(
             Arg::new("weighted")
                 .long("weighted")
-                .help("Weighted UniFrac (normalized)")
+                .help("Weighted UniFrac (normalized by default)")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("raw-counts")
+                .long("raw-counts")
+                .help("Weighted mode only: pass raw table counts into branch accumulation instead of converting each sample to relative abundance")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
@@ -2396,6 +2408,7 @@ fn main() -> Result<()> {
     let out_file = m.get_one::<String>("output").unwrap();
     let k = *m.get_one::<usize>("sketch-size").unwrap();
     let weighted = m.get_flag("weighted");
+    let raw_counts = m.get_flag("raw-counts");
     let method = m.get_one::<String>("method").unwrap().as_str();
     let ers_l = *m.get_one::<u64>("seq-length").unwrap();
     let seed = *m.get_one::<u64>("seed").unwrap();
@@ -2434,8 +2447,15 @@ fn main() -> Result<()> {
         info!("ERS L={ers_l}");
     }
     if weighted {
-        info!("Weighted mode");
+        if raw_counts {
+            info!("Weighted mode with raw counts: no per-sample relative-abundance normalization before branch accumulation");
+        } else {
+            info!("Weighted mode with relative abundance normalization");
+        }
     } else {
+        if raw_counts {
+            warn!("--raw-counts was set but ignored because --weighted was not set");
+        }
         info!("Unweighted mode");
     };
     if succ {
@@ -2447,9 +2467,9 @@ fn main() -> Result<()> {
     let (samples, sketches_u64): (Vec<String>, Vec<Vec<u64>>) =
     if weighted {
         if succ {
-            build_sketches_weighted(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
+            build_sketches_weighted(tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts)?
         } else {
-            build_sketches_weighted_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
+            build_sketches_weighted_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts)?
         }
     } else {
         if succ {
