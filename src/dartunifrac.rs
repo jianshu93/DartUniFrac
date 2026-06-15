@@ -564,6 +564,7 @@ fn build_sketches_weighted_simple(
     method: &str,
     ers_l: u64,
     seed: u64,
+    raw_counts: bool,
 ) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
     // Load tree
     let raw = std::fs::read_to_string(tree_file).context("read newick")?;
@@ -632,7 +633,7 @@ fn build_sketches_weighted_simple(
                     out.clear();
 
                     let denom = col_sums[s];
-                    if denom == 0.0 {
+                    if !raw_counts && denom == 0.0 {
                         st.next_sample(); // advance stamp anyway (keeps logic simple)
                         return;
                     }
@@ -649,7 +650,7 @@ fn build_sketches_weighted_simple(
                         if val <= 0.0 {
                             continue;
                         }
-                        let inc = (val / denom) as f32;
+                        let inc = if raw_counts { val } else { val / denom } as f32;
                         if inc == 0.0 {
                             continue;
                         }
@@ -722,7 +723,7 @@ fn build_sketches_weighted_simple(
                     out.clear();
 
                     let denom = col_sums[s];
-                    if denom == 0.0 {
+                    if !raw_counts && denom == 0.0 {
                         st.next_sample();
                         return;
                     }
@@ -736,7 +737,7 @@ fn build_sketches_weighted_simple(
                             None => continue,
                         };
 
-                        let inc = (vals[kk] / denom) as f32;
+                        let inc = if raw_counts { vals[kk] } else { vals[kk] / denom } as f32;
                         if inc == 0.0 {
                             continue;
                         }
@@ -1728,6 +1729,7 @@ fn build_sketches_weighted(
     method: &str,
     ers_l: u64,
     seed: u64,
+    raw_counts: bool,
 ) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
     // Load tree & balanced parens
     let raw = std::fs::read_to_string(tree_file).context("read newick")?;
@@ -1805,7 +1807,7 @@ fn build_sketches_weighted(
                     out.clear();
 
                     let denom = col_sums[s];
-                    if denom == 0.0 {
+                    if !raw_counts && denom == 0.0 {
                         st.next_sample(); // advance stamp anyway (keeps logic simple)
                         return;
                     }
@@ -1822,7 +1824,7 @@ fn build_sketches_weighted(
                         if val <= 0.0 {
                             continue;
                         }
-                        let inc = (val / denom) as f32;
+                        let inc = if raw_counts { val } else { val / denom } as f32;
                         if inc == 0.0 {
                             continue;
                         }
@@ -1893,7 +1895,7 @@ fn build_sketches_weighted(
                     out.clear();
 
                     let denom = col_sums[s];
-                    if denom == 0.0 {
+                    if !raw_counts && denom == 0.0 {
                         st.next_sample();
                         return;
                     }
@@ -1907,7 +1909,7 @@ fn build_sketches_weighted(
                             None => continue,
                         };
 
-                        let inc = (vals[kk] / denom) as f32;
+                        let inc = if raw_counts { vals[kk] } else { vals[kk] / denom } as f32;
                         if inc == 0.0 {
                             continue;
                         }
@@ -2318,6 +2320,12 @@ fn main() -> Result<()> {
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
+            Arg::new("raw-counts")
+                .long("raw-counts")
+                .help("Weighted mode only: use raw feature counts instead of converting each sample to relative abundance before branch accumulation")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("succ")
                 .long("succ")
                 .help("Use succparen balanced-parentheses tree representation")
@@ -2425,6 +2433,7 @@ fn main() -> Result<()> {
     let out_file = m.get_one::<String>("output").unwrap();
     let k = *m.get_one::<usize>("sketch-size").unwrap();
     let weighted = m.get_flag("weighted");
+    let raw_counts = m.get_flag("raw-counts");
     let method = m.get_one::<String>("method").unwrap().as_str();
     let ers_l = *m.get_one::<u64>("seq-length").unwrap();
     let seed = *m.get_one::<u64>("seed").unwrap();
@@ -2479,17 +2488,24 @@ fn main() -> Result<()> {
         info!("ERS L={ers_l}");
     }
     if weighted {
-        info!("Weighted mode");
+        if raw_counts {
+            info!("Weighted mode with raw counts (no per-sample relative-abundance normalization before branch accumulation)");
+        } else {
+            info!("Weighted mode with relative abundance normalization");
+        }
     } else {
+        if raw_counts {
+            warn!("--raw-counts was set but ignored because --weighted was not set");
+        }
         info!("Unweighted mode");
     };
 
     let (samples, sketches_u64): (Vec<String>, Vec<Vec<u64>>) =
         if weighted {
             if succ {
-                build_sketches_weighted(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
+                build_sketches_weighted(tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts)?
             } else {
-                build_sketches_weighted_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
+                build_sketches_weighted_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts)?
             }
         } else {
             if succ {
