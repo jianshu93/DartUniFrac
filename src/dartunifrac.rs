@@ -2272,7 +2272,7 @@ fn main() -> Result<()> {
         .unwrap_or("🎯");
 
     let m = Command::new("dartunifrac")
-        .version("0.3.0")
+        .version("0.3.2")
         .about(format!(
             "DartUniFrac: Approximate UniFrac via Weighted MinHash {dart}{dart}{dart}"
         ))

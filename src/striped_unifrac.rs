@@ -1700,7 +1700,7 @@ fn main() -> Result<()> {
     log::info!("logger initialized from default environment");
 
     let m = Command::new("unifrac-rs")
-        .version("0.3.0")
+        .version("0.3.2")
         .about("Striped UniFrac via Optimal Balanced Parenthesis")
         .arg(
             Arg::new("tree")
