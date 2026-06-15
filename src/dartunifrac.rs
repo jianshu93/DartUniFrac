@@ -6,7 +6,7 @@
 //! See LICENSE file for more details
 
 //! DartUniFrac: Approximate UniFrac via Weighted MinHash
-//! DartMinHash or ERS (Efficient Rejection Sampling) can be used as the underlying algorithm
+//! DartMinHash, TreeMinHash, or ERS (Efficient Rejection Sampling) can be used as the underlying algorithm
 //! Tree parsing via optimal balanced parenthesis:
 //! With constant-time rank/select primitives (rank₁(i) = # of 1-bits up to i, select₁(k) = position of the k-th 1-bit) you get parent, k-th child, next sibling, sub-tree size, depth, all in O(1). every node knows its opening index i. parent(i) = select₁(rank₁(i) - 1), next_sibling(i) = find_close(i) + 1 (where find_close is the matching 0), etc. Those functions are just pointer-arithmetic on the backing Vec<u64>.
 //! Both unweighted and weighted UniFrac (normalized) are supported
@@ -28,7 +28,7 @@ use log::{info, warn};
 use rayon::prelude::*;
 
 use anndists::dist::{DistHamming, Distance};
-use dartminhash::{DartMinHash, ErsWmh, rng_utils::mt_from_seed};
+use dartminhash::{DartMinHash, ErsWmh, TreeMinHash, rng_utils::mt_from_seed};
 use hdf5::{File as H5File, types::VarLenUnicode};
 use newick::{Newick, NodeID, one_from_string};
 use succparen::{
@@ -55,6 +55,16 @@ Citations:
 "#;
 
 type NwkTree = newick::NewickTree;
+
+
+fn sketch_with_tree_minhash(wsets: &[Vec<(u64, f64)>], k: usize, seed: u64) -> Vec<Vec<u64>> {
+    let mut rng = mt_from_seed(seed);
+    let tmh = TreeMinHash::new_mt(&mut rng, k as u64);
+    wsets
+        .par_iter()
+        .map(|ws| tmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
+        .collect()
+}
 
 // Tree traversal to collect branch lengths
 fn sanitize_newick_drop_internal_labels_and_comments(s: &str) -> String {
@@ -524,6 +534,8 @@ fn build_sketches_simple(
             .par_iter()
             .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
             .collect()
+    } else if method == "tmh" {
+        sketch_with_tree_minhash(&wsets, k, seed)
     } else {
         // For unweighted presence, per-dim max weight is exactly ℓ_v
         let caps: Vec<f64> = active_edges.iter().map(|&v| lens[v]).collect();
@@ -817,6 +829,8 @@ fn build_sketches_weighted_simple(
             .par_iter()
             .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
             .collect()
+    } else if method == "tmh" {
+        sketch_with_tree_minhash(&wsets, k, seed)
     } else {
         // tight caps: m_i = max_s (ℓ_v * A_v[s]) over samples for that edge
         let t_caps = Instant::now();
@@ -1637,6 +1651,8 @@ fn build_sketches(
             .par_iter()
             .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
             .collect()
+    } else if method == "tmh" {
+        sketch_with_tree_minhash(&wsets, k, seed)
     } else {
         let caps: Vec<f64> = active_edges.iter().map(|&v| lens[v]).collect();
         let ers = ErsWmh::new_mt(&mut rng, &caps, k as u64);
@@ -1981,6 +1997,8 @@ fn build_sketches_weighted(
             .par_iter()
             .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
             .collect()
+    } else if method == "tmh" {
+        sketch_with_tree_minhash(&wsets, k, seed)
     } else {
         let t_caps = Instant::now();
         let d = active_edges.len();
@@ -2309,7 +2327,7 @@ fn main() -> Result<()> {
             Arg::new("sketch-size")
                 .short('s')
                 .long("sketch")
-                .help("Sketch size for Weighted MinHash (DartMinHash or ERS)")
+                .help("Sketch size for Weighted MinHash (DartMinHash, TreeMinHash, or ERS)")
                 .value_parser(clap::value_parser!(usize))
                 .default_value("2048"),
         )
@@ -2317,8 +2335,8 @@ fn main() -> Result<()> {
             Arg::new("method")
                 .long("method")
                 .short('m')
-                .help("Sketching method: dmh (DartMinHash) or ers (Efficient Rejection Sampling)")
-                .value_parser(["dmh", "ers"])
+                .help("Sketching method: dmh (DartMinHash), tmh (TreeMinHash), or ers (Efficient Rejection Sampling)")
+                .value_parser(["dmh", "tmh", "ers"])
                 .default_value("dmh"),
         )
         .arg(
@@ -2454,6 +2472,9 @@ fn main() -> Result<()> {
     }
 
     info!("method={method}   k={k}   seed={seed}");
+    if method == "tmh" {
+        info!("TreeMinHash enabled");
+    }
     if method == "ers" {
         info!("ERS L={ers_l}");
     }
