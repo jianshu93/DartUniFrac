@@ -120,7 +120,9 @@ $$D_{UniFrac}(A,B)=1-\frac{\displaystyle \sum_{i\in E} \ell_i \cdot \min(\max_{j
 since $\displaystyle \ell_i$ can be moved inside max and min (same for sample A and B) and $\max_{j\in {Desc}(i)} x_j(A)$ and $\max_{j\in {Desc}(i)} x_j(B)$ are either 1 or 0. Therefore, it can be rewritten as:
 $$D_{UniFrac}(x,y)=1-J_w(x,y) = 1- \frac{\sum_{i=1}^n \min(x_i, y_i)}{\sum_{i=1}^n \max(x_i, y_i)}$$
 
-here, $\displaystyle J_w(x,y)$ is ***Weighted Jaccard Similarity***, which can be efficiently estimated via Weighted MinHash, a sketching algorithm that is widely used for large-scale text mining. We chose [DartMinHash](https://arxiv.org/abs/2005.11547), [TreeMinHash](https://github.com/oertl/treeminhash) and [Efficient Rejection Sampling](https://ojs.aaai.org/index.php/AAAI/article/view/16543) due to their speed for sparse and dense data. In practice, large-scale studies are always sparse, so DartMinHash will be more appropriate because it is both fast and more accurate in this case. However, for cases where there are so many samples but not sparse (e.g., synthetic communities), ERS should be used. See "Choosing L for Efficent Rejection Sampling (ERS)" section for details. In the sparse regime, there can be cases where the sum of set element weight are extremely large or small (e.g., large branch lengths) and TreeMinHash can be a better option.
+here, $\displaystyle J_w(x,y)$ is ***Weighted Jaccard Similarity***, which can be efficiently estimated via Weighted MinHash, a sketching algorithm that is widely used for large-scale text mining. We chose [DartMinHash](https://arxiv.org/abs/2005.11547), [TreeMinHash](https://github.com/oertl/treeminhash) and [Efficient Rejection Sampling](https://ojs.aaai.org/index.php/AAAI/article/view/16543) due to their speed for sparse and dense data. In practice, large-scale studies are always sparse, so DartMinHash will be more appropriate because it is both fast and more accurate in this case. However, for cases where there are so many samples but not sparse (e.g., synthetic communities), ERS should be used. See "Choosing L for Efficent Rejection Sampling (ERS)" section for details. 
+
+In the sparse regime, there can be cases where the sum of set element weight are extremely large or small (e.g., very small branch lengths and/or raw feature counts as input, see the --raw-count option), DartMinHash is suboptimal and TreeMinHash can be a better option and can be an order of magnitude faster than DartMinHash for the sketching step. See the -m tmh option.
 
 In summary, unweighted UniFrac distance can be considered as weighted Jaccard distance on branches. A fast PCoA on the resulting DartUniFrac distance can also be computed. We rely on fixed rank subspace iteration style randomized SVD, see below. 
 
@@ -129,7 +131,7 @@ In summary, unweighted UniFrac distance can be considered as weighted Jaccard di
   <img width="50%" src ="weighted_unifrac_schematic.png">
 </div>
 
-Weighted UniFrac measuers the mass accumulate (taxa weight) over branches(see [here](https://journals.asm.org/doi/full/10.1128/aem.01996-06)). Here, Weighted UniFrac is the normalized weighted UniFrac. A similar idea can be used to derive that Weighted UniFrac is a simple transformation from weighted Jaccard
+Weighted UniFrac measures the mass accumulate (taxa weight) over branches(see [here](https://journals.asm.org/doi/full/10.1128/aem.01996-06)). Here, Weighted UniFrac is the normalized weighted UniFrac. A similar idea can be used to derive that Weighted UniFrac is a simple transformation from weighted Jaccard
 $$D_{WUnifrac}=\frac{1-J_w}{1+J_w}$$
 
 where $J_w$ is:
