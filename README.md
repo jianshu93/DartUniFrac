@@ -11,7 +11,7 @@
 
 
 # DartUniFrac: Approximate UniFrac via Weighted MinHash 🦀
-This crate provides an efficient implementation of the newly invented ***DartUniFrac*** algorithm for large-scale [UniFrac](https://en.wikipedia.org/wiki/UniFrac) computation (weighted and unweighted). We named this new algorithm DartUniFrac because the key step is to use [DartMinHash](https://arxiv.org/abs/2005.11547) or Efficient Rejection Sampling (or [ERS](https://ojs.aaai.org/index.php/AAAI/article/view/16543)) on branches and the DartMinHash/ERS algorithm is about "Among the first r darts thrown, return those hitting $x_i$". B-bits idea from [B-bits MinHash](https://dl.acm.org/doi/abs/10.1145/1772690.1772759) can be used to reduce DartMinHash sketch space and accelerate computation. 
+This crate provides an efficient implementation of the newly invented ***DartUniFrac*** algorithm for large-scale [UniFrac](https://en.wikipedia.org/wiki/UniFrac) computation (weighted and unweighted). We named this new algorithm DartUniFrac because the key step is to use [DartMinHash](https://arxiv.org/abs/2005.11547), [TreeMinHash](https://github.com/oertl/treeminhash) or Efficient Rejection Sampling (or [ERS](https://ojs.aaai.org/index.php/AAAI/article/view/16543)) on branches and the DartMinHash/ERS algorithm is about "Among the first r darts thrown, return those hitting $x_i$". B-bits idea from [B-bits MinHash](https://dl.acm.org/doi/abs/10.1145/1772690.1772759) can be used to reduce DartMinHash sketch space and accelerate computation. 
 
 
 ## Quick install and usage 
@@ -122,7 +122,7 @@ $$D_{UniFrac}(x,y)=1-J_w(x,y) = 1- \frac{\sum_{i=1}^n \min(x_i, y_i)}{\sum_{i=1}
 
 here, $\displaystyle J_w(x,y)$ is ***Weighted Jaccard Similarity***, which can be efficiently estimated via Weighted MinHash, a sketching algorithm that is widely used for large-scale text mining. We chose [DartMinHash](https://arxiv.org/abs/2005.11547), [TreeMinHash](https://github.com/oertl/treeminhash) and [Efficient Rejection Sampling](https://ojs.aaai.org/index.php/AAAI/article/view/16543) due to their speed for sparse and dense data. In practice, large-scale studies are always sparse, so DartMinHash will be more appropriate because it is both fast and more accurate in this case. However, for cases where there are so many samples but not sparse (e.g., synthetic communities), ERS should be used. See "Choosing L for Efficent Rejection Sampling (ERS)" section for details. 
 
-In the sparse regime, there can be cases where the sum of set element weight are extremely large or small (e.g., very small branch lengths and/or raw feature counts as input, see the --raw-count option), DartMinHash is suboptimal and TreeMinHash can be a better option and can be an order of magnitude faster than DartMinHash for the sketching step. See the -m tmh option.
+In the sparse regime, there can be cases where the sum of set element weight are extremely large or small (e.g., very small branch lengths and/or raw feature counts as input, see the --raw-count option), DartMinHash is suboptimal and TreeMinHash can be a better option. TreeMinHash can be an order of magnitude faster than DartMinHash for the sketching step. See the -m tmh option.
 
 In summary, unweighted UniFrac distance can be considered as weighted Jaccard distance on branches. A fast PCoA on the resulting DartUniFrac distance can also be computed. We rely on fixed rank subspace iteration style randomized SVD, see below. 
 
@@ -148,7 +148,7 @@ We first created a few libraries for the best performance of DartUniFrac impleme
 
 1.Optimal representation of balanced parenthesis for phylogenetic trees via [succparen](https://github.com/sile/succparen)
 
-2.Implementation of DartMinHash and Efficient Rejection Sampling algorithms can be found [here](https://github.com/jianshu93/dartminhash-rs).
+2.Implementation of DartMinHash, TreeMinHash and Efficient Rejection Sampling algorithms can be found [here](https://github.com/jianshu93/dartminhash-rs).
 
 3.SIMD-aware Hamming similarity for computing hash collision probability of sketches, [anndists](https://github.com/jianshu93/anndists)
 
