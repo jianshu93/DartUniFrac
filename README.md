@@ -5,6 +5,8 @@
 ![](https://anaconda.org/bioconda/gsearch/badges/platforms.svg)
 [![install with conda](https://anaconda.org/bioconda/dartunifrac/badges/downloads.svg)](https://anaconda.org/bioconda/dartunifrac)
 
+[![Latest Version](https://img.shields.io/crates/v/DartUniFrac?style=for-the-badge&color=mediumpurple&logo=rust)](https://crates.io/crates/DartUniFrac)
+
 <div align="center">
   <img width="30%" src ="DartUniFrac_logo.png">
 </div>
