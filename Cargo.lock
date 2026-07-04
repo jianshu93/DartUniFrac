@@ -64,22 +64,6 @@ dependencies = [
 
 [[package]]
 name = "anndists"
-version = "0.1.4"
-source = "git+https://github.com/jianshu93/anndists#4a13ad2093fea59f4ea9c19e419c1361da02ac66"
-dependencies = [
- "anyhow",
- "cfg-if",
- "cpu-time",
- "env_logger",
- "lazy_static",
- "log",
- "num-traits",
- "num_cpus",
- "rayon",
-]
-
-[[package]]
-name = "anndists"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8396b473aa0bceed68fb32462505387ea39fa47c7029417e0a49f10592b036"
@@ -614,9 +598,9 @@ dependencies = [
 
 [[package]]
 name = "dartminhash"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e62a2346764bdf5885991d6a822f3f5f84de5bdb57c084bd49bc49d9a1951e3f"
+checksum = "75077957a2e6fee15cf31ad0b432dec5d71cbe520e5897f58983d661b523eb8e"
 dependencies = [
  "mt19937",
  "rand_core 0.9.5",
@@ -627,7 +611,7 @@ dependencies = [
 name = "dartunifrac"
 version = "0.3.2"
 dependencies = [
- "anndists 0.1.4",
+ "anndists",
  "anyhow",
  "bitvec",
  "clap",
@@ -1099,7 +1083,7 @@ version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43a5258f079b97bf2e8311ff9579e903c899dcbac0d9a138d62e9a066778bd07"
 dependencies = [
- "anndists 0.1.5",
+ "anndists",
  "anyhow",
  "bincode 1.3.3",
  "cfg-if",

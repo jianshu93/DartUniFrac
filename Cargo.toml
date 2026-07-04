@@ -8,6 +8,11 @@ description = "Ultra-fast approximate UniFrac via Weighted MinHash"
 license = "MIT OR Apache-2.0"
 keywords = ["unifrac", "phylogenetic", "MinHash", "succint", "Jaccard"]
 
+[lib]
+name = "dartunifrac"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
 [[bin]]
 
 name = "dartunifrac"

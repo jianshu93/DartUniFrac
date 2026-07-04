@@ -18,6 +18,7 @@ use std::{
     collections::HashMap,
     fs::File,
     io::{BufRead, BufReader, BufWriter, Write},
+    sync::Once,
     time::Instant,
 };
 
@@ -45,6 +46,7 @@ use fpcoa::{FpcoaOptions, pcoa_randomized_inplace_f32};
 use ndarray::{Array1, Array2};
 
 
+#[allow(dead_code)]
 const UNIFRAC_CITATIONS: &str = r#"
 Citations:
   For DartUniFrac, please see:
@@ -2268,10 +2270,374 @@ fn trim_sketches_to_bbits(sk: Vec<Vec<u64>>, bbits: u8) -> Sketches {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct DartUniFracOptions {
+    pub tree_file: String,
+    pub input_tsv: Option<String>,
+    pub biom_h5: Option<String>,
+    pub output_file: String,
+    pub sketch_size: usize,
+    pub method: String,
+    pub bbits: u8,
+    pub ers_length: u64,
+    pub seed: u64,
+    pub weighted: bool,
+    pub raw_counts: bool,
+    pub succ: bool,
+    pub compress: bool,
+    pub pcoa: bool,
+    pub streaming: bool,
+    pub streaming_block_size: Option<usize>,
+    pub threads: Option<usize>,
+}
+
+impl Default for DartUniFracOptions {
+    fn default() -> Self {
+        Self {
+            tree_file: String::new(),
+            input_tsv: None,
+            biom_h5: None,
+            output_file: "unifrac.tsv".to_owned(),
+            sketch_size: 2048,
+            method: "dmh".to_owned(),
+            bbits: 16,
+            ers_length: 2048,
+            seed: 1337,
+            weighted: false,
+            raw_counts: false,
+            succ: false,
+            compress: false,
+            pcoa: false,
+            streaming: false,
+            streaming_block_size: None,
+            threads: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DartUniFracDistanceMatrix {
+    pub sample_names: Vec<String>,
+    pub distances: Vec<f32>,
+}
+
+static LOGGER_INIT: Once = Once::new();
+
+pub fn init_logging_from_env() {
+    LOGGER_INIT.call_once(|| {
+        let _ = env_logger::Builder::from_default_env().try_init();
+        log::info!("Logger initialized from default environment");
+    });
+}
+
+fn configure_rayon_threads(threads: Option<usize>) {
+    let requested = threads.unwrap_or_else(num_cpus::get).max(1);
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(requested)
+        .build_global()
+    {
+        Ok(()) => info!("{} threads will be used ", rayon::current_num_threads()),
+        Err(err) => info!(
+            "rayon global thread pool already initialized ({err}); using {} threads",
+            rayon::current_num_threads()
+        ),
+    }
+}
+
+fn normalize_bbits(bbits_in: u8) -> u8 {
+    match bbits_in {
+        16 | 32 | 64 => bbits_in,
+        other => {
+            warn!(
+                "--bbits={} not supported; using 16 (supported: 16/32/64).",
+                other
+            );
+            16
+        }
+    }
+}
+
+fn build_dartunifrac_sketches(options: &DartUniFracOptions) -> Result<(Vec<String>, Sketches)> {
+    if options.tree_file.is_empty() {
+        anyhow::bail!("tree_file is required");
+    }
+    if options.input_tsv.is_some() == options.biom_h5.is_some() {
+        anyhow::bail!("exactly one of input_tsv or biom_h5 must be set");
+    }
+
+    let input_tsv = options.input_tsv.as_deref();
+    let biom_path = options.biom_h5.as_deref();
+    let method = options.method.as_str();
+    let bbits = normalize_bbits(options.bbits);
+    info!("bbits = {}", bbits);
+    info!(
+        "method={}   k={}   seed={}",
+        method, options.sketch_size, options.seed
+    );
+    if method == "tmh" {
+        info!("TreeMinHash enabled");
+    }
+    if method == "ers" {
+        info!("ERS L={}", options.ers_length);
+    }
+    if options.weighted {
+        if options.raw_counts {
+            info!(
+                "Weighted mode with raw counts: no per-sample relative-abundance normalization before branch accumulation"
+            );
+        } else {
+            info!("Weighted mode with relative abundance normalization");
+        }
+    } else {
+        if options.raw_counts {
+            warn!("raw_counts was set but ignored because weighted was not set");
+        }
+        info!("Unweighted mode");
+    };
+    if options.succ {
+        info!("Using succparen balanced-parentheses tree representation");
+    } else {
+        info!("Using simple Newick tree parsing (default)");
+    }
+
+    let (samples, sketches_u64): (Vec<String>, Vec<Vec<u64>>) = if options.weighted {
+        if options.succ {
+            build_sketches_weighted(
+                &options.tree_file,
+                input_tsv,
+                biom_path,
+                options.sketch_size,
+                method,
+                options.ers_length,
+                options.seed,
+                options.raw_counts,
+            )?
+        } else {
+            build_sketches_weighted_simple(
+                &options.tree_file,
+                input_tsv,
+                biom_path,
+                options.sketch_size,
+                method,
+                options.ers_length,
+                options.seed,
+                options.raw_counts,
+            )?
+        }
+    } else if options.succ {
+        build_sketches(
+            &options.tree_file,
+            input_tsv,
+            biom_path,
+            options.sketch_size,
+            method,
+            options.ers_length,
+            options.seed,
+        )?
+    } else {
+        build_sketches_simple(
+            &options.tree_file,
+            input_tsv,
+            biom_path,
+            options.sketch_size,
+            method,
+            options.ers_length,
+            options.seed,
+        )?
+    };
+
+    Ok((samples, trim_sketches_to_bbits(sketches_u64, bbits)))
+}
+
+fn compute_pairwise_distances(sketches: &Sketches, weighted: bool) -> Vec<f32> {
+    macro_rules! compute_pairwise_from_sketches {
+        ($sketches:expr, $weighted:expr) => {{
+            let n = $sketches.len();
+            let dh = DistHamming;
+            let mut out = vec![0.0f32; n * n];
+
+            out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+                row[i] = 0.0f32;
+                for j in (i + 1)..n {
+                    let mut d: f32 = dh.eval(&$sketches[i], &$sketches[j]) as f32;
+                    if $weighted {
+                        d = if d < 2.0f32 { d / (2.0f32 - d) } else { 1.0f32 };
+                    }
+                    row[j] = d;
+                }
+            });
+
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    let v = out[i * n + j];
+                    out[j * n + i] = v;
+                }
+            }
+            out
+        }};
+    }
+
+    match sketches {
+        Sketches::U16(s) => compute_pairwise_from_sketches!(s, weighted),
+        Sketches::U32(s) => compute_pairwise_from_sketches!(s, weighted),
+        Sketches::U64(s) => compute_pairwise_from_sketches!(s, weighted),
+    }
+}
+
+pub fn compute_dartunifrac_matrix(
+    options: &DartUniFracOptions,
+) -> Result<DartUniFracDistanceMatrix> {
+    configure_rayon_threads(options.threads);
+    let (samples, sketches) = build_dartunifrac_sketches(options)?;
+
+    let t2 = Instant::now();
+    let distances = compute_pairwise_distances(&sketches, options.weighted);
+    info!("pairwise distances in {} ms", t2.elapsed().as_millis());
+
+    Ok(DartUniFracDistanceMatrix {
+        sample_names: samples,
+        distances,
+    })
+}
+
+pub fn run_dartunifrac(options: &DartUniFracOptions) -> Result<()> {
+    configure_rayon_threads(options.threads);
+    let (samples, sketches) = build_dartunifrac_sketches(options)?;
+    let nsamp = samples.len();
+
+    if options.streaming {
+        if options.pcoa {
+            warn!("pcoa is incompatible with streaming; skipping PCoA in streaming mode.");
+        }
+        if options.compress {
+            warn!(
+                "compress is ignored with streaming; streaming output is already zstd-compressed."
+            );
+        }
+        let out_path_stream: PathBuf = {
+            let p_stream = Path::new(&options.output_file);
+            match p_stream.extension().and_then(|e| e.to_str()) {
+                Some("zst") => p_stream.to_path_buf(),
+                _ => PathBuf::from(format!("{}.zst", options.output_file)),
+            }
+        };
+
+        let out_path_stream_str = out_path_stream.to_string_lossy();
+
+        info!(
+            "Streaming zstd-compressed distance matrix -> {}",
+            out_path_stream_str
+        );
+        match &sketches {
+            Sketches::U16(s) => write_matrix_streaming_zstd_u16(
+                &samples,
+                s,
+                &out_path_stream_str,
+                options.streaming_block_size,
+                options.weighted,
+            )?,
+            Sketches::U32(s) => write_matrix_streaming_zstd_u32(
+                &samples,
+                s,
+                &out_path_stream_str,
+                options.streaming_block_size,
+                options.weighted,
+            )?,
+            Sketches::U64(s) => write_matrix_streaming_zstd_u64(
+                &samples,
+                s,
+                &out_path_stream_str,
+                options.streaming_block_size,
+                options.weighted,
+            )?,
+        }
+        info!("Done -> {}", out_path_stream_str);
+        return Ok(());
+    }
+
+    let t2 = Instant::now();
+    let dist = compute_pairwise_distances(&sketches, options.weighted);
+    info!("pairwise distances in {} ms", t2.elapsed().as_millis());
+
+    let out_path: PathBuf = if options.compress {
+        let p = Path::new(&options.output_file);
+        match p.extension().and_then(|e| e.to_str()) {
+            Some("zst") => p.to_path_buf(),
+            _ => PathBuf::from(format!("{}.zst", options.output_file)),
+        }
+    } else {
+        PathBuf::from(&options.output_file)
+    };
+
+    let out_path_str = out_path.to_string_lossy();
+
+    if options.compress {
+        info!("Writing compressed (zstd) output -> {}", out_path_str);
+        write_matrix_zstd(&samples, &dist, nsamp, &out_path_str)?;
+    } else {
+        info!("Writing uncompressed output -> {}", out_path_str);
+        write_matrix(&samples, &dist, nsamp, &out_path_str)?;
+    }
+    info!("Done -> {}", out_path_str);
+
+    if options.pcoa {
+        let n = nsamp;
+        let mut dm_f32 = Array2::from_shape_vec((n, n), dist).expect("distance matrix shape");
+
+        let opts = FpcoaOptions {
+            k: 10,
+            oversample: 8,
+            nbiter: 2,
+            symmetrize_input: false,
+        };
+
+        info!(
+            "Running randomized PCoA: k={}, oversample={}, iters={}",
+            opts.k, opts.oversample, opts.nbiter
+        );
+        let t_pcoa = Instant::now();
+        let res = pcoa_randomized_inplace_f32(&mut dm_f32, opts);
+        info!("PCoA done in {} ms", t_pcoa.elapsed().as_millis());
+
+        let pcoa_path = {
+            let p_pcoa = std::path::Path::new(&options.output_file);
+            let mut pb_pcoa = p_pcoa.to_path_buf();
+            pb_pcoa.set_file_name("pcoa.txt");
+            pb_pcoa
+        };
+        let ord_path = {
+            let p = std::path::Path::new(&options.output_file);
+            let mut pb = p.to_path_buf();
+            pb.set_file_name("ordination.txt");
+            pb
+        };
+        write_pcoa(
+            &samples,
+            &res.coordinates,
+            &res.proportion_explained,
+            pcoa_path.to_str().unwrap(),
+        )?;
+        info!(
+            "Writing pcoa and ordination results -> {}",
+            ord_path.display()
+        );
+        write_pcoa_ordination(
+            &samples,
+            &res.coordinates,
+            &res.eigenvalues,
+            &res.proportion_explained,
+            ord_path.to_str().unwrap(),
+        )?;
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+#[allow(dead_code)]
 fn main() -> Result<()> {
     println!("\n ************** initializing logger *****************\n");
-    env_logger::Builder::from_default_env().init();
-    log::info!("Logger initialized from default environment");
+    init_logging_from_env();
 
     let dart = emojis::get_by_shortcode("dart")
         .map(|e| e.as_str())
@@ -2402,225 +2768,25 @@ fn main() -> Result<()> {
         )
         .get_matches();
 
-    let tree_file = m.get_one::<String>("tree").unwrap();
-    let input_tsv = m.get_one::<String>("input").map(|s| s.as_str());
-    let biom_path = m.get_one::<String>("biom").map(|s| s.as_str());
-    let out_file = m.get_one::<String>("output").unwrap();
-    let k = *m.get_one::<usize>("sketch-size").unwrap();
-    let weighted = m.get_flag("weighted");
-    let raw_counts = m.get_flag("raw-counts");
-    let method = m.get_one::<String>("method").unwrap().as_str();
-    let ers_l = *m.get_one::<u64>("seq-length").unwrap();
-    let seed = *m.get_one::<u64>("seed").unwrap();
-    let compress = m.get_flag("compress");
-    let pcoa = m.get_flag("pcoa");
-    let stream = m.get_flag("streaming");
-    let block = m.get_one::<usize>("block").copied();
-    let succ = m.get_flag("succ");
-    let bbits_in = *m.get_one::<u8>("bbits").unwrap();
-    let bbits: u8 = match bbits_in {
-        16 | 32 | 64 => bbits_in,
-        other => {
-            warn!("--bbits={} not supported; using 16 (supported: 16/32/64).", other);
-            16
-        }
-    };
-    info!("bbits = {}", bbits);
-
-    let threads = m
-        .get_one::<usize>("threads")
-        .copied()
-        .unwrap_or_else(|| num_cpus::get());
-
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(threads.max(1))
-        .build_global()
-        .unwrap();
-
-    info!("{} threads will be used ", rayon::current_num_threads());
-
-    info!("method={method}   k={k}   seed={seed}");
-    if method == "tmh" {
-        info!("TreeMinHash enabled");
-    }
-    if method == "ers" {
-        info!("ERS L={ers_l}");
-    }
-    if weighted {
-        if raw_counts {
-            info!("Weighted mode with raw counts: no per-sample relative-abundance normalization before branch accumulation");
-        } else {
-            info!("Weighted mode with relative abundance normalization");
-        }
-    } else {
-        if raw_counts {
-            warn!("--raw-counts was set but ignored because --weighted was not set");
-        }
-        info!("Unweighted mode");
-    };
-    if succ {
-        info!("Using succparen balanced-parentheses tree representation (--succ)");
-    } else {
-        info!("Using simple Newick tree parsing (default)");
-    }
-
-    let (samples, sketches_u64): (Vec<String>, Vec<Vec<u64>>) =
-    if weighted {
-        if succ {
-            build_sketches_weighted(tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts)?
-        } else {
-            build_sketches_weighted_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts)?
-        }
-    } else {
-        if succ {
-            build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
-        } else {
-            build_sketches_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
-        }
-    };
-    let sketches = trim_sketches_to_bbits(sketches_u64, bbits);
-    let nsamp = samples.len();
-
-    // Streaming mode: compute Hamming on the fly from sketches and stream to disk
-    if stream {
-        if pcoa {
-            warn!("--pcoa is incompatible with --stream; skipping PCoA in streaming mode.");
-        }
-        if compress {
-            warn!(
-                "--compress is ignored with --stream; streaming output is already zstd-compressed."
-            );
-        }
-        let out_path_stream: PathBuf = {
-            let p_stream = Path::new(out_file);
-            match p_stream.extension().and_then(|e| e.to_str()) {
-                Some("zst") => p_stream.to_path_buf(),
-                _ => PathBuf::from(format!("{out_file}.zst")),
-            }
-        };
-
-        let out_path_stream_str = out_path_stream.to_string_lossy();
-
-        info!(
-            "Streaming zstd-compressed distance matrix → {}",
-            out_path_stream_str
-        );
-        match &sketches {
-            Sketches::U16(s) => write_matrix_streaming_zstd_u16(&samples, s, &out_path_stream_str, block, weighted)?,
-            Sketches::U32(s) => write_matrix_streaming_zstd_u32(&samples, s, &out_path_stream_str, block, weighted)?,
-            Sketches::U64(s) => write_matrix_streaming_zstd_u64(&samples, s, &out_path_stream_str, block, weighted)?,
-        }
-        info!("Done → {}", out_path_stream_str);
-        return Ok(());
-    }
-
-    macro_rules! compute_pairwise_from_sketches {
-        ($sketches:expr, $weighted:expr) => {{
-            let n = $sketches.len();
-            let dh = DistHamming;
-            let mut out = vec![0.0f32; n * n];
-
-            out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
-                row[i] = 0.0f32;
-                for j in (i + 1)..n {
-                    let mut d: f32 = dh.eval(&$sketches[i], &$sketches[j]) as f32; // d_J ≈ 1 - Jw
-                    if $weighted {
-                        d = if d < 2.0f32 { d / (2.0f32 - d) } else { 1.0f32 };
-                    }
-                    row[j] = d;
-                }
-            });
-
-            for i in 0..n {
-                for j in (i + 1)..n {
-                    let v = out[i * n + j];
-                    out[j * n + i] = v;
-                }
-            }
-            out
-        }};
-    }
-
-    // Pairwise UniFrac (≈ 1 - Jaccard) via normalized Hamming on ID arrays (full N×N in f32)
-    let t2 = Instant::now();
-    let dist: Vec<f32> = match &sketches {
-        Sketches::U16(s) => compute_pairwise_from_sketches!(s, weighted),
-        Sketches::U32(s) => compute_pairwise_from_sketches!(s, weighted),
-        Sketches::U64(s) => compute_pairwise_from_sketches!(s, weighted),
-    };
-    info!("pairwise distances in {} ms", t2.elapsed().as_millis());
-
-    // Write output (fast ryu formatting) with compression (.zst)
-    let out_path: PathBuf = if compress {
-        let p = Path::new(out_file);
-        match p.extension().and_then(|e| e.to_str()) {
-            Some("zst") => p.to_path_buf(),
-            _ => PathBuf::from(format!("{out_file}.zst")),
-        }
-    } else {
-        PathBuf::from(out_file)
+    let options = DartUniFracOptions {
+        tree_file: m.get_one::<String>("tree").unwrap().clone(),
+        input_tsv: m.get_one::<String>("input").cloned(),
+        biom_h5: m.get_one::<String>("biom").cloned(),
+        output_file: m.get_one::<String>("output").unwrap().clone(),
+        sketch_size: *m.get_one::<usize>("sketch-size").unwrap(),
+        method: m.get_one::<String>("method").unwrap().clone(),
+        bbits: *m.get_one::<u8>("bbits").unwrap(),
+        ers_length: *m.get_one::<u64>("seq-length").unwrap(),
+        seed: *m.get_one::<u64>("seed").unwrap(),
+        weighted: m.get_flag("weighted"),
+        raw_counts: m.get_flag("raw-counts"),
+        succ: m.get_flag("succ"),
+        compress: m.get_flag("compress"),
+        pcoa: m.get_flag("pcoa"),
+        streaming: m.get_flag("streaming"),
+        streaming_block_size: m.get_one::<usize>("block").copied(),
+        threads: m.get_one::<usize>("threads").copied(),
     };
 
-    let out_path_str = out_path.to_string_lossy();
-
-    if compress {
-        info!("Writing compressed (zstd) output → {}", out_path_str);
-        write_matrix_zstd(&samples, &dist, nsamp, &out_path_str)?;
-    } else {
-        info!("Writing uncompressed output → {}", out_path_str);
-        write_matrix(&samples, &dist, nsamp, &out_path_str)?;
-    }
-    info!("Done → {}", out_path_str);
-
-    if pcoa {
-        let n = nsamp;
-        let mut dm_f32 = Array2::from_shape_vec((n, n), dist).expect("distance matrix shape");
-
-        let opts = FpcoaOptions {
-            k: 10,
-            oversample: 8,
-            nbiter: 2,
-            symmetrize_input: false,
-        };
-
-        info!(
-            "Running randomized PCoA: k={}, oversample={}, iters={}",
-            opts.k, opts.oversample, opts.nbiter
-        );
-        let t_pcoa = Instant::now();
-        let res = pcoa_randomized_inplace_f32(&mut dm_f32, opts);
-        info!("PCoA done in {} ms", t_pcoa.elapsed().as_millis());
-
-        let pcoa_path = {
-            let p_pcoa = std::path::Path::new(out_file);
-            let mut pb_pcoa = p_pcoa.to_path_buf();
-            pb_pcoa.set_file_name("pcoa.txt");
-            pb_pcoa
-        };
-        let ord_path = {
-            let p = std::path::Path::new(out_file);
-            let mut pb = p.to_path_buf();
-            pb.set_file_name("ordination.txt");
-            pb
-        };
-        write_pcoa(
-            &samples,
-            &res.coordinates,
-            &res.proportion_explained,
-            pcoa_path.to_str().unwrap(),
-        )?;
-        info!(
-            "Writing pcoa and ordination results → {}",
-            ord_path.display()
-        );
-        write_pcoa_ordination(
-            &samples,
-            &res.coordinates,
-            &res.eigenvalues,
-            &res.proportion_explained,
-            ord_path.to_str().unwrap(),
-        )?;
-    }
-
-    Ok(())
+    run_dartunifrac(&options)
 }
