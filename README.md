@@ -94,6 +94,25 @@ dartunifrac-cuda -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted
 
 ```
 
+## Compile C Library
+The C API lives in `c/`. From the repository root:
+
+```bash
+cd c
+make
+```
+
+The Makefile selects platform features automatically: Linux uses
+`intel-mkl-static,stdsimd`, macOS uses `stdsimd,macos-accelerate`, and other
+platforms use `stdsimd`. To override the feature set:
+
+```bash
+make FEATURES=intel-mkl-static,stdsimd
+```
+
+This builds the Rust C library in `target/release/` and links the
+`c/example_run.c` smoke-test program.
+
 ## Overview
 
 ### Unweighted UniFrac
