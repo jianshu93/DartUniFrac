@@ -212,6 +212,7 @@ Options:
   -s, --sketch <sketch-size>  Sketch size for Weighted MinHash (DartMinHash or ERS) [default: 2048]
   -m, --method <method>       Sketching method: dmh (DartMinHash) or ers (Efficient Rejection Sampling) [default: dmh] [possible values: dmh, ers]
   --bbits <bbits>         Extracting lower bits from hashes. Supported: 16 (default), 32, 64. [default: 16]
+      --portable-sketches     Derive the branch id space from the tree alone instead of from the samples in this run, so sketches of the same sample are identical across runs and can be compared or merged. Changes the distances (equivalent to a different --seed); off by default
   -l, --length <seq-length>   Per-hash independent random sequence length for ERS, must be >= 1024 [default: 4096]
   -T, --threads <threads>     Number of threads, default all logical cores
       --seed <seed>           Random seed for reproducibility [default: 1337]
@@ -243,7 +244,38 @@ dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048
 ### Streaming mode (reduce memory requirement) for large number of samples. Block size is normally 1/50 to 1/5 of sample size
 dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048 -o unifrac_dmh_dist.tsv --streaming --block 8192
 
+### Portable sketches: the two runs below agree exactly on the samples they share
+dartunifrac -t ./data/ASVs_aligned.tre -i ./data/ASVs_counts.txt --weighted --portable-sketches -o batch1.tsv
+dartunifrac -t ./data/ASVs_aligned.tre -i ./more_samples.txt     --weighted --portable-sketches -o batch2.tsv
+
 ```
+
+### Portable sketches
+
+By default the branches are numbered by compacting over those touched by the
+samples of the current run. That numbering feeds the hash function, so the same
+sample sketched next to a different set of samples produces a different sketch,
+and distances are only comparable within a single invocation.
+
+`--portable-sketches` numbers the branches from the tree instead, using every
+branch with a positive length whether or not a sample touches it. A sample's
+sketch then depends only on that sample, the tree and the sketching parameters
+(`-s`, `-m`, `--bbits`, `--seed`, `--weighted`, `--raw-counts`), so sketches
+built by separate runs are directly comparable — samples can be sketched in
+batches, or sketched once and compared later, without recomputing anything.
+
+Notes:
+
+- The flag changes the distances it reports. The estimator is unchanged and the
+  shift is the same kind produced by picking a different `--seed`: measured on
+  Earth Microbiome Project data against exact UniFrac, mean RMSE moved from
+  0.00530 to 0.00543 across five seeds, against a seed-to-seed spread of
+  0.00452–0.00605. Runtime and peak memory are unchanged.
+- Sketches stay comparable only while the tree does. Adding or removing
+  branches renumbers the tree and invalidates previously computed sketches.
+- Not available with `--weighted -m ers`: weighted ERS scales each branch by the
+  largest weight seen among the run's samples, so its sketches are
+  run-dependent no matter how branches are numbered. Use `-m dmh` or `-m tmh`.
 
 ## GPU support (DartUniFrac-GPU branch, Linux only)
 ### Pre-built binary

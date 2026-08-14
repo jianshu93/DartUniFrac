@@ -174,6 +174,25 @@ struct WorkerAccum {
     touched: Vec<usize>,
 }
 
+/// Choose the edge id space that the weighted-MinHash hashes over.
+///
+/// By default the space is compacted over the edges touched by the samples in
+/// *this* run (`used`), which is compact but run-dependent: the same sample
+/// sketched alongside a different set of samples lands in a different id space
+/// and therefore produces a different sketch. Sketches are then only comparable
+/// against others produced by the same invocation.
+///
+/// With `portable`, the space is derived from the tree alone -- every edge with
+/// a positive branch length, whether or not any sample touches it. A sample's
+/// sketch then depends only on that sample, the tree, and the sketching
+/// parameters, so sketches built by separate runs are directly comparable and
+/// can be merged or stored for later reuse.
+fn active_edge_ids(total: usize, lens: &[f64], used: &[bool], portable: bool) -> Vec<usize> {
+    (0..total)
+        .filter(|&v| lens[v] > 0.0 && (portable || used[v]))
+        .collect()
+}
+
 fn sketch_with_tree_minhash(wsets: &[Vec<(u64, f64)>], k: usize, seed: u64) -> Vec<Vec<u64>> {
     let mut rng = mt_from_seed(seed);
     let tmh = TreeMinHash::new_mt(&mut rng, k as u64);
@@ -780,6 +799,7 @@ fn build_sketches(
     method: &str,
     ers_l: u64,
     seed: u64,
+    portable: bool,
 ) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
     // Load tree & balanced parens
     let raw = std::fs::read_to_string(tree_file).context("read newick")?;
@@ -999,7 +1019,7 @@ fn build_sketches(
             used[vid as usize] = true;
         }
     }
-    let active_edges: Vec<usize> = (0..total).filter(|&v| used[v] && lens[v] > 0.0).collect();
+    let active_edges: Vec<usize> = active_edge_ids(total, &lens, &used, portable);
     if active_edges.is_empty() {
         anyhow::bail!("No active edges after presence accumulation.");
     }
@@ -1112,6 +1132,7 @@ fn build_sketches_weighted(
     ers_l: u64,
     seed: u64,
     raw_counts: bool,
+    portable: bool,
 ) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
     // Load tree & balanced parens
     let raw = std::fs::read_to_string(tree_file).context("read newick")?;
@@ -1376,7 +1397,7 @@ fn build_sketches_weighted(
             used[vid as usize] = true;
         }
     }
-    let active_edges: Vec<usize> = (0..total).filter(|&v| used[v] && lens[v] > 0.0).collect();
+    let active_edges: Vec<usize> = active_edge_ids(total, &lens, &used, portable);
 
     if active_edges.is_empty() {
         anyhow::bail!("No active edges for weighted case.");
@@ -1598,6 +1619,7 @@ fn build_sketches_simple(
     method: &str,
     ers_l: u64,
     seed: u64,
+    portable: bool,
 ) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
     // Load tree
     let raw = std::fs::read_to_string(tree_file).context("read newick")?;
@@ -1809,9 +1831,7 @@ fn build_sketches_simple(
             used[vid as usize] = true;
         }
     }
-    let active_edges: Vec<usize> = (0..total)
-        .filter(|&v| used[v] && lens[v] > 0.0)
-        .collect();
+    let active_edges: Vec<usize> = active_edge_ids(total, &lens, &used, portable);
     if active_edges.is_empty() {
         anyhow::bail!("No active edges after presence accumulation.");
     }
@@ -1876,6 +1896,7 @@ fn build_sketches_weighted_simple(
     ers_l: u64,
     seed: u64,
     raw_counts: bool,
+    portable: bool,
 ) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
     // Load tree
     let raw = std::fs::read_to_string(tree_file).context("read newick")?;
@@ -2136,7 +2157,7 @@ fn build_sketches_weighted_simple(
             used[vid as usize] = true;
         }
     }
-    let active_edges: Vec<usize> = (0..total).filter(|&v| used[v] && lens[v] > 0.0).collect();
+    let active_edges: Vec<usize> = active_edge_ids(total, &lens, &used, portable);
 
     if active_edges.is_empty() {
         anyhow::bail!("No active edges for weighted case.");
@@ -2353,6 +2374,16 @@ fn main() -> Result<()> {
                 .default_value("16"),
         )
         .arg(
+            Arg::new("portable-sketches")
+                .long("portable-sketches")
+                .help(
+                    "Derive the branch id space from the tree alone instead of from the samples in this run, \
+                     so sketches of the same sample are identical across runs and can be compared or merged. \
+                     Changes the distances (equivalent to a different --seed); off by default",
+                )
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("seq-length")
                 .long("length")
                 .short('l')
@@ -2427,6 +2458,23 @@ fn main() -> Result<()> {
     };
     info!("bbits = {}", bbits);
 
+    let portable = m.get_flag("portable-sketches");
+    // Weighted ERS derives its per-branch caps from the maximum weight observed
+    // across the samples in the run, so its sketches stay run-dependent however
+    // the id space is chosen. Refuse the combination rather than hand back
+    // sketches that silently are not portable. Unweighted ERS is unaffected --
+    // there the caps are the branch lengths, which come from the tree.
+    if portable && weighted && method == "ers" {
+        anyhow::bail!(
+            "--portable-sketches cannot be combined with --weighted -m ers: weighted ERS scales \
+             each branch by the largest weight seen among the samples in the run, so its sketches \
+             are not comparable across runs. Use -m dmh or -m tmh for portable weighted sketches."
+        );
+    }
+    if portable {
+        info!("Portable sketches: branch id space derived from the tree, not from this sample set");
+    }
+
     let threads = m
         .get_one::<usize>("threads")
         .copied()
@@ -2467,15 +2515,15 @@ fn main() -> Result<()> {
     let (samples, sketches_u64): (Vec<String>, Vec<Vec<u64>>) =
     if weighted {
         if succ {
-            build_sketches_weighted(tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts)?
+            build_sketches_weighted(tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts, portable)?
         } else {
-            build_sketches_weighted_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts)?
+            build_sketches_weighted_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts, portable)?
         }
     } else {
         if succ {
-            build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
+            build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed, portable)?
         } else {
-            build_sketches_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
+            build_sketches_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed, portable)?
         }
     };
     let sketches = trim_sketches_to_bbits(sketches_u64, bbits);
@@ -2623,4 +2671,110 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TREE: &str = "data/ASVs_aligned.tre";
+    const TABLE: &str = "data/ASVs_counts.txt";
+    const K: usize = 2048;
+    const SEED: u64 = 1337;
+
+    /// Copy the fixture table keeping only its first `n_samples` columns, so the
+    /// retained samples carry byte-identical counts in both the full and the
+    /// subset table. Any change in their sketches is then attributable to the
+    /// sample set alone.
+    fn subset_table(n_samples: usize, tag: &str) -> PathBuf {
+        let src = std::fs::read_to_string(TABLE).expect("read fixture table");
+        let mut out = String::new();
+        for line in src.lines() {
+            let cols: Vec<&str> = line.split('\t').collect();
+            out.push_str(&cols[..=n_samples].join("\t"));
+            out.push('\n');
+        }
+        let dest = std::env::temp_dir().join(format!(
+            "dartunifrac_{tag}_{n_samples}_{}.tsv",
+            std::process::id()
+        ));
+        std::fs::write(&dest, out).expect("write subset table");
+        dest
+    }
+
+    fn sketch(table: &Path, weighted: bool, portable: bool) -> (Vec<String>, Vec<Vec<u64>>) {
+        let table = table.to_str().unwrap();
+        if weighted {
+            build_sketches_weighted_simple(
+                TREE, Some(table), None, K, "dmh", 2048, SEED, false, portable,
+            )
+        } else {
+            build_sketches_simple(TREE, Some(table), None, K, "dmh", 2048, SEED, portable)
+        }
+        .expect("build sketches")
+    }
+
+    /// Sketches for the samples common to both runs, keyed by sample id.
+    fn shared(
+        a: &(Vec<String>, Vec<Vec<u64>>),
+        b: &(Vec<String>, Vec<Vec<u64>>),
+    ) -> Vec<(String, Vec<u64>, Vec<u64>)> {
+        a.0.iter()
+            .enumerate()
+            .filter_map(|(i, name)| {
+                b.0.iter()
+                    .position(|other| other == name)
+                    .map(|j| (name.clone(), a.1[i].clone(), b.1[j].clone()))
+            })
+            .collect()
+    }
+
+    /// With --portable-sketches the branch id space comes from the tree, so a
+    /// sample's sketch must not depend on which other samples were in the run.
+    /// This is what makes sketches from separate runs comparable and mergeable.
+    #[test]
+    fn portable_sketches_do_not_depend_on_the_sample_set() {
+        for weighted in [false, true] {
+            let subset = subset_table(3, "portable");
+            let few = sketch(&subset, weighted, true);
+            let all = sketch(Path::new(TABLE), weighted, true);
+            let common = shared(&few, &all);
+            assert_eq!(common.len(), 3, "expected the 3 subset samples in both runs");
+            for (name, from_subset, from_full) in common {
+                assert_eq!(
+                    from_subset, from_full,
+                    "weighted={weighted}: sketch for {name} changed with the sample set"
+                );
+            }
+            let _ = std::fs::remove_file(&subset);
+        }
+    }
+
+    /// The default id space is compacted over the branches touched by the run's
+    /// own samples, so the same sample sketches differently depending on its
+    /// company. This is the behaviour --portable-sketches exists to opt out of;
+    /// pinning it here keeps the flag honest.
+    #[test]
+    fn default_sketches_depend_on_the_sample_set() {
+        let subset = subset_table(3, "default");
+        let few = sketch(&subset, true, false);
+        let all = sketch(Path::new(TABLE), true, false);
+        let common = shared(&few, &all);
+        assert_eq!(common.len(), 3);
+        assert!(
+            common.iter().any(|(_, a, b)| a != b),
+            "expected the default id space to make sketches run-dependent"
+        );
+        let _ = std::fs::remove_file(&subset);
+    }
+
+    /// Turning the flag on must not disturb a run whose samples already touch
+    /// every positive-length branch: the two id spaces coincide there.
+    #[test]
+    fn portable_matches_default_when_samples_cover_the_tree() {
+        let all_default = sketch(Path::new(TABLE), true, false);
+        let all_portable = sketch(Path::new(TABLE), true, true);
+        assert_eq!(all_default.0, all_portable.0);
+        assert_eq!(all_default.1, all_portable.1);
+    }
 }
