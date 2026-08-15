@@ -207,20 +207,21 @@ Options:
   -i, --input <input>         OTU/Feature table in TSV format
   -b, --biom <biom>           OTU/Feature table in BIOM (HDF5) format
   -o, --output <output>       Output distance matrix in TSV format [default: unifrac.tsv]
-      --weighted              Weighted UniFrac (normalized)
+      --weighted              Weighted UniFrac (normalized by default)
+      --raw-counts            Weighted mode only: pass raw table counts into branch accumulation instead of converting each sample to relative abundance
       --succ                  Use succparen balanced-parentheses tree representation
-  -s, --sketch <sketch-size>  Sketch size for Weighted MinHash (DartMinHash or ERS) [default: 2048]
-  -m, --method <method>       Sketching method: dmh (DartMinHash) or ers (Efficient Rejection Sampling) [default: dmh] [possible values: dmh, ers]
-  --bbits <bbits>         Extracting lower bits from hashes. Supported: 16 (default), 32, 64. [default: 16]
+  -s, --sketch <sketch-size>  Sketch size for Weighted MinHash (DartMinHash, TreeMinHash, or ERS) [default: 2048]
+  -m, --method <method>       Sketching method: dmh (DartMinHash), tmh (TreeMinHash), or ers (Efficient Rejection Sampling) [default: dmh] [possible values: dmh, tmh, ers]
+      --bbits <bbits>         Extracting lower bits from hashes. Supported: 16 (default), 32, 64. [default: 16]
       --portable-sketches     Derive the branch id space from the tree alone instead of from the samples in this run, so sketches of the same sample are identical across runs and can be compared or merged. Changes the distances (equivalent to a different --seed); off by default
-  -l, --length <seq-length>   Per-hash independent random sequence length for ERS, must be >= 1024 [default: 4096]
+  -l, --length <seq-length>   Per-hash independent random sequence length for ERS, must be >= 512 [default: 2048]
   -T, --threads <threads>     Number of threads, default all logical cores
       --seed <seed>           Random seed for reproducibility [default: 1337]
       --compress              Compress output with zstd, .zst suffix will be added to the output file name
-      --pcoa                  Fast Principle Coordinate Analysis based on Randomized SVD (subspace iteration), output saved to pcoa.txt/ordination.txt
+      --pcoa                  Fast Principal Coordinate Analysis based on Randomized SVD (subspace iteration), output saved to pcoa.txt/ordination.txt
       --streaming             Streaming the distance matrix while computing (zstd-compressed)
       --block <block>         Number of rows per chunk, streaming mode only
-  -h, --help                  Print help
+  -h, --help                  Print help (see more with '--help')
   -V, --version               Print version
 ```
 
@@ -259,10 +260,31 @@ and distances are only comparable within a single invocation.
 
 `--portable-sketches` numbers the branches from the tree instead, using every
 branch with a positive length whether or not a sample touches it. A sample's
-sketch then depends only on that sample, the tree and the sketching parameters
-(`-s`, `-m`, `--bbits`, `--seed`, `--weighted`, `--raw-counts`), so sketches
-built by separate runs are directly comparable — samples can be sketched in
-batches, or sketched once and compared later, without recomputing anything.
+sketch then depends only on that sample, the tree, and the sketching parameters,
+so sketches built by separate runs are directly comparable — samples can be
+sketched in batches, or sketched once and compared later, without recomputing
+anything.
+
+Two sketches are comparable only when **all** of the following match. Nothing
+currently checks this for you, so record it alongside any sketch you keep:
+
+| | |
+|---|---|
+| the tree | identical topology *and* branch lengths |
+| `-s` | sketch size |
+| `-m` | sketching method (`dmh` or `tmh`) |
+| `--bbits` | hash truncation width |
+| `--seed` | random seed |
+| `--weighted` | weighted vs unweighted |
+| `--raw-counts` | relative abundance vs raw counts |
+| `--succ` | tree parser (see below) |
+| DartMinHash version | the sketching library itself |
+
+`--succ` selects a different tree representation, and in principle a different
+branch numbering. On the trees tested here (the bundled `ASVs_aligned.tre` and a
+155k-tip Earth Microbiome Project tree) the two parsers agree exactly and produce
+identical sketches — but nothing in the code guarantees that, so treat the parser
+as part of the key.
 
 Notes:
 
@@ -271,11 +293,15 @@ Notes:
   Earth Microbiome Project data against exact UniFrac, mean RMSE moved from
   0.00530 to 0.00543 across five seeds, against a seed-to-seed spread of
   0.00452–0.00605. Runtime and peak memory are unchanged.
-- Sketches stay comparable only while the tree does. Adding or removing
-  branches renumbers the tree and invalidates previously computed sketches.
-- Not available with `--weighted -m ers`: weighted ERS scales each branch by the
-  largest weight seen among the run's samples, so its sketches are
-  run-dependent no matter how branches are numbered. Use `-m dmh` or `-m tmh`.
+- Sketches stay comparable only while the tree does. Adding or removing branches
+  renumbers the tree and invalidates previously computed sketches.
+- Not available with `-m ers`. Weighted ERS caps each branch by the largest
+  weight seen among the run's samples, so its sketches are run-dependent however
+  branches are numbered. Unweighted ERS caps by branch length and so would be
+  comparable, but a tree-derived id space spans every positive-length branch,
+  inflating the cap total and lowering the acceptance rate — which risks extra
+  finite-L bias for batches covering little of the tree. Use `-m dmh` or
+  `-m tmh`.
 
 ## GPU support (DartUniFrac-GPU branch, Linux only)
 ### Pre-built binary

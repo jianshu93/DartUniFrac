@@ -2459,16 +2459,26 @@ fn main() -> Result<()> {
     info!("bbits = {}", bbits);
 
     let portable = m.get_flag("portable-sketches");
-    // Weighted ERS derives its per-branch caps from the maximum weight observed
-    // across the samples in the run, so its sketches stay run-dependent however
-    // the id space is chosen. Refuse the combination rather than hand back
-    // sketches that silently are not portable. Unweighted ERS is unaffected --
-    // there the caps are the branch lengths, which come from the tree.
-    if portable && weighted && method == "ers" {
+    // ERS is refused under portable sketches, for two separate reasons.
+    //
+    // Weighted ERS caps each branch by the largest weight seen among the run's
+    // samples, so its sketches stay run-dependent however branches are numbered
+    // -- portability is simply unattainable.
+    //
+    // Unweighted ERS caps by branch length, which does come from the tree, so it
+    // would be portable. But a tree-derived id space spans every positive-length
+    // branch rather than only the touched ones, which inflates the cap total and
+    // so lowers the acceptance rate; for a sparse batch that risks additional
+    // finite-L bias. Rather than ship a combination whose bias depends on how
+    // much of the tree a batch happens to cover, refuse it.
+    if portable && method == "ers" {
         anyhow::bail!(
-            "--portable-sketches cannot be combined with --weighted -m ers: weighted ERS scales \
-             each branch by the largest weight seen among the samples in the run, so its sketches \
-             are not comparable across runs. Use -m dmh or -m tmh for portable weighted sketches."
+            "--portable-sketches cannot be combined with -m ers. Weighted ERS caps each branch by \
+             the largest weight among the run's samples, so its sketches are not comparable across \
+             runs. Unweighted ERS would be comparable, but a tree-derived id space spans every \
+             positive-length branch, inflating the cap total and lowering the acceptance rate, \
+             which can add finite-L bias for batches covering little of the tree. \
+             Use -m dmh or -m tmh for portable sketches."
         );
     }
     if portable {
