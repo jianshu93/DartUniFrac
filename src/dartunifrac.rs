@@ -28,7 +28,12 @@ use log::{info, warn};
 use rayon::prelude::*;
 
 use anndists::dist::{DistHamming, Distance};
-use dartminhash::{DartMinHash, ErsWmh, TreeMinHash, rng_utils::mt_from_seed};
+// The engine. `Tree`/`Table` are renamed on import purely for readability: this
+// file also handles the newick tree and the raw parsed table, so unqualified
+// `Tree`/`Table` would not say which is which at the call site.
+use dartunifrac_core::{
+    CoreError, Method, SketchParams, Table as CoreTable, Tree as CoreTree,
+};
 use hdf5::{File as H5File, types::VarLenUnicode};
 use newick::{Newick, NodeID, one_from_string};
 use succparen::{
@@ -167,39 +172,6 @@ fn collect_children<N: NndOne>(
         collect_children(&edge.node, kids, post);
     }
     post.push(pid);
-}
-
-struct WorkerAccum {
-    acc: Vec<f32>,
-    touched: Vec<usize>,
-}
-
-/// Choose the edge id space that the weighted-MinHash hashes over.
-///
-/// By default the space is compacted over the edges touched by the samples in
-/// *this* run (`used`), which is compact but run-dependent: the same sample
-/// sketched alongside a different set of samples lands in a different id space
-/// and therefore produces a different sketch. Sketches are then only comparable
-/// against others produced by the same invocation.
-///
-/// With `portable`, the space is derived from the tree alone -- every edge with
-/// a positive branch length, whether or not any sample touches it. A sample's
-/// sketch then depends only on that sample, the tree, and the sketching
-/// parameters, so sketches built by separate runs are directly comparable and
-/// can be merged or stored for later reuse.
-fn active_edge_ids(total: usize, lens: &[f64], used: &[bool], portable: bool) -> Vec<usize> {
-    (0..total)
-        .filter(|&v| lens[v] > 0.0 && (portable || used[v]))
-        .collect()
-}
-
-fn sketch_with_tree_minhash(wsets: &[Vec<(u64, f64)>], k: usize, seed: u64) -> Vec<Vec<u64>> {
-    let mut rng = mt_from_seed(seed);
-    let tmh = TreeMinHash::new_mt(&mut rng, k as u64);
-    wsets
-        .par_iter()
-        .map(|ws| tmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
-        .collect()
 }
 
 fn build_parent_and_lens_simple(t: &NwkTree) -> (Vec<usize>, Vec<f64>) {
@@ -790,27 +762,20 @@ fn write_matrix_streaming_zstd_u32(
 
 
 
-// Unweighted, build sketches without node_bits (leaf→root OR per sample)
-fn build_sketches(
-    tree_file: &str,
-    input_tsv: Option<&str>,
-    biom_h5: Option<&str>,
-    k: usize,
-    method: &str,
-    ers_l: u64,
-    seed: u64,
-    portable: bool,
-) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
-    // Load tree & balanced parens
-    let raw = std::fs::read_to_string(tree_file).context("read newick")?;
-    let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
-    let t: NwkTree = one_from_string(&sanitized).context("parse newick (sanitized)")?;
-    let mut lens_f32 = Vec::<f32>::new();
-    let trav = SuccTrav::new(&t, &mut lens_f32);
-    let bp: BalancedParensTree<LabelVec<()>, SparseOneNnd> =
-        BalancedParensTree::new_builder(trav, LabelVec::<()>::new()).build_all();
+// ---------------------------------------------------------------------------
+// Tree loading and table marshaling for `dartunifrac-core`.
+//
+// The engine takes a tree as parent pointers plus branch lengths and a feature
+// table already resolved to node ids, so everything that touches a file, a
+// feature name, or an input format lives here. The four `build_sketches*`
+// entry points below keep their original signatures and are now thin adapters.
+// ---------------------------------------------------------------------------
 
-    // Leaves & mapping name→leaf
+/// Leaf node ids and their names, in the `newick` crate's node order.
+///
+/// An unnamed leaf gets the synthetic name `L{id}`, which cannot match a real
+/// feature id — such a tip is simply never populated.
+fn leaf_index(t: &NwkTree) -> (Vec<usize>, Vec<String>) {
     let mut leaf_ids = Vec::<usize>::new();
     let mut leaf_nm = Vec::<String>::new();
     for n in t.nodes() {
@@ -823,253 +788,274 @@ fn build_sketches(
             );
         }
     }
-    let t2leaf: HashMap<&str, usize> = leaf_nm
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.as_str(), i))
-        .collect();
+    (leaf_ids, leaf_nm)
+}
 
-    // children, post (unused here but harmless), parents, lengths
+fn parse_tree(tree_file: &str) -> Result<NwkTree> {
+    let raw = std::fs::read_to_string(tree_file).context("read newick")?;
+    let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
+    one_from_string(&sanitized).context("parse newick (sanitized)")
+}
+
+/// Parent pointers and branch lengths via the succinct balanced-parens tree.
+///
+/// Note the two id spaces in play: `SuccTrav` fills `lens` against the `newick`
+/// crate's node ids, while `collect_children` builds the child lists against
+/// `BalancedParensTree` ids. They coincide because both derive from the same DFS
+/// order, and the branch lengths round through f32 on the way — both are relied
+/// upon for bit-identical output, so neither may be "cleaned up".
+fn tree_arrays_succ(t: &NwkTree) -> CoreTree {
+    let mut lens_f32 = Vec::<f32>::new();
+    let trav = SuccTrav::new(t, &mut lens_f32);
+    let bp: BalancedParensTree<LabelVec<()>, SparseOneNnd> =
+        BalancedParensTree::new_builder(trav, LabelVec::<()>::new()).build_all();
+
     let total = bp.len() + 1;
     let mut kids = vec![Vec::<usize>::new(); total];
     let mut post = Vec::<usize>::with_capacity(total);
     lens_f32.resize(total, 0.0);
     collect_children::<SparseOneNnd>(&bp.root(), &mut kids, &mut post);
-    let parent = compute_parent(total, &kids);
-    let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
 
+    CoreTree {
+        parent: compute_parent(total, &kids),
+        lens: lens_f32.iter().map(|&x| x as f64).collect(),
+    }
+}
 
-    // Build per-sample presence sets (emit (edge_id, ℓ_v) when present)
-    let (samples, wsets_by_vid): (Vec<String>, Vec<Vec<(u64, f64)>>) = if let Some(tsv) = input_tsv
-    {
-        // TSV dense (presence/absence)
-        let (taxa, samples, mat) = read_table(tsv)?;
+/// Parent pointers and branch lengths straight from the parsed Newick tree.
+fn tree_arrays_simple(t: &NwkTree) -> CoreTree {
+    let (parent, lens) = build_parent_and_lens_simple(t);
+    CoreTree { parent, lens }
+}
+
+/// Map feature rows onto leaf ordinals; `None` for a feature absent from the tree.
+fn row_to_leaf(taxa: &[String], leaf_nm: &[String]) -> Vec<Option<usize>> {
+    let t2leaf: HashMap<&str, usize> = leaf_nm
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+    taxa.iter()
+        .map(|n| t2leaf.get(n.as_str()).copied())
+        .collect()
+}
+
+/// Dense TSV to CSC over node ids.
+///
+/// Walks features in ascending row order within each sample, which is the order
+/// the accumulation used before the engine moved out, and drops non-positive
+/// values — a filter the dense reader applies and the BIOM reader does not.
+/// `col_sums`, when weighted, is summed over *every* row including features the
+/// tree does not contain.
+fn table_from_tsv(
+    taxa: &[String],
+    counts: &[Vec<f64>],
+    row2leaf: &[Option<usize>],
+    leaf_ids: &[usize],
+    nsamp: usize,
+    weighted: bool,
+) -> CoreTable {
+    let mut col_sums = vec![0.0f64; nsamp];
+    if weighted {
+        for r in 0..taxa.len() {
+            for s in 0..nsamp {
+                col_sums[s] += counts[r][s];
+            }
+        }
+    }
+
+    let mut colptr = vec![0usize; nsamp + 1];
+    let mut node = Vec::<usize>::new();
+    let mut value = Vec::<f64>::new();
+    for s in 0..nsamp {
+        for (r, lopt) in row2leaf.iter().enumerate() {
+            let lp = match lopt {
+                Some(v) => *v,
+                None => continue,
+            };
+            let val = counts[r][s];
+            if val <= 0.0 {
+                continue;
+            }
+            node.push(leaf_ids[lp]);
+            value.push(val);
+        }
+        colptr[s + 1] = node.len();
+    }
+
+    CoreTable {
+        n_samples: nsamp,
+        colptr,
+        node,
+        value,
+        col_sums,
+    }
+}
+
+/// BIOM CSR to CSC over node ids.
+///
+/// Every stored entry counts, with no value filter — matching the BIOM path as
+/// it was, which means a stored zero marks a feature present and a negative
+/// weight survives into the accumulation.
+fn table_from_biom(
+    indptr: &[u32],
+    indices: &[u32],
+    data: &[f64],
+    row2leaf: &[Option<usize>],
+    leaf_ids: &[usize],
+    nsamp: usize,
+    weighted: bool,
+    log_label: &str,
+) -> CoreTable {
+    let mut col_sums = vec![0.0f64; nsamp];
+    if weighted {
+        for r in 0..(indptr.len() - 1) {
+            for k in indptr[r] as usize..indptr[r + 1] as usize {
+                col_sums[indices[k] as usize] += data[k];
+            }
+        }
+    }
+
+    info!("{log_label}transposing BIOM CSR→CSC …");
+    let (csc_ptr, rowind, vals) = csr_to_csc(indptr, indices, data, nsamp);
+
+    let mut colptr = vec![0usize; nsamp + 1];
+    let mut node = Vec::<usize>::new();
+    let mut value = Vec::<f64>::new();
+    for s in 0..nsamp {
+        for kk in csc_ptr[s]..csc_ptr[s + 1] {
+            let lp = match row2leaf[rowind[kk]] {
+                Some(v) => v,
+                None => continue,
+            };
+            node.push(leaf_ids[lp]);
+            value.push(vals[kk]);
+        }
+        colptr[s + 1] = node.len();
+    }
+
+    CoreTable {
+        n_samples: nsamp,
+        colptr,
+        node,
+        value,
+        col_sums,
+    }
+}
+
+/// Translate an engine error into this binary's historical wording.
+///
+/// The engine reports "fewer than two survivors" as a value because the C API
+/// must turn it into an empty result rather than a failure; here it stays fatal.
+fn core_err(e: CoreError, few_msg: &str, no_edges_msg: &str) -> anyhow::Error {
+    match e {
+        CoreError::FewerThanTwoNonEmptySamples => anyhow::anyhow!("{few_msg}"),
+        CoreError::NoActiveEdges => anyhow::anyhow!("{no_edges_msg}"),
+        CoreError::MalformedTable(m) => anyhow::anyhow!("malformed input: {m}"),
+    }
+}
+
+fn method_from_str(method: &str) -> Result<Method> {
+    match method {
+        "dmh" => Ok(Method::Dmh),
+        "tmh" => Ok(Method::Tmh),
+        "ers" => Ok(Method::Ers),
+        other => anyhow::bail!("unsupported sketching method: {other}"),
+    }
+}
+
+/// Read the requested table and marshal it for the engine.
+fn load_table(
+    input_tsv: Option<&str>,
+    biom_h5: Option<&str>,
+    leaf_ids: &[usize],
+    leaf_nm: &[String],
+    weighted: bool,
+    log_label: &str,
+) -> Result<(Vec<String>, CoreTable)> {
+    if let Some(tsv) = input_tsv {
+        let (taxa, samples, counts) = if weighted {
+            read_table_counts(tsv)?
+        } else {
+            read_table(tsv)?
+        };
+        let row2leaf = row_to_leaf(&taxa, leaf_nm);
         let nsamp = samples.len();
-        let row2leaf: Vec<Option<usize>> = taxa
-            .iter()
-            .map(|n| t2leaf.get(n.as_str()).copied())
-            .collect();
-
-        let total_usize = total;
-        let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
-
-        info!("building per-sample presence sets from TSV …");
-        let t0 = Instant::now();
-
-        let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize], // used as seen[ ]: 0.0/1.0
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
-                    // reset only touched entries
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
-                    out.clear();
-
-                    let seen = &mut state.acc;
-                    let touched = &mut state.touched;
-
-                    for (r, lopt) in row2leaf.iter().enumerate() {
-                        if mat[r][s] <= 0.0 {
-                            continue;
-                        }
-                        let lp = match lopt {
-                            Some(v) => *v,
-                            None => continue,
-                        };
-                        let mut v = leaf_ids_ref[lp];
-
-                        loop {
-                            if seen[v] != 0.0 {
-                                break;
-                            }
-                            seen[v] = 1.0;
-                            touched.push(v);
-
-                            let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
-                            v = p;
-                        }
-                    }
-
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
-                        let lw = lens_ref[v];
-                        if lw > 0.0 {
-                            out.push((v as u64, lw));
-                        }
-                    }
-                },
-            );
-
-        info!("built presence sets in {} ms", t0.elapsed().as_millis());
-        (samples, wsets)
+        let table = table_from_tsv(&taxa, &counts, &row2leaf, leaf_ids, nsamp, weighted);
+        Ok((samples, table))
     } else {
-        // BIOM (CSR) → CSC for fast per-sample traversal
         let biom = biom_h5.expect("biom path required when TSV not provided");
-        let (taxa, samples, indptr, indices) = read_biom_csr(biom)?;
+        let (taxa, samples, indptr, indices, data) = if weighted {
+            read_biom_csr_values(biom)?
+        } else {
+            let (taxa, samples, indptr, indices) = read_biom_csr(biom)?;
+            // Presence only, so the values are synthesized rather than read.
+            let ones = vec![1.0; indices.len()];
+            (taxa, samples, indptr, indices, ones)
+        };
+        let row2leaf = row_to_leaf(&taxa, leaf_nm);
         let nsamp = samples.len();
-        let row2leaf: Vec<Option<usize>> = taxa
-            .iter()
-            .map(|n| t2leaf.get(n.as_str()).copied())
-            .collect();
+        let table = table_from_biom(
+            &indptr, &indices, &data, &row2leaf, leaf_ids, nsamp, weighted, log_label,
+        );
+        Ok((samples, table))
+    }
+}
 
-        // synthesize a data[] of ones (presence) and transpose
-        info!("transposing BIOM CSR→CSC …");
-        let ones: Vec<f64> = vec![1.0; indices.len()];
-        let (colptr, rowind, _vals) = csr_to_csc(&indptr, &indices, &ones, nsamp);
-
-        let total_usize = total;
-        let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
-
-        info!("building per-sample presence sets from BIOM (CSC) …");
-        let t0 = Instant::now();
-
-        let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize], // used as seen[ ]: 0.0/1.0
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
-                    out.clear();
-
-                    let seen = &mut state.acc;
-                    let touched = &mut state.touched;
-
-                    for kk in colptr[s]..colptr[s + 1] {
-                        let r = rowind[kk];
-                        let lp = match row2leaf[r] {
-                            Some(v) => v,
-                            None => continue,
-                        };
-                        let mut v = leaf_ids_ref[lp];
-
-                        loop {
-                            if seen[v] != 0.0 {
-                                break;
-                            }
-                            seen[v] = 1.0;
-                            touched.push(v);
-
-                            let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
-                            v = p;
-                        }
-                    }
-
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
-                        let lw = lens_ref[v];
-                        if lw > 0.0 {
-                            out.push((v as u64, lw));
-                        }
-                    }
-                },
-            );
-
-        info!("built presence sets in {} ms", t0.elapsed().as_millis());
-        (samples, wsets)
-    };
-
-    let nsamp = samples.len();
-    if nsamp < 2 {
+/// Shared body of the four entry points: load, marshal, sketch, name.
+fn sketch_via_core(
+    tree: CoreTree,
+    samples: Vec<String>,
+    table: CoreTable,
+    params: &SketchParams,
+    log_label: &str,
+    few_msg: &str,
+    no_edges_msg: &str,
+) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
+    if samples.len() < 2 {
         anyhow::bail!("Fewer than 2 samples; nothing to compare.");
     }
 
-    // Drop empty samples
-    let mut kept_ws = Vec::with_capacity(nsamp);
-    let mut kept_names = Vec::with_capacity(nsamp);
-    for (i, ws) in wsets_by_vid.into_iter().enumerate() {
-        if !ws.is_empty() {
-            kept_ws.push(ws);
-            kept_names.push(samples[i].clone());
-        }
-    }
-    let mut wsets = kept_ws;
-    let samples = kept_names;
-    if samples.len() < 2 {
-        anyhow::bail!("Fewer than 2 non-empty samples after filtering; nothing to compare.");
-    }
+    let out = dartunifrac_core::build_sketches(&tree, &table, params, log_label)
+        .map_err(|e| core_err(e, few_msg, no_edges_msg))?;
 
-    // Compact to active edge id space
-    let mut used = vec![false; total];
-    for ws in &wsets {
-        for &(vid, _) in ws {
-            used[vid as usize] = true;
-        }
-    }
-    let active_edges: Vec<usize> = active_edge_ids(total, &lens, &used, portable);
-    if active_edges.is_empty() {
-        anyhow::bail!("No active edges after presence accumulation.");
-    }
+    let names = out.kept.iter().map(|&i| samples[i].clone()).collect();
+    Ok((names, out.sketches))
+}
 
-    let mut id_map = vec![usize::MAX; total];
-    for (new_id, &v) in active_edges.iter().enumerate() {
-        id_map[v] = new_id;
-    }
-    for ws in &mut wsets {
-        for (id, _) in ws.iter_mut() {
-            *id = id_map[*id as usize] as u64;
-        }
-    }
-
-    info!(
-        "active edges = {} (from {} total, {} leaves)",
-        active_edges.len(),
-        total,
-        leaf_ids.len()
-    );
-
-    // Sketch (DMH or ERS with tight f64 caps)
-    info!("sketching starting...");
-    let mut rng = mt_from_seed(seed);
-    let sketches_u64: Vec<Vec<u64>> = if method == "dmh" {
-        let dmh = DartMinHash::new_mt(&mut rng, k as u64);
-        wsets
-            .par_iter()
-            .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
-            .collect()
-    } else if method == "tmh" {
-        sketch_with_tree_minhash(&wsets, k, seed)
-    } else if method == "ers" {
-        let caps: Vec<f64> = active_edges.iter().map(|&v| lens[v]).collect();
-        let ers = ErsWmh::new_mt(&mut rng, &caps, k as u64);
-        wsets
-            .par_iter()
-            .map(|ws| {
-                ers.sketch(ws, Some(ers_l))
-                    .into_iter()
-                    .map(|(id, _rank)| id)
-                    .collect()
-            })
-            .collect()
-    } else {
-        anyhow::bail!("unsupported sketching method: {method}");
+// Unweighted, succinct tree.
+fn build_sketches(
+    tree_file: &str,
+    input_tsv: Option<&str>,
+    biom_h5: Option<&str>,
+    k: usize,
+    method: &str,
+    ers_l: u64,
+    seed: u64,
+    portable: bool,
+) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
+    let t = parse_tree(tree_file)?;
+    let (leaf_ids, leaf_nm) = leaf_index(&t);
+    let tree = tree_arrays_succ(&t);
+    let (samples, table) = load_table(input_tsv, biom_h5, &leaf_ids, &leaf_nm, false, "")?;
+    let params = SketchParams {
+        k,
+        method: method_from_str(method)?,
+        ers_l,
+        seed,
+        weighted: false,
+        raw_counts: false,
+        portable,
     };
-    info!("sketching done.");
-
-    Ok((samples, sketches_u64))
+    sketch_via_core(
+        tree,
+        samples,
+        table,
+        &params,
+        "",
+        "Fewer than 2 non-empty samples after filtering; nothing to compare.",
+        "No active edges after presence accumulation.",
+    )
 }
 
 /// Build parent pointers from children lists. Root will have usize::MAX.
@@ -1120,9 +1106,10 @@ fn csr_to_csc(
     (colptr, rowind, vals)
 }
 
-// Weighted, build sketches for weighted UniFrac.
-// By default, input table values are converted to relative abundance per sample.
-// If raw_counts is true, raw table counts are passed into branch accumulation directly.
+// Weighted, succinct tree.
+//
+// By default the table values are converted to relative abundance per sample.
+// With `raw_counts`, raw counts go into the branch accumulation directly.
 fn build_sketches_weighted(
     tree_file: &str,
     input_tsv: Option<&str>,
@@ -1134,354 +1121,29 @@ fn build_sketches_weighted(
     raw_counts: bool,
     portable: bool,
 ) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
-    // Load tree & balanced parens
-    let raw = std::fs::read_to_string(tree_file).context("read newick")?;
-    let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
-    let t: NwkTree = one_from_string(&sanitized).context("parse newick (sanitized)")?;
-    let mut lens_f32 = Vec::<f32>::new();
-    let trav = SuccTrav::new(&t, &mut lens_f32);
-    let bp: BalancedParensTree<LabelVec<()>, SparseOneNnd> =
-        BalancedParensTree::new_builder(trav, LabelVec::<()>::new()).build_all();
-
-    // Leaves & mapping name→leaf-ordinal, and leaf node ids
-    let mut leaf_ids = Vec::<usize>::new();
-    let mut leaf_nm = Vec::<String>::new();
-    for n in t.nodes() {
-        if t[n].is_leaf() {
-            leaf_ids.push(n);
-            leaf_nm.push(
-                t.name(n)
-                    .map(|s| s.to_owned())
-                    .unwrap_or_else(|| format!("L{n}")),
-            );
-        }
-    }
-    let t2leaf: HashMap<&str, usize> = leaf_nm
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.as_str(), i))
-        .collect();
-
-    // children & postorder
-    let total = bp.len() + 1;
-    let mut kids = vec![Vec::<usize>::new(); total];
-    let mut post = Vec::<usize>::with_capacity(total);
-    lens_f32.resize(total, 0.0);
-    collect_children::<SparseOneNnd>(&bp.root(), &mut kids, &mut post);
-
-    // parent pointers for leaf→root accumulation
-    let parent = compute_parent(total, &kids);
-    let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
-    info!("nodes = {}  leaves = {}", total, leaf_ids.len());
-
-    // Build per-sample weighted sets (thread-local WorkerAccum)
-    let (samples, wsets_by_vid): (Vec<String>, Vec<Vec<(u64, f64)>>) = if let Some(tsv) = input_tsv
-    {
-        // TSV (dense)
-        let (taxa, samples, counts) = read_table_counts(tsv)?;
-        let nsamp = samples.len();
-
-        let mut col_sums = vec![0.0f64; nsamp];
-        for r in 0..taxa.len() {
-            for s in 0..nsamp {
-                col_sums[s] += counts[r][s];
-            }
-        }
-
-        let row2leaf: Vec<Option<usize>> = taxa
-            .iter()
-            .map(|n| t2leaf.get(n.as_str()).copied())
-            .collect();
-
-        let total_usize = total;
-        let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
-
-        info!("building per-sample weighted sets from TSV (dense) …");
-        let t0 = Instant::now();
-
-        let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize],
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
-                    let denom = col_sums[s];
-                    if !raw_counts && denom == 0.0 {
-                        return;
-                    }
-
-                    // reset only touched entries
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
-                    out.clear();
-
-                    let acc = &mut state.acc;
-                    let touched = &mut state.touched;
-
-                    for (r, lopt) in row2leaf.iter().enumerate() {
-                        let lp = match lopt {
-                            Some(v) => *v,
-                            None => continue,
-                        };
-                        let val = counts[r][s];
-                        if val <= 0.0 {
-                            continue;
-                        }
-
-                        let inc = if raw_counts { val } else { val / denom } as f32;
-                        if inc == 0.0 {
-                            continue;
-                        }
-
-                        let mut v = leaf_ids_ref[lp];
-                        loop {
-                            if acc[v] == 0.0 {
-                                touched.push(v);
-                            }
-                            acc[v] += inc;
-
-                            let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
-                            v = p;
-                        }
-                    }
-
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
-                        let a = acc[v] as f64;
-                        if a > 0.0 {
-                            let lw = lens_ref[v];
-                            if lw > 0.0 {
-                                out.push((v as u64, lw * a));
-                            }
-                        }
-                    }
-                },
-            );
-
-        info!("built weighted sets in {} ms", t0.elapsed().as_millis());
-        (samples, wsets)
-    } else {
-        // BIOM (CSR) to CSC then per-sample scatter
-        let biom = biom_h5.expect("biom path required when TSV not provided");
-        let (taxa, samples, indptr, indices, data) = read_biom_csr_values(biom)?;
-        let nsamp = samples.len();
-
-        // column sums
-        let mut col_sums = vec![0.0f64; nsamp];
-        for r in 0..taxa.len() {
-            let a = indptr[r] as usize;
-            let b = indptr[r + 1] as usize;
-            for k in a..b {
-                col_sums[indices[k] as usize] += data[k];
-            }
-        }
-
-        let row2leaf: Vec<Option<usize>> = taxa
-            .iter()
-            .map(|n| t2leaf.get(n.as_str()).copied())
-            .collect();
-
-        // transpose to CSC for fast per-sample scans
-        info!("transposing BIOM CSR→CSC …");
-        let (colptr, rowind, vals) = csr_to_csc(&indptr, &indices, &data, nsamp);
-
-        let total_usize = total;
-        let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
-
-        info!("building per-sample weighted sets from BIOM (CSC) …");
-        let t0 = Instant::now();
-
-        let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize],
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
-                    let denom = col_sums[s];
-                    if !raw_counts && denom == 0.0 {
-                        return;
-                    }
-
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
-                    out.clear();
-
-                    let acc = &mut state.acc;
-                    let touched = &mut state.touched;
-
-                    for kk in colptr[s]..colptr[s + 1] {
-                        let r = rowind[kk];
-                        let lp = match row2leaf[r] {
-                            Some(v) => v,
-                            None => continue,
-                        };
-
-                        let inc = if raw_counts { vals[kk] } else { vals[kk] / denom } as f32;
-                        if inc == 0.0 {
-                            continue;
-                        }
-
-                        let mut v = leaf_ids_ref[lp];
-                        loop {
-                            if acc[v] == 0.0 {
-                                touched.push(v);
-                            }
-                            acc[v] += inc;
-
-                            let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
-                            v = p;
-                        }
-                    }
-
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
-                        let a = acc[v] as f64;
-                        if a > 0.0 {
-                            let lw = lens_ref[v];
-                            if lw > 0.0 {
-                                out.push((v as u64, lw * a));
-                            }
-                        }
-                    }
-                },
-            );
-
-        info!("built weighted sets in {} ms", t0.elapsed().as_millis());
-        (samples, wsets)
+    let t = parse_tree(tree_file)?;
+    let (leaf_ids, leaf_nm) = leaf_index(&t);
+    let tree = tree_arrays_succ(&t);
+    info!("nodes = {}  leaves = {}", tree.parent.len(), leaf_ids.len());
+    let (samples, table) = load_table(input_tsv, biom_h5, &leaf_ids, &leaf_nm, true, "")?;
+    let params = SketchParams {
+        k,
+        method: method_from_str(method)?,
+        ers_l,
+        seed,
+        weighted: true,
+        raw_counts,
+        portable,
     };
-
-    let nsamp = samples.len();
-    if nsamp < 2 {
-        anyhow::bail!("Fewer than 2 samples; nothing to compare.");
-    }
-
-    // Drop empty samples
-    let mut kept_ws = Vec::with_capacity(nsamp);
-    let mut kept_names = Vec::with_capacity(nsamp);
-    for (i, ws) in wsets_by_vid.into_iter().enumerate() {
-        if !ws.is_empty() {
-            kept_ws.push(ws);
-            kept_names.push(samples[i].clone());
-        }
-    }
-    let mut wsets = kept_ws;
-    let samples = kept_names;
-    if samples.len() < 2 {
-        anyhow::bail!("Fewer than 2 non-empty samples; nothing to compare.");
-    }
-
-    // Compact to active edge id space
-    let mut used = vec![false; total];
-    for ws in &wsets {
-        for &(vid, _) in ws {
-            used[vid as usize] = true;
-        }
-    }
-    let active_edges: Vec<usize> = active_edge_ids(total, &lens, &used, portable);
-
-    if active_edges.is_empty() {
-        anyhow::bail!("No active edges for weighted case.");
-    }
-
-    let mut id_map = vec![usize::MAX; total];
-    for (new_id, &v) in active_edges.iter().enumerate() {
-        id_map[v] = new_id;
-    }
-    for ws in &mut wsets {
-        for (id, _) in ws.iter_mut() {
-            *id = id_map[*id as usize] as u64;
-        }
-    }
-
-    info!(
-        "active edges = {} (from {} total, {} leaves)",
-        active_edges.len(),
-        total,
-        leaf_ids.len()
-    );
-
-    // Sketch (DMH or ERS)
-    info!("sketching starting...");
-    let mut rng = mt_from_seed(seed);
-    let sketches_u64: Vec<Vec<u64>> = if method == "dmh" {
-        let dmh = DartMinHash::new_mt(&mut rng, k as u64);
-        wsets
-            .par_iter()
-            .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
-            .collect()
-    } else if method == "tmh" {
-        sketch_with_tree_minhash(&wsets, k, seed)
-    } else if method == "ers" {
-        let t_caps = Instant::now();
-        let d = active_edges.len();
-
-        let caps: Vec<f64> = wsets
-            .par_iter()
-            .fold(|| vec![0.0f64; d], |mut local, ws| {
-                for &(id, w) in ws {
-                    let idx = id as usize;
-                    if w > local[idx] {
-                        local[idx] = w;
-                    }
-                }
-                local
-            })
-            .reduce(|| vec![0.0f64; d], |mut a, b| {
-                for i in 0..d {
-                    if b[i] > a[i] {
-                        a[i] = b[i];
-                    }
-                }
-                a
-            });
-
-        info!("ERS: caps(max_w) built in {} ms", t_caps.elapsed().as_millis());
-
-        let ers = ErsWmh::new_mt(&mut rng, &caps, k as u64);
-
-        let t_ers = Instant::now();
-        let sketches: Vec<Vec<u64>> = wsets
-            .par_iter()
-            .map(|ws| {
-                ers.sketch(ws, Some(ers_l))
-                    .into_iter()
-                    .map(|(id, _rank)| id)
-                    .collect()
-            })
-            .collect();
-
-        info!(
-            "ERS: sketching (ers.sketch over all samples) in {} ms",
-            t_ers.elapsed().as_millis()
-        );
-
-        sketches
-    } else {
-        anyhow::bail!("unsupported sketching method: {method}");
-    };
-    info!("sketching done.");
-
-    Ok((samples, sketches_u64))
+    sketch_via_core(
+        tree,
+        samples,
+        table,
+        &params,
+        "",
+        "Fewer than 2 non-empty samples; nothing to compare.",
+        "No active edges for weighted case.",
+    )
 }
 
 fn write_pcoa(
@@ -1611,6 +1273,7 @@ fn write_pcoa_ordination(
     Ok(())
 }
 
+// Unweighted, plain Newick tree.
 fn build_sketches_simple(
     tree_file: &str,
     input_tsv: Option<&str>,
@@ -1621,272 +1284,35 @@ fn build_sketches_simple(
     seed: u64,
     portable: bool,
 ) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
-    // Load tree
-    let raw = std::fs::read_to_string(tree_file).context("read newick")?;
-    let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
-    let t: NwkTree = one_from_string(&sanitized).context("parse newick (sanitized)")?;
-
-    // Parent pointers + branch lengths directly from Newick
-    let (parent, lens) = build_parent_and_lens_simple(&t);
-    let total = parent.len();
-
-    // Leaves & mapping name→leaf
-    let mut leaf_ids = Vec::<usize>::new();
-    let mut leaf_nm = Vec::<String>::new();
-    for n in t.nodes() {
-        if t[n].is_leaf() {
-            leaf_ids.push(n);
-            leaf_nm.push(
-                t.name(n)
-                    .map(|s| s.to_owned())
-                    .unwrap_or_else(|| format!("L{n}")),
-            );
-        }
-    }
-    let t2leaf: HashMap<&str, usize> = leaf_nm
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.as_str(), i))
-        .collect();
-
-    let (samples, wsets_by_vid): (Vec<String>, Vec<Vec<(u64, f64)>>) = if let Some(tsv) = input_tsv
-    {
-        let (taxa, samples, mat) = read_table(tsv)?;
-        let nsamp = samples.len();
-        let row2leaf: Vec<Option<usize>> = taxa
-            .iter()
-            .map(|n| t2leaf.get(n.as_str()).copied())
-            .collect();
-
-        let total_usize = total;
-        let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
-
-        info!("(simple) building per-sample presence sets from TSV …");
-        let t0 = Instant::now();
-
-        let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize], // used as seen[]
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
-                    out.clear();
-
-                    let seen = &mut state.acc;
-                    let touched = &mut state.touched;
-
-                    for (r, lopt) in row2leaf.iter().enumerate() {
-                        if mat[r][s] <= 0.0 {
-                            continue;
-                        }
-                        let lp = match lopt {
-                            Some(v) => *v,
-                            None => continue,
-                        };
-                        let mut v = leaf_ids_ref[lp];
-
-                        loop {
-                            if seen[v] != 0.0 {
-                                break;
-                            }
-                            seen[v] = 1.0;
-                            touched.push(v);
-
-                            let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
-                            v = p;
-                        }
-                    }
-
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
-                        let lw = lens_ref[v];
-                        if lw > 0.0 {
-                            out.push((v as u64, lw));
-                        }
-                    }
-                },
-            );
-
-        info!(
-            "(simple) built presence sets in {} ms",
-            t0.elapsed().as_millis()
-        );
-        (samples, wsets)
-    } else {
-        let biom = biom_h5.expect("biom path required when TSV not provided");
-        let (taxa, samples, indptr, indices) = read_biom_csr(biom)?;
-        let nsamp = samples.len();
-        let row2leaf: Vec<Option<usize>> = taxa
-            .iter()
-            .map(|n| t2leaf.get(n.as_str()).copied())
-            .collect();
-
-        info!("(simple) transposing BIOM CSR→CSC …");
-        let ones: Vec<f64> = vec![1.0; indices.len()];
-        let (colptr, rowind, _vals) = csr_to_csc(&indptr, &indices, &ones, nsamp);
-
-        let total_usize = total;
-        let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
-
-        info!("(simple) building per-sample presence sets from BIOM (CSC) …");
-        let t0 = Instant::now();
-
-        let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize], // used as seen[]
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
-                    out.clear();
-
-                    let seen = &mut state.acc;
-                    let touched = &mut state.touched;
-
-                    for kk in colptr[s]..colptr[s + 1] {
-                        let r = rowind[kk];
-                        let lp = match row2leaf[r] {
-                            Some(v) => v,
-                            None => continue,
-                        };
-                        let mut v = leaf_ids_ref[lp];
-
-                        loop {
-                            if seen[v] != 0.0 {
-                                break;
-                            }
-                            seen[v] = 1.0;
-                            touched.push(v);
-
-                            let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
-                            v = p;
-                        }
-                    }
-
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
-                        let lw = lens_ref[v];
-                        if lw > 0.0 {
-                            out.push((v as u64, lw));
-                        }
-                    }
-                },
-            );
-
-        info!(
-            "(simple) built presence sets from BIOM in {} ms",
-            t0.elapsed().as_millis()
-        );
-        (samples, wsets)
+    let t = parse_tree(tree_file)?;
+    let (leaf_ids, leaf_nm) = leaf_index(&t);
+    let tree = tree_arrays_simple(&t);
+    let (samples, table) =
+        load_table(input_tsv, biom_h5, &leaf_ids, &leaf_nm, false, "(simple) ")?;
+    let params = SketchParams {
+        k,
+        method: method_from_str(method)?,
+        ers_l,
+        seed,
+        weighted: false,
+        raw_counts: false,
+        portable,
     };
-
-    if samples.len() < 2 {
-        anyhow::bail!("Fewer than 2 samples; nothing to compare.");
-    }
-
-    // Drop empty samples
-    let mut kept_ws = Vec::with_capacity(samples.len());
-    let mut kept_names = Vec::with_capacity(samples.len());
-    for (i, ws) in wsets_by_vid.into_iter().enumerate() {
-        if !ws.is_empty() {
-            kept_ws.push(ws);
-            kept_names.push(samples[i].clone());
-        }
-    }
-    let mut wsets = kept_ws;
-    let samples = kept_names;
-    if samples.len() < 2 {
-        anyhow::bail!("Fewer than 2 non-empty samples after filtering; nothing to compare.");
-    }
-
-    // Compact to active edge id space
-    let mut used = vec![false; total];
-    for ws in &wsets {
-        for &(vid, _) in ws {
-            used[vid as usize] = true;
-        }
-    }
-    let active_edges: Vec<usize> = active_edge_ids(total, &lens, &used, portable);
-    if active_edges.is_empty() {
-        anyhow::bail!("No active edges after presence accumulation.");
-    }
-
-    let mut id_map = vec![usize::MAX; total];
-    for (new_id, &v) in active_edges.iter().enumerate() {
-        id_map[v] = new_id;
-    }
-    for ws in &mut wsets {
-        for (id, _) in ws.iter_mut() {
-            *id = id_map[*id as usize] as u64;
-        }
-    }
-
-    info!(
-        "(simple) active edges = {} (from {} total, {} leaves)",
-        active_edges.len(),
-        total,
-        leaf_ids.len()
-    );
-
-    // Sketch
-    info!("(simple) sketching starting...");
-    let mut rng = mt_from_seed(seed);
-    let sketches_u64: Vec<Vec<u64>> = if method == "dmh" {
-        let dmh = DartMinHash::new_mt(&mut rng, k as u64);
-        wsets
-            .par_iter()
-            .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
-            .collect()
-    } else if method == "tmh" {
-        sketch_with_tree_minhash(&wsets, k, seed)
-    } else if method == "ers" {
-        let caps: Vec<f64> = active_edges.iter().map(|&v| lens[v]).collect();
-        let ers = ErsWmh::new_mt(&mut rng, &caps, k as u64);
-        wsets
-            .par_iter()
-            .map(|ws| {
-                ers.sketch(ws, Some(ers_l))
-                    .into_iter()
-                    .map(|(id, _rank)| id)
-                    .collect()
-            })
-            .collect()
-    } else {
-        anyhow::bail!("unsupported sketching method: {method}");
-    };
-    info!("(simple) sketching done.");
-
-    Ok((samples, sketches_u64))
+    sketch_via_core(
+        tree,
+        samples,
+        table,
+        &params,
+        "(simple) ",
+        "Fewer than 2 non-empty samples after filtering; nothing to compare.",
+        "No active edges after presence accumulation.",
+    )
 }
 
-// Weighted, build sketches for weighted UniFrac using simple Newick tree parsing.
-// By default, input table values are converted to relative abundance per sample.
-// If raw_counts is true, raw table counts are passed into branch accumulation directly.
+// Weighted, plain Newick tree.
+//
+// By default the table values are converted to relative abundance per sample.
+// With `raw_counts`, raw counts go into the branch accumulation directly.
 fn build_sketches_weighted_simple(
     tree_file: &str,
     input_tsv: Option<&str>,
@@ -1898,360 +1324,30 @@ fn build_sketches_weighted_simple(
     raw_counts: bool,
     portable: bool,
 ) -> Result<(Vec<String>, Vec<Vec<u64>>)> {
-    // Load tree
-    let raw = std::fs::read_to_string(tree_file).context("read newick")?;
-    let sanitized = sanitize_newick_drop_internal_labels_and_comments(&raw);
-    let t: NwkTree = one_from_string(&sanitized).context("parse newick (sanitized)")?;
-
-    // Parent pointers + branch lengths directly from Newick
-    let (parent, lens) = build_parent_and_lens_simple(&t);
-    let total = parent.len();
-
-    // Leaves & mapping name→leaf-ordinal, and leaf node ids
-    let mut leaf_ids = Vec::<usize>::new();
-    let mut leaf_nm = Vec::<String>::new();
-    for n in t.nodes() {
-        if t[n].is_leaf() {
-            leaf_ids.push(n);
-            leaf_nm.push(
-                t.name(n)
-                    .map(|s| s.to_owned())
-                    .unwrap_or_else(|| format!("L{n}")),
-            );
-        }
-    }
-    let t2leaf: HashMap<&str, usize> = leaf_nm
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.as_str(), i))
-        .collect();
-
-    info!(
-        "(simple) nodes = {}  leaves = {}",
-        total,
-        leaf_ids.len()
-    );
-
-    // Build per-sample weighted sets
-    let (samples, wsets_by_vid): (Vec<String>, Vec<Vec<(u64, f64)>>) = if let Some(tsv) = input_tsv
-    {
-        // TSV (dense)
-        let (taxa, samples, counts) = read_table_counts(tsv)?;
-        let nsamp = samples.len();
-        let mut col_sums = vec![0.0f64; nsamp];
-        for r in 0..taxa.len() {
-            for s in 0..nsamp {
-                col_sums[s] += counts[r][s];
-            }
-        }
-        let row2leaf: Vec<Option<usize>> = taxa
-            .iter()
-            .map(|n| t2leaf.get(n.as_str()).copied())
-            .collect();
-
-        let total_usize = total;
-        let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
-        info!("(simple) building per-sample weighted sets from TSV (dense) …");
-        let t0 = Instant::now();
-
-        let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize],
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
-                    let denom = col_sums[s];
-                    if !raw_counts && denom == 0.0 {
-                        return;
-                    }
-
-                    // reset only touched entries
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
-                    out.clear();
-
-                    let acc = &mut state.acc;
-                    let touched = &mut state.touched;
-
-                    for (r, lopt) in row2leaf.iter().enumerate() {
-                        let lp = match lopt {
-                            Some(v) => *v,
-                            None => continue,
-                        };
-                        let val = counts[r][s];
-                        if val <= 0.0 {
-                            continue;
-                        }
-                        let inc = if raw_counts { val } else { val / denom } as f32;
-                        if inc == 0.0 {
-                            continue;
-                        }
-
-                        let mut v = leaf_ids_ref[lp];
-                        loop {
-                            if acc[v] == 0.0 {
-                                touched.push(v);
-                            }
-                            acc[v] += inc;
-                            let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
-                            v = p;
-                        }
-                    }
-
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
-                        let a = acc[v] as f64;
-                        if a > 0.0 {
-                            let lw = lens_ref[v];
-                            if lw > 0.0 {
-                                out.push((v as u64, lw * a));
-                            }
-                        }
-                    }
-                },
-            );
-
-        info!(
-            "(simple) built weighted sets from TSV in {} ms",
-            t0.elapsed().as_millis()
-        );
-        (samples, wsets)
-    } else {
-        // BIOM (CSR) to CSC then per-sample scatter
-        let biom = biom_h5.expect("biom path required when TSV not provided");
-        let (taxa, samples, indptr, indices, data) = read_biom_csr_values(biom)?;
-        let nsamp = samples.len();
-
-        // column sums
-        let mut col_sums = vec![0.0f64; nsamp];
-        for r in 0..taxa.len() {
-            let a = indptr[r] as usize;
-            let b = indptr[r + 1] as usize;
-            for k in a..b {
-                col_sums[indices[k] as usize] += data[k];
-            }
-        }
-        let row2leaf: Vec<Option<usize>> = taxa
-            .iter()
-            .map(|n| t2leaf.get(n.as_str()).copied())
-            .collect();
-
-        // transpose to CSC for fast per-sample scans
-        info!("(simple) transposing BIOM CSR→CSC …");
-        let (colptr, rowind, vals) = csr_to_csc(&indptr, &indices, &data, nsamp);
-
-        let total_usize = total;
-        let lens_ref = &lens;
-        let leaf_ids_ref = &leaf_ids;
-
-        info!("(simple) building per-sample weighted sets from BIOM (CSC) …");
-        let t0 = Instant::now();
-
-        let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerAccum {
-                    acc: vec![0f32; total_usize],
-                    touched: Vec::new(),
-                },
-                |state, (s, out)| {
-                    let denom = col_sums[s];
-                    if !raw_counts && denom == 0.0 {
-                        // nothing for this sample in relative-abundance mode
-                        return;
-                    }
-
-                    // Reset only previously-touched entries in this worker's acc buffer.
-                    for &v in &state.touched {
-                        state.acc[v] = 0.0;
-                    }
-                    state.touched.clear();
-                    out.clear();
-
-                    let acc = &mut state.acc;
-                    let touched = &mut state.touched;
-
-                    // iterate only nnz in column s
-                    for kk in colptr[s]..colptr[s + 1] {
-                        let r = rowind[kk];
-                        let lp = match row2leaf[r] {
-                            Some(v) => v,
-                            None => continue,
-                        };
-                        let mut v = leaf_ids_ref[lp];
-
-                        let inc = if raw_counts { vals[kk] } else { vals[kk] / denom } as f32;
-                        if inc == 0.0 {
-                            continue;
-                        }
-
-                        loop {
-                            if acc[v] == 0.0 {
-                                touched.push(v);
-                            }
-                            acc[v] += inc;
-                            let p = parent[v];
-                            if p == usize::MAX {
-                                break;
-                            }
-                            v = p;
-                        }
-                    }
-
-                    out.reserve(touched.len());
-                    for &v in touched.iter() {
-                        let a = acc[v] as f64;
-                        if a > 0.0 {
-                            let lw = lens_ref[v];
-                            if lw > 0.0 {
-                                out.push((v as u64, lw * a));
-                            }
-                        }
-                    }
-                },
-            );
-
-        info!(
-            "(simple) built weighted sets from BIOM in {} ms",
-            t0.elapsed().as_millis()
-        );
-        (samples, wsets)
+    let t = parse_tree(tree_file)?;
+    let (leaf_ids, leaf_nm) = leaf_index(&t);
+    let tree = tree_arrays_simple(&t);
+    info!("(simple) nodes = {}  leaves = {}", tree.parent.len(), leaf_ids.len());
+    let (samples, table) =
+        load_table(input_tsv, biom_h5, &leaf_ids, &leaf_nm, true, "(simple) ")?;
+    let params = SketchParams {
+        k,
+        method: method_from_str(method)?,
+        ers_l,
+        seed,
+        weighted: true,
+        raw_counts,
+        portable,
     };
-
-    let nsamp = samples.len();
-    if nsamp < 2 {
-        anyhow::bail!("Fewer than 2 samples; nothing to compare.");
-    }
-
-    // Drop empty samples
-    let mut kept_ws = Vec::with_capacity(nsamp);
-    let mut kept_names = Vec::with_capacity(nsamp);
-    for (i, ws) in wsets_by_vid.into_iter().enumerate() {
-        if !ws.is_empty() {
-            kept_ws.push(ws);
-            kept_names.push(samples[i].clone());
-        }
-    }
-    let mut wsets = kept_ws;
-    let samples = kept_names;
-    if samples.len() < 2 {
-        anyhow::bail!("Fewer than 2 non-empty samples; nothing to compare.");
-    }
-
-    // Compact to active edge id space
-    let mut used = vec![false; total];
-    for ws in &wsets {
-        for &(vid, _) in ws {
-            used[vid as usize] = true;
-        }
-    }
-    let active_edges: Vec<usize> = active_edge_ids(total, &lens, &used, portable);
-
-    if active_edges.is_empty() {
-        anyhow::bail!("No active edges for weighted case.");
-    }
-
-    let mut id_map = vec![usize::MAX; total];
-    for (new_id, &v) in active_edges.iter().enumerate() {
-        id_map[v] = new_id;
-    }
-    for ws in &mut wsets {
-        for (id, _) in ws.iter_mut() {
-            *id = id_map[*id as usize] as u64;
-        }
-    }
-
-    info!(
-        "(simple) active edges = {} (from {} total, {} leaves)",
-        active_edges.len(),
-        total,
-        leaf_ids.len()
-    );
-
-    // Sketch (DMH or ERS)
-    info!("(simple) sketching starting...");
-    let mut rng = mt_from_seed(seed);
-    let sketches_u64: Vec<Vec<u64>> = if method == "dmh" {
-        let dmh = DartMinHash::new_mt(&mut rng, k as u64);
-        wsets
-            .par_iter()
-            .map(|ws| dmh.sketch(ws).into_iter().map(|(id, _rank)| id).collect())
-            .collect()
-    } else if method == "tmh" {
-        sketch_with_tree_minhash(&wsets, k, seed)
-    } else if method == "ers" {
-        // tight caps: m_i = max_s (ℓ_v * A_v[s]) over samples for that edge
-        let t_caps = Instant::now();
-        let d = active_edges.len();
-
-        let caps: Vec<f64> = wsets
-            .par_iter()
-            .fold(
-                || vec![0.0f64; d],
-                |mut local, ws| {
-                    for &(id, w) in ws {
-                        let idx = id as usize;
-                        if w > local[idx] {
-                            local[idx] = w;
-                        }
-                    }
-                    local
-                },
-            )
-            .reduce(
-                || vec![0.0f64; d],
-                |mut a, b| {
-                    for i in 0..d {
-                        if b[i] > a[i] {
-                            a[i] = b[i];
-                        }
-                    }
-                    a
-                },
-            );
-
-        info!(
-            "(simple) ERS: caps(max_w) built in {} ms",
-            t_caps.elapsed().as_millis()
-        );
-
-        let ers = ErsWmh::new_mt(&mut rng, &caps, k as u64);
-
-        let t_ers = Instant::now();
-        let sketches: Vec<Vec<u64>> = wsets
-            .par_iter()
-            .map(|ws| {
-                ers.sketch(ws, Some(ers_l))
-                    .into_iter()
-                    .map(|(id, _rank)| id)
-                    .collect()
-            })
-            .collect();
-
-        info!(
-            "(simple) ERS: sketching in {} ms",
-            t_ers.elapsed().as_millis()
-        );
-
-        sketches
-    } else {
-        anyhow::bail!("unsupported sketching method: {method}");
-    };
-    info!("(simple) sketching done.");
-
-    Ok((samples, sketches_u64))
+    sketch_via_core(
+        tree,
+        samples,
+        table,
+        &params,
+        "(simple) ",
+        "Fewer than 2 non-empty samples; nothing to compare.",
+        "No active edges for weighted case.",
+    )
 }
 
 enum Sketches {

@@ -1,0 +1,26 @@
+[package]
+name = "dartunifrac-core"
+description = "Core engine for DartUniFrac: leaf-to-root weighted set accumulation and weighted MinHash sketching. No file I/O, no BLAS, no HDF5 — builds on stable and is wasm-friendly."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords = ["unifrac", "phylogenetic", "MinHash", "Jaccard"]
+# Internal to this workspace; the CLI and the future C API are the consumers.
+publish = false
+
+[dependencies]
+# The sketchers themselves. Pure Rust, no build script, no getrandom.
+dartminhash = "0.1.6"
+# Per-sample parallelism. Proven on wasm32-unknown-emscripten.
+rayon = "1.10"
+# Facade only; a no-op unless the binary installs a logger.
+log = "0.4"
+
+# Deliberately absent, and this is the point of the crate:
+#   anndists  -> nightly (feature(portable_simd)); distances stay in the binary until M2
+#   fpcoa     -> BLAS/LAPACK at link time
+#   hdf5      -> C library
+#   newick, succparen -> tree parsing is the caller's job; the API is handed
+#                        parent[]/branch_length[] directly
