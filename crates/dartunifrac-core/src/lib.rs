@@ -9,10 +9,11 @@
 //! phylogeny, then weighted MinHash sketching of those sets.
 //!
 //! This crate is deliberately narrow. It does not read files, resolve feature
-//! names, compute distances, or run PCoA — it takes a tree as parent pointers
-//! plus branch lengths, a feature table already resolved to node ids, and
-//! returns one sketch per surviving sample. That keeps it free of HDF5, BLAS
-//! and nightly Rust, so it builds on stable and can be compiled to wasm.
+//! names, or run PCoA — it takes a tree as parent pointers plus branch lengths
+//! and a feature table already resolved to node ids, returns one sketch per
+//! surviving sample, and turns any two of those sketches into a UniFrac value.
+//! That keeps it free of HDF5, BLAS and nightly Rust, so it builds on stable and
+//! can be compiled to wasm.
 //!
 //! The `dartunifrac` binary is the first caller; the C API is the second.
 
@@ -546,6 +547,112 @@ pub fn build_sketches(
     info!("{log_label}sketching done.");
 
     Ok(SketchSet { kept, sketches })
+}
+
+//
+//====   Sketch distances
+//
+// The `dartunifrac` binary does NOT use these: it keeps anndists' `DistHamming`,
+// whose nightly `std::simd` backend is faster once the compiler is allowed AVX2 or
+// AVX-512, which is how that binary is built for release. This kernel exists for
+// consumers that cannot have nightly in their graph at all -- the C API, and the
+// wasm32-unknown-emscripten target -- and it is required to agree with anndists
+// bit for bit. `tests/hamming_golden.rs` enforces that: its expected values were
+// generated from anndists itself.
+//
+// Which is why the `d/(2-d)` transform below is a fifth copy of what the binary
+// does in four places. That duplication is deliberate, not an oversight: removing
+// it would mean routing the binary's distances through this crate, which would
+// cost the binary its SIMD kernel.
+
+/// Positions compared per chunk by the lane counters.
+const LANES: usize = 32;
+
+/// Number of positions at which two sketches differ.
+///
+/// Exact at any length, which is what lets this replace a different kernel
+/// without moving a single output bit. See [`unifrac_from_sketches`].
+///
+/// `LANES` independent `u16` counters accumulate one chunk at a time, which is the
+/// shape LLVM turns into packed compares plus packed adds. A counter gains at most
+/// 1 per chunk, so it could wrap past `LANES * u16::MAX` positions; processing the
+/// input in blocks of exactly that size and folding each block into a `usize`
+/// removes the bound entirely, leaving one code path that is correct for any
+/// slice.
+///
+/// **The blocking is load-bearing for performance, not just for the bound.** A
+/// bare `chunks_exact` loop with a length guard instead of blocks is faster when
+/// the compiler has only SSE2 to work with, and was measured at 1.6x the nightly
+/// kernel there -- but it collapses as soon as wider vectors are available: 0.13x
+/// at AVX2 and 0.08x at AVX-512, i.e. slower *with* AVX2 enabled than with no
+/// vector unit at all. The blocked form holds within 6% of the nightly kernel at
+/// AVX2 and AVX-512 and is ahead of it at SSE2. Measured on Zen 5 across all
+/// three; a formulation that wins only at the ISA you happened to benchmark is
+/// not portable, which is the whole point of this crate.
+#[inline]
+fn count_mismatches<T: PartialEq + Copy>(a: &[T], b: &[T]) -> usize {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "sketches of different lengths are not comparable"
+    );
+    const BLOCK: usize = LANES * u16::MAX as usize;
+    let mut acc: usize = 0;
+    for (ba, bb) in a.chunks(BLOCK).zip(b.chunks(BLOCK)) {
+        let mut lanes = [0u16; LANES];
+        let mut ai = ba.chunks_exact(LANES);
+        let mut bi = bb.chunks_exact(LANES);
+        for (ca, cb) in ai.by_ref().zip(bi.by_ref()) {
+            for j in 0..LANES {
+                lanes[j] += (ca[j] != cb[j]) as u16;
+            }
+        }
+        acc += lanes.iter().map(|&x| x as usize).sum::<usize>();
+        // Only the final block can leave a partial chunk, since BLOCK is a
+        // multiple of LANES.
+        for (x, y) in ai.remainder().iter().zip(bi.remainder().iter()) {
+            acc += (x != y) as usize;
+        }
+    }
+    acc
+}
+
+/// UniFrac between two sketches.
+///
+/// The normalized Hamming distance between two weighted-MinHash sketches
+/// estimates `d_J = 1 - J_w`, which *is* unweighted UniFrac. Weighted normalized
+/// UniFrac is `(1 - J_w) / (1 + J_w)`, i.e. `d_J / (2 - d_J)`.
+///
+/// **Bit-identical to `anndists`' `DistHamming`, by construction rather than by
+/// luck.** That kernel counts mismatches into an exact `u32` and performs exactly
+/// one floating-point operation, a single f32 division. So any exact count
+/// followed by one division reproduces it, whatever lane width or summation order
+/// produced the count -- unlike the f32 weight accumulation in
+/// [`accumulate_weighted_sets`], where order is load-bearing.
+///
+/// One caveat, for completeness rather than for practice: anndists' `u32` is a
+/// single accumulator, so it wraps past `u32::MAX` mismatches, where the count
+/// here is a `usize`. Above ~4.3 billion mismatching positions in one pair the two
+/// disagree because the other kernel is wrong there. Reaching it needs a 17 GB
+/// sketch.
+///
+/// Generic and `#[inline]` on purpose: it monomorphises in the caller's crate, so
+/// an O(N²) pairwise loop contains no cross-crate call. The release profile sets
+/// no LTO and leaves `codegen-units` at 16, so a plain `pub fn` here would cost
+/// real time.
+///
+/// Empty sketches divide 0 by 0 and yield NaN, and weighted mode maps that NaN to
+/// 1.0 because `NaN < 2.0` is false. Both behaviours are inherited deliberately.
+#[inline]
+pub fn unifrac_from_sketches<T: PartialEq + Copy>(a: &[T], b: &[T], weighted: bool) -> f32 {
+    let d = count_mismatches(a, b) as f32 / a.len() as f32;
+    if weighted {
+        // The `else` is not dead code: `d <= 1.0` for every non-empty input, so
+        // the only way here is `d` being NaN, from a zero-length sketch.
+        if d < 2.0f32 { d / (2.0f32 - d) } else { 1.0f32 }
+    } else {
+        d
+    }
 }
 
 #[cfg(test)]
