@@ -90,6 +90,13 @@ pub struct Table {
     pub n_samples: usize,
     pub colptr: Vec<usize>,
     pub node: Vec<usize>,
+    /// Per-entry weights, parallel to `node` — **or empty for presence-only runs.**
+    ///
+    /// Presence mode never reads a weight, so it does not make the caller
+    /// materialise one. On a large table that array is the same size as the whole
+    /// feature table, so requiring it would cost real memory to carry a constant.
+    /// Weighted mode requires it, and says so through [`CoreError::MalformedTable`]
+    /// rather than by indexing past the end.
     pub value: Vec<f64>,
     /// Per-sample denominators for weighted mode.
     ///
@@ -394,7 +401,7 @@ fn sketch_all(
     }
 }
 
-fn validate(tree: &Tree, table: &Table) -> Result<(), CoreError> {
+fn validate(tree: &Tree, table: &Table, params: &SketchParams) -> Result<(), CoreError> {
     let malformed = |m: String| Err(CoreError::MalformedTable(m));
     if tree.parent.len() != tree.lens.len() {
         return malformed(format!(
@@ -413,11 +420,18 @@ fn validate(tree: &Tree, table: &Table) -> Result<(), CoreError> {
             table.n_samples + 1
         ));
     }
-    if table.node.len() != table.value.len() {
+    // Empty is the presence-only case; anything else must be parallel to node[].
+    if !table.value.is_empty() && table.node.len() != table.value.len() {
         return malformed(format!(
             "node[] has {} entries but value[] has {}",
             table.node.len(),
             table.value.len()
+        ));
+    }
+    if params.weighted && table.value.is_empty() {
+        return malformed(format!(
+            "weighted mode reads a weight per entry, but value[] is empty and node[] has {}",
+            table.node.len()
         ));
     }
     if table.col_sums.len() != table.n_samples {
@@ -510,7 +524,7 @@ pub fn build_sketches(
     params: &SketchParams,
     log_label: &str,
 ) -> Result<SketchSet, CoreError> {
-    validate(tree, table)?;
+    validate(tree, table, params)?;
 
     let what = if params.weighted { "weighted" } else { "presence" };
     info!("{log_label}building per-sample {what} sets …");

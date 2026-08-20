@@ -878,7 +878,9 @@ fn table_from_tsv(
                 continue;
             }
             node.push(leaf_ids[lp]);
-            value.push(val);
+            if weighted {
+                value.push(val);
+            }
         }
         colptr[s + 1] = node.len();
     }
@@ -918,28 +920,43 @@ fn table_from_biom(
     }
 
     info!("{log_label}transposing BIOM CSR→CSC …");
-    let (csc_ptr, rowind, vals) = csr_to_csc(indptr, indices, data, nsamp);
+    let (csc_ptr, mut rowind, mut vals) = csr_to_csc(indptr, indices, data, nsamp);
 
+    // Rewrite the CSC in place — feature row to node id, dropping entries that
+    // resolve to no tip — and hand the same allocations to the engine.
+    //
+    // The write cursor can never overtake the read cursor, because entries are
+    // only ever dropped, so `rowind[w] = ...` after reading `rowind[kk]` is safe
+    // even when w == kk. Building fresh `node`/`value` vectors instead would hold
+    // a third full-size copy of the table live at peak, on top of the reader's
+    // CSR and this CSC; on a table with 1e9 stored entries that is ~16 GB.
     let mut colptr = vec![0usize; nsamp + 1];
-    let mut node = Vec::<usize>::new();
-    let mut value = Vec::<f64>::new();
+    let with_vals = !vals.is_empty();
+    let mut w = 0usize;
     for s in 0..nsamp {
         for kk in csc_ptr[s]..csc_ptr[s + 1] {
             let lp = match row2leaf[rowind[kk]] {
                 Some(v) => v,
                 None => continue,
             };
-            node.push(leaf_ids[lp]);
-            value.push(vals[kk]);
+            if with_vals {
+                vals[w] = vals[kk];
+            }
+            rowind[w] = leaf_ids[lp];
+            w += 1;
         }
-        colptr[s + 1] = node.len();
+        colptr[s + 1] = w;
+    }
+    rowind.truncate(w);
+    if with_vals {
+        vals.truncate(w);
     }
 
     CoreTable {
         n_samples: nsamp,
         colptr,
-        node,
-        value,
+        node: rowind,
+        value: vals,
         col_sums,
     }
 }
@@ -990,9 +1007,8 @@ fn load_table(
             read_biom_csr_values(biom)?
         } else {
             let (taxa, samples, indptr, indices) = read_biom_csr(biom)?;
-            // Presence only, so the values are synthesized rather than read.
-            let ones = vec![1.0; indices.len()];
-            (taxa, samples, indptr, indices, ones)
+            // Presence only: nothing reads a weight, so none is synthesized.
+            (taxa, samples, indptr, indices, Vec::new())
         };
         let row2leaf = row_to_leaf(&taxa, leaf_nm);
         let nsamp = samples.len();
@@ -1071,14 +1087,19 @@ fn compute_parent(total: usize, kids: &[Vec<usize>]) -> Vec<usize> {
 }
 
 /// CSR (rows=features, cols=samples) to CSC (cols=samples) for fast per-sample scans.
-/// Returns (colptr, rowind, vals) with colptr.len()==nsamp+1, rowind/vals.len()==nnz.
+/// Returns (colptr, rowind, vals) with colptr.len()==nsamp+1, rowind.len()==nnz.
+///
+/// An empty `data` means presence-only, and `vals` comes back empty rather than
+/// permuted: nothing downstream reads it, and at nnz f64s it is the same size as
+/// the rest of the table.
 fn csr_to_csc(
     indptr: &[u32],
     indices: &[u32],
     data: &[f64],
     nsamp: usize,
 ) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
-    let nnz = data.len();
+    let nnz = indices.len();
+    let with_vals = !data.is_empty();
     let mut col_counts = vec![0usize; nsamp];
     for &sidx in indices {
         col_counts[sidx as usize] += 1;
@@ -1091,7 +1112,7 @@ fn csr_to_csc(
 
     let mut cur = colptr.clone();
     let mut rowind = vec![0usize; nnz];
-    let mut vals = vec![0f64; nnz];
+    let mut vals = if with_vals { vec![0f64; nnz] } else { Vec::new() };
 
     for r in 0..(indptr.len() - 1) {
         let a = indptr[r] as usize;
@@ -1100,7 +1121,9 @@ fn csr_to_csc(
             let s = indices[k] as usize;
             let dst = cur[s];
             rowind[dst] = r;
-            vals[dst] = data[k];
+            if with_vals {
+                vals[dst] = data[k];
+            }
             cur[s] += 1;
         }
     }

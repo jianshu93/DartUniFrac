@@ -347,3 +347,92 @@ fn mismatched_tree_array_lengths_are_rejected() {
         Err(CoreError::MalformedTable(_))
     ));
 }
+
+/// Presence mode never reads a weight, so it must not require the caller to
+/// invent one. Before this was allowed, the binary's unweighted BIOM path
+/// synthesized an nnz-sized array of `1.0` purely to satisfy the type, and then
+/// permuted and copied it twice — pure waste at a scale where the table is the
+/// dominant allocation.
+///
+/// The contract is the strong form: an empty `value` must give **bit-identical**
+/// sketches to a `value` full of ones, not merely similar ones. Anything weaker
+/// would let presence mode quietly depend on magnitudes.
+#[test]
+fn presence_mode_accepts_an_empty_value_array_and_ignores_values_entirely() {
+    let tree = star_tree();
+    let colptr = vec![0, 2, 4];
+    let node = vec![1, 2, 3, 4];
+    let with_ones = Table {
+        n_samples: 2,
+        colptr: colptr.clone(),
+        node: node.clone(),
+        value: vec![1.0, 1.0, 1.0, 1.0],
+        col_sums: vec![0.0, 0.0],
+    };
+    let without = Table {
+        n_samples: 2,
+        colptr: colptr.clone(),
+        node: node.clone(),
+        value: Vec::new(),
+        col_sums: vec![0.0, 0.0],
+    };
+    // And a third with wildly different magnitudes, to show presence mode is not
+    // merely tolerating the values but ignoring them.
+    let with_junk = Table {
+        n_samples: 2,
+        colptr,
+        node,
+        value: vec![1e9, 7.5, -3.0, 0.25],
+        col_sums: vec![0.0, 0.0],
+    };
+    let p = params(false, false);
+    let a = build_sketches(&tree, &with_ones, &p, "").expect("ones");
+    let b = build_sketches(&tree, &without, &p, "").expect("empty value");
+    let c = build_sketches(&tree, &with_junk, &p, "").expect("junk values");
+    assert_eq!(a, b, "presence mode must not depend on value[] being present");
+    assert_eq!(a, c, "presence mode must not depend on value[] contents");
+}
+
+/// The other half of the contract: weighted mode *does* read every value, so an
+/// empty `value` there is a caller bug and must be reported as one. Indexing
+/// `value[kk]` would otherwise panic inside a rayon worker, which across an FFI
+/// boundary means aborting the host process rather than returning an error.
+#[test]
+fn weighted_mode_rejects_an_empty_value_array_rather_than_panicking() {
+    let tree = star_tree();
+    let table = Table {
+        n_samples: 2,
+        colptr: vec![0, 2, 4],
+        node: vec![1, 2, 3, 4],
+        value: Vec::new(),
+        col_sums: vec![2.0, 2.0],
+    };
+    match build_sketches(&tree, &table, &params(true, false), "") {
+        Err(CoreError::MalformedTable(m)) => {
+            assert!(
+                m.contains("value"),
+                "the message should name the offending field, got: {m}"
+            );
+        }
+        other => panic!("expected MalformedTable, got {other:?}"),
+    }
+}
+
+/// Allowing an empty `value` must not weaken the length check for a non-empty
+/// one: a short value array is still a caller bug, not a licence to read past
+/// the end.
+#[test]
+fn a_value_array_that_is_neither_empty_nor_full_length_is_rejected() {
+    let tree = star_tree();
+    let table = Table {
+        n_samples: 2,
+        colptr: vec![0, 2, 4],
+        node: vec![1, 2, 3, 4],
+        value: vec![1.0, 1.0, 1.0], // one short
+        col_sums: vec![0.0, 0.0],
+    };
+    assert!(matches!(
+        build_sketches(&tree, &table, &params(false, false), ""),
+        Err(CoreError::MalformedTable(_))
+    ));
+}
