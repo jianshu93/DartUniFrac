@@ -1,0 +1,19 @@
+# Regenerates crates/dartunifrac-core/tests/hamming_golden.rs.
+#
+# Standalone on purpose: it needs anndists with the `stdsimd` feature, hence
+# nightly Rust, and dartunifrac-core exists precisely so that nightly stays out of
+# the graph a consumer compiles. Keeping this out of the workspace means a plain
+# `cargo build` at the repo root never pulls it in.
+#
+#   cd scripts/hamming_golden_generator
+#   cargo +nightly run --release > ../../crates/dartunifrac-core/tests/hamming_golden.rs
+[package]
+name = "hamming-golden-generator"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+anndists = { version = "0.1.5", default-features = false, features = ["stdsimd"] }

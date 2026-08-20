@@ -635,7 +635,7 @@ dependencies = [
  "anyhow",
  "bitvec",
  "clap",
- "dartminhash",
+ "dartunifrac-core",
  "emojis",
  "env_logger",
  "fpcoa",
@@ -648,6 +648,15 @@ dependencies = [
  "ryu",
  "succparen",
  "zstd",
+]
+
+[[package]]
+name = "dartunifrac-core"
+version = "0.3.2"
+dependencies = [
+ "dartminhash",
+ "log",
+ "rayon",
 ]
 
 [[package]]
