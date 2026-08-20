@@ -552,13 +552,20 @@ pub fn build_sketches(
 //
 //====   Sketch distances
 //
-// The `dartunifrac` binary does NOT use these: it keeps anndists' `DistHamming`,
-// whose nightly `std::simd` backend is faster once the compiler is allowed AVX2 or
-// AVX-512, which is how that binary is built for release. This kernel exists for
-// consumers that cannot have nightly in their graph at all -- the C API, and the
-// wasm32-unknown-emscripten target -- and it is required to agree with anndists
-// bit for bit. `tests/hamming_golden.rs` enforces that: its expected values were
-// generated from anndists itself.
+// The `dartunifrac` binary does NOT use these: it keeps anndists' `DistHamming`.
+// Which of the two is faster depends entirely on the ISA the compiler is allowed
+// to use. Measured on Zen 5, as a ratio of anndists to this kernel: at baseline
+// x86-64 this one is ~1.5x ahead, at AVX2 the two are within 15% either way, and
+// at AVX-512 anndists is ahead by 1-6%. Note nothing in this repo sets
+// `target-cpu`, so a plain `cargo install` gets the baseline case; it is a
+// `RUSTFLAGS=-C target-cpu=native` build that gets the others.
+//
+// The binary keeps anndists regardless, which is the upstream author's call: it is
+// never behind, and its nightly backend is also what the GPU branch's CPU fallback
+// uses. This kernel exists for consumers that cannot have nightly in their graph
+// at all -- the C API, and the wasm32-unknown-emscripten target -- and it is
+// required to agree with anndists bit for bit. `tests/hamming_golden.rs` enforces
+// that: its expected values were generated from anndists itself.
 //
 // Which is why the `d/(2-d)` transform below is a fifth copy of what the binary
 // does in four places. That duplication is deliberate, not an oversight: removing
@@ -630,7 +637,15 @@ fn count_mismatches<T: PartialEq + Copy>(a: &[T], b: &[T]) -> usize {
 /// produced the count -- unlike the f32 weight accumulation in
 /// [`accumulate_weighted_sets`], where order is load-bearing.
 ///
-/// One caveat, for completeness rather than for practice: anndists' `u32` is a
+/// **That claim is about the integer sketch widths this crate produces** -- u16,
+/// u32 and u64, which is all [`SketchSet`] ever holds. The bound below admits any
+/// `PartialEq + Copy`, but for `f32`/`f64` slices anndists computes
+/// `(count as f64 / len as f64) as f32` instead, a double-rounded quotient that can
+/// differ from `count as f32 / len as f32` in the last bit. The golden vectors cover
+/// the three integer widths only, so do not read the parity claim as covering float
+/// sketches.
+///
+/// One more caveat, for completeness rather than for practice: anndists' `u32` is a
 /// single accumulator, so it wraps past `u32::MAX` mismatches, where the count
 /// here is a `usize`. Above ~4.3 billion mismatching positions in one pair the two
 /// disagree because the other kernel is wrong there. Reaching it needs a 17 GB

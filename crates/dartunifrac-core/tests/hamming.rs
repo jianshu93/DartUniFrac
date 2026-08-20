@@ -14,7 +14,7 @@ use dartunifrac_core::unifrac_from_sketches;
 /// plausible number for mismatched sketch sizes -- the worst possible failure for
 /// an API whose entire contract is that two sketch sets are comparable.
 #[test]
-#[should_panic]
+#[should_panic(expected = "sketches of different lengths are not comparable")]
 fn sketches_of_different_lengths_panic_rather_than_comparing_a_prefix() {
     let a: [u16; 4] = [1, 2, 3, 4];
     let b: [u16; 3] = [1, 2, 3];

@@ -7,17 +7,18 @@ edition.workspace = true
 # refuses the manifest outright ("feature `edition2024` is required"). Declared here
 # rather than workspace-wide because the CLI's floor is higher and not ours to claim --
 # fpcoa -> annembed -> bson -> time needs 1.88, and that number moves with the
-# dependency. This crate is the one a consumer compiles, so this is the floor that
-# matters, and it replaces what rust-toolchain.toml used to assert: a path
-# dependency's toolchain file is never consulted, so a pin there was unusable
-# downstream, while rust-version travels with the crate.
+# dependency.
+#
+# This does not contradict the workspace's rust-toolchain.toml, which still pins
+# nightly for the CLI: a path dependency's toolchain file is never consulted, since
+# rustup resolves from the invocation directory. So a consumer that depends on this
+# crate builds it with their own toolchain, and rust-version is what tells them
+# which ones will work.
 rust-version = "1.85"
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 keywords = ["unifrac", "phylogenetic", "MinHash", "Jaccard"]
-# Internal to this workspace; the CLI and the future C API are the consumers.
-publish = false
 
 [dependencies]
 # The sketchers themselves. 0.1.8 is a wasm floor, not a preference: earlier

@@ -909,7 +909,8 @@ fn table_from_biom(
 ) -> CoreTable {
     let mut col_sums = vec![0.0f64; nsamp];
     if weighted {
-        for r in 0..(indptr.len() - 1) {
+        // One entry per taxon, matching the pre-extraction `0..taxa.len()`.
+        for r in 0..row2leaf.len() {
             for k in indptr[r] as usize..indptr[r + 1] as usize {
                 col_sums[indices[k] as usize] += data[k];
             }

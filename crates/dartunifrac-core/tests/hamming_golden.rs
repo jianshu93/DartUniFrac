@@ -11,15 +11,16 @@
 // uses. These vectors turn that argument into a regression test. Values are
 // compared as raw bits, not with an epsilon: the claim is byte parity.
 //
-// PROVENANCE, and why the generator is not checked in: emitting these requires
+// PROVENANCE. Emitting these values requires
 // anndists 0.1.5 with its stdsimd feature, which requires
 // `feature(portable_simd)`, which requires nightly Rust. Removing exactly that
 // from the dependency graph is why this file exists, so the generator cannot live
-// in this crate's dev-dependencies without undoing the work. It is kept at
-// `localdocs/kernel-probe/dump_golden.rs` instead, alongside the differential
-// harness that checked 3 million pairs against the same dependency. To
-// regenerate: build that crate on a nightly toolchain, run its dump_golden
-// binary, and redirect stdout over this file.
+// in this crate's dev-dependencies without undoing the work. The generator is
+// checked in at `scripts/hamming_golden_generator/` instead, outside the
+// workspace so a plain `cargo build` never pulls anndists in. To regenerate:
+//
+//     cd scripts/hamming_golden_generator
+//     cargo +nightly run --release > ../../crates/dartunifrac-core/tests/hamming_golden.rs
 //
 // These vectors are the regression net, not the primary parity evidence. That is
 // the byte-for-byte comparison of whole CLI runs against a pre-change binary.

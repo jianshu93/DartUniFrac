@@ -58,7 +58,9 @@ hdf5 = { package = "hdf5-metno", version = "0.10", features = ["static", "zlib"]
 ## anndists = { git = "https://github.com/jianshu93/anndists", default-features = false, features = ["stdsimd"] }
 anndists = { version = "0.1.5", default-features = false, features = ["stdsimd"] }
 # The sketching engine: tree walking, weighted set accumulation, MinHash.
-dartunifrac-core = { path = "crates/dartunifrac-core" }
+# The version is required, not decorative: `cargo package`/`publish` rejects a
+# path dependency without one, and this crate is published on crates.io.
+dartunifrac-core = { path = "crates/dartunifrac-core", version = "0.3.2" }
 
 ndarray = { version = "0.17.1", features = ["rayon", "serde"] }
 ## fpcoa = { git = "https://github.com/jianshu93/fpcoa" }
