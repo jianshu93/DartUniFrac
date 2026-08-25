@@ -168,42 +168,6 @@ fn weighted_dmh_raw_counts_matches_the_pre_extraction_engine() {
     assert_eq!(got.sketches, expected);
 }
 
-/// Golden: weighted TreeMinHash.
-#[test]
-fn weighted_tmh_matches_the_pre_extraction_engine() {
-    let p = SketchParams {
-        k: 16,
-        method: Method::Tmh,
-        ers_l: 2048,
-        seed: 1337,
-        weighted: true,
-        raw_counts: false,
-        portable: false,
-    };
-    let expected: Vec<Vec<u64>> = vec![
-        vec![
-            3957663945173265611, 3257489588702030705, 9839019041948266264, 12342092127168774661,
-            3063780383956625195, 10507667489376987214, 16481599915314263, 2602676718946465527,
-            2597407914150220670, 15344253668907049361, 219163557476212092, 2687336853163584770,
-            18275982724764607708, 9526012893046058236, 8418746523146264565, 16420805950555658088,
-        ],
-        vec![
-            10176560351334667316, 12877527811884566049, 6629855469523377198, 11579337022130167913,
-            3063780383956625195, 10507667489376987214, 16481599915314263, 6680947366008369532,
-            8909793493786336644, 15344253668907049361, 10831387140816941211, 13659303769849057785,
-            17220660975987229354, 12162627699437457793, 7710645965558035970, 16420805950555658088,
-        ],
-        vec![
-            13968832888339158043, 3257489588702030705, 9839019041948266264, 12342092127168774661,
-            3773560192085917463, 10507667489376987214, 965858268503070749, 2602676718946465527,
-            2597407914150220670, 15344253668907049361, 219163557476212092, 2687336853163584770,
-            18275982724764607708, 9526012893046058236, 8418746523146264565, 15971904354621068889,
-        ],
-    ];
-    let got = build_sketches(&test_tree(), &test_table(), &p, "").unwrap();
-    assert_eq!(got.sketches, expected);
-}
-
 /// Golden: weighted Efficient Rejection Sampling, whose caps are the run's max weights.
 #[test]
 fn weighted_ers_matches_the_pre_extraction_engine() {
@@ -234,42 +198,6 @@ fn weighted_ers_matches_the_pre_extraction_engine() {
             10408765097491824885, 17930135179127868694, 4194424647027061773, 2130474326937290486,
             12529681439994705820, 14082184538593308345, 2641718885772434116, 1987227185604819101,
             16836470319317057876, 14817971650107356719, 9848575323899779973, 10952063027165193100,
-        ],
-    ];
-    let got = build_sketches(&test_tree(), &test_table(), &p, "").unwrap();
-    assert_eq!(got.sketches, expected);
-}
-
-/// Golden: unweighted TreeMinHash.
-#[test]
-fn unweighted_tmh_matches_the_pre_extraction_engine() {
-    let p = SketchParams {
-        k: 16,
-        method: Method::Tmh,
-        ers_l: 2048,
-        seed: 1337,
-        weighted: false,
-        raw_counts: false,
-        portable: false,
-    };
-    let expected: Vec<Vec<u64>> = vec![
-        vec![
-            15417951088116176394, 5844002720843933693, 6629855469523377198, 11579337022130167913,
-            3063780383956625195, 3358667915643402968, 16481599915314263, 2322245238468084284,
-            13817940273837576632, 15344253668907049361, 9842989442919017118, 11149718804592876398,
-            18428761294456042597, 12162627699437457793, 7710645965558035970, 16420805950555658088,
-        ],
-        vec![
-            10176560351334667316, 12877527811884566049, 6629855469523377198, 5863642166119333222,
-            3063780383956625195, 10507667489376987214, 2710998118157096205, 2322245238468084284,
-            13617450279166823756, 15344253668907049361, 10831387140816941211, 13659303769849057785,
-            18428761294456042597, 12162627699437457793, 7710645965558035970, 16420805950555658088,
-        ],
-        vec![
-            17807613920369847942, 12877527811884566049, 6629855469523377198, 11579337022130167913,
-            3063780383956625195, 3358667915643402968, 16481599915314263, 2322245238468084284,
-            13817940273837576632, 15344253668907049361, 17134692971977033783, 17606135816265790248,
-            18428761294456042597, 12162627699437457793, 7710645965558035970, 16420805950555658088,
         ],
     ];
     let got = build_sketches(&test_tree(), &test_table(), &p, "").unwrap();
@@ -310,4 +238,63 @@ fn unweighted_ers_matches_the_pre_extraction_engine() {
     ];
     let got = build_sketches(&test_tree(), &test_table(), &p, "").unwrap();
     assert_eq!(got.sketches, expected);
+}
+
+/// TreeMinHash's exact output cannot be pinned portably, so this pins everything
+/// around it instead.
+///
+/// `tmh` draws an exponential variate per element as `-ln(u)`
+/// (`dartminhash::treeminhash`), and `ln` is libm: not correctly rounded, and free
+/// to differ by an ulp between platforms. Perturbing that draw by exactly one ulp
+/// was measured to change every `tmh` sketch value on this fixture while leaving
+/// all of the `dmh` and `ers` vectors above untouched — `dmh` uses `ln` only for
+/// an integer count and `ers` uses no transcendentals at all. An earlier version
+/// of this file asserted fixed `tmh` vectors and duly failed on a maintainer's
+/// machine while passing on the one that generated them.
+///
+/// That is a property of the sketcher, not of this crate. What the extraction
+/// could break for `tmh` is every stage *before* the sketcher — validation, the
+/// leaf-to-root accumulation, the empty-sample drop, id compaction — and
+/// `Method` is only consulted in the final `sketch_all` call, so all of it is
+/// shared with `dmh` and `ers` and already pinned exactly above.
+///
+/// So this asserts the `tmh`-specific properties that hold on any libm. The first
+/// is the load-bearing one: on this fixture the run-local and portable id spaces
+/// are the same set (its active edge count is identical either way), so the two
+/// must produce *identical* sketches. That is an exact equality check on id
+/// compaction which compares two runs on the same libm, and it fails if
+/// compaction is broken for `tmh`.
+#[test]
+fn tmh_is_internally_consistent_where_exact_values_cannot_be_portable() {
+    for weighted in [false, true] {
+        let mut p = SketchParams {
+            k: 16,
+            method: Method::Tmh,
+            ers_l: 2048,
+            seed: 1337,
+            weighted,
+            raw_counts: false,
+            portable: false,
+        };
+        let run_local = build_sketches(&test_tree(), &test_table(), &p, "").unwrap();
+
+        assert_eq!(run_local.kept, vec![0, 1, 2], "weighted={weighted}: every sample survives");
+        assert_eq!(run_local.sketches.len(), 3);
+        for s in &run_local.sketches {
+            assert_eq!(s.len(), p.k, "weighted={weighted}: every sketch has length k");
+        }
+
+        // Same call twice: nothing may depend on iteration or thread order.
+        let again = build_sketches(&test_tree(), &test_table(), &p, "").unwrap();
+        assert_eq!(run_local, again, "weighted={weighted}: sketching must be deterministic");
+
+        // The two id spaces coincide on this fixture, so the sketches must too.
+        p.portable = true;
+        let portable = build_sketches(&test_tree(), &test_table(), &p, "").unwrap();
+        assert_eq!(
+            run_local, portable,
+            "weighted={weighted}: this fixture touches every positive-length edge, so the \
+             run-local and portable id spaces are the same set and must sketch identically"
+        );
+    }
 }
