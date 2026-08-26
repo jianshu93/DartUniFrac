@@ -1,0 +1,42 @@
+[package]
+name = "dartunifrac-core"
+description = "Core engine for DartUniFrac: leaf-to-root weighted set accumulation and weighted MinHash sketching. No file I/O, no BLAS, no HDF5 — builds on stable and is wasm-friendly."
+version.workspace = true
+edition.workspace = true
+# Verified, not inferred: this crate builds and its tests pass on 1.85.0, and 1.84.0
+# refuses the manifest outright ("feature `edition2024` is required"). Declared here
+# rather than workspace-wide because the CLI's floor is higher and not ours to claim --
+# fpcoa -> annembed -> bson -> time needs 1.88, and that number moves with the
+# dependency.
+#
+# This does not contradict the workspace's rust-toolchain.toml, which still pins
+# nightly for the CLI: a path dependency's toolchain file is never consulted, since
+# rustup resolves from the invocation directory. So a consumer that depends on this
+# crate builds it with their own toolchain, and rust-version is what tells them
+# which ones will work.
+rust-version = "1.85"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords = ["unifrac", "phylogenetic", "MinHash", "Jaccard"]
+
+[dependencies]
+# The sketchers themselves. 0.1.8 is a wasm floor, not a preference: earlier
+# versions pull tab-hash 0.3, whose rand 0.7 disables Distribution<u128> on
+# emscripten, so they cannot compile for that target at all. Its `mixed_tab`
+# feature must stay off — it swaps the tabulation hash and would change every
+# sketch this crate has ever produced.
+dartminhash = "0.1.8"
+# Per-sample parallelism. Proven on wasm32-unknown-emscripten.
+rayon = "1.10"
+# Facade only; a no-op unless the binary installs a logger.
+log = "0.4"
+
+# Deliberately absent, and this is the point of the crate:
+#   anndists  -> was the sketch-distance kernel; its stdsimd feature needed
+#                feature(portable_simd), which pinned the whole workspace to
+#                nightly. Replaced by this crate's own kernel, bit-for-bit
+#   fpcoa     -> BLAS/LAPACK at link time
+#   hdf5      -> C library
+#   newick, succparen -> tree parsing is the caller's job; the API is handed
+#                        parent[]/branch_length[] directly

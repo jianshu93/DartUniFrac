@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # dartunifrac-core only: it needs no BLAS/LAPACK and no HDF5, so it runs
+  # anywhere without system packages. The binary needs both and is left out
+  # deliberately, to keep this fast and green rather than fighting system deps.
+  #
+  # The platform matrix is the point. Sketch values are not guaranteed identical
+  # across platforms -- TreeMinHash draws `-ln(u)` per element, and libm is not
+  # correctly rounded -- so a single Linux runner would certify a property that
+  # only holds on Linux. That is exactly how a fixed-vector test reached main
+  # green and then failed on an arm64 Mac.
+  test:
+    name: core tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14] # x86_64-linux, aarch64-darwin
+    env:
+      # rust-toolchain.toml pins nightly for the binary's anndists dependency.
+      # This crate is required to build on stable, and RUSTUP_TOOLCHAIN takes
+      # precedence over the toolchain file.
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - run: cargo test -p dartunifrac-core --all-targets
