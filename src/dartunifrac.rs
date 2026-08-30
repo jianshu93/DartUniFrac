@@ -31,9 +31,7 @@ use anndists::dist::{DistHamming, Distance};
 // The engine. `Tree`/`Table` are renamed on import purely for readability: this
 // file also handles the newick tree and the raw parsed table, so unqualified
 // `Tree`/`Table` would not say which is which at the call site.
-use dartunifrac_core::{
-    CoreError, Method, SketchParams, Table as CoreTable, Tree as CoreTree,
-};
+use dartunifrac_core::{CoreError, Method, SketchParams, Table as CoreTable, Tree as CoreTree};
 use hdf5::{File as H5File, types::VarLenUnicode};
 use newick::{Newick, NodeID, one_from_string};
 use succparen::{
@@ -49,11 +47,10 @@ use succparen::{
 use fpcoa::{FpcoaOptions, pcoa_randomized_inplace_f32};
 use ndarray::{Array1, Array2};
 
-
 const UNIFRAC_CITATIONS: &str = r#"
 Citations:
   For DartUniFrac, please see:
-    Zhao, J., McDonald, D., Sfiligoi, I., Lladser, M.E., Patel, L., Weng, Y., Khatib, L., Degregori, S., Gonzalez, A., Lozupone, C. and Knight, R., 2026. Enabling Megascale Microbiome Analysis with DartUniFrac. bioRxiv, pp.2026-03. doi: https://doi.org/10.64898/2026.03.01.708916
+    Zhao, J., McDonald, D., Sfiligoi, I. et al. Megascale microbiome analysis with DartUniFrac. Nat Biotechnol (2026). https://doi.org/10.1038/s41587-026-03260-8
 "#;
 
 type NwkTree = newick::NewickTree;
@@ -386,8 +383,7 @@ fn write_matrix(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()>
             .into_par_iter()
             .map(|bi| {
                 let i = i0 + bi;
-                let mut line =
-                    String::with_capacity(names[i].len() + 1 + nn * 12); // rough capacity
+                let mut line = String::with_capacity(names[i].len() + 1 + nn * 12); // rough capacity
 
                 // row label
                 line.push_str(&names[i]);
@@ -459,8 +455,7 @@ fn write_matrix_zstd(names: &[String], d: &[f32], n: usize, path: &str) -> Resul
             .into_par_iter()
             .map(|bi| {
                 let i = i0 + bi;
-                let mut line =
-                    String::with_capacity(names[i].len() + 1 + nn * 12); // rough capacity
+                let mut line = String::with_capacity(names[i].len() + 1 + nn * 12); // rough capacity
 
                 // row label
                 line.push_str(&names[i]);
@@ -489,7 +484,6 @@ fn write_matrix_zstd(names: &[String], d: &[f32], n: usize, path: &str) -> Resul
     out.flush()?;
     Ok(())
 }
-
 
 // Streaming distances directly from sketches (for --streaming mode)
 fn write_matrix_streaming_zstd_u64(
@@ -758,9 +752,6 @@ fn write_matrix_streaming_zstd_u32(
 
     Ok(())
 }
-
-
-
 
 // ---------------------------------------------------------------------------
 // Tree loading and table marshaling for `dartunifrac-core`.
@@ -1112,7 +1103,11 @@ fn csr_to_csc(
 
     let mut cur = colptr.clone();
     let mut rowind = vec![0usize; nnz];
-    let mut vals = if with_vals { vec![0f64; nnz] } else { Vec::new() };
+    let mut vals = if with_vals {
+        vec![0f64; nnz]
+    } else {
+        Vec::new()
+    };
 
     for r in 0..(indptr.len() - 1) {
         let a = indptr[r] as usize;
@@ -1311,8 +1306,7 @@ fn build_sketches_simple(
     let t = parse_tree(tree_file)?;
     let (leaf_ids, leaf_nm) = leaf_index(&t);
     let tree = tree_arrays_simple(&t);
-    let (samples, table) =
-        load_table(input_tsv, biom_h5, &leaf_ids, &leaf_nm, false, "(simple) ")?;
+    let (samples, table) = load_table(input_tsv, biom_h5, &leaf_ids, &leaf_nm, false, "(simple) ")?;
     let params = SketchParams {
         k,
         method: method_from_str(method)?,
@@ -1351,9 +1345,12 @@ fn build_sketches_weighted_simple(
     let t = parse_tree(tree_file)?;
     let (leaf_ids, leaf_nm) = leaf_index(&t);
     let tree = tree_arrays_simple(&t);
-    info!("(simple) nodes = {}  leaves = {}", tree.parent.len(), leaf_ids.len());
-    let (samples, table) =
-        load_table(input_tsv, biom_h5, &leaf_ids, &leaf_nm, true, "(simple) ")?;
+    info!(
+        "(simple) nodes = {}  leaves = {}",
+        tree.parent.len(),
+        leaf_ids.len()
+    );
+    let (samples, table) = load_table(input_tsv, biom_h5, &leaf_ids, &leaf_nm, true, "(simple) ")?;
     let params = SketchParams {
         k,
         method: method_from_str(method)?,
@@ -1399,7 +1396,10 @@ fn trim_sketches_to_bbits(sk: Vec<Vec<u64>>, bbits: u8) -> Sketches {
         64 => Sketches::U64(sk),
         other => {
             // Should not happen if main normalizes, but keep it robust.
-            warn!("trim_sketches_to_bbits: bbits={} not supported; using 16.", other);
+            warn!(
+                "trim_sketches_to_bbits: bbits={} not supported; using 16.",
+                other
+            );
             let out: Vec<Vec<u16>> = sk
                 .into_iter()
                 .map(|row| row.into_iter().map(|x| x as u16).collect())
@@ -1572,7 +1572,10 @@ fn main() -> Result<()> {
     let bbits: u8 = match bbits_in {
         16 | 32 | 64 => bbits_in,
         other => {
-            warn!("--bbits={} not supported; using 16 (supported: 16/32/64).", other);
+            warn!(
+                "--bbits={} not supported; using 16 (supported: 16/32/64).",
+                other
+            );
             16
         }
     };
@@ -1626,7 +1629,9 @@ fn main() -> Result<()> {
     }
     if weighted {
         if raw_counts {
-            info!("Weighted mode with raw counts: no per-sample relative-abundance normalization before branch accumulation");
+            info!(
+                "Weighted mode with raw counts: no per-sample relative-abundance normalization before branch accumulation"
+            );
         } else {
             info!("Weighted mode with relative abundance normalization");
         }
@@ -1642,18 +1647,25 @@ fn main() -> Result<()> {
         info!("Using simple Newick tree parsing (default)");
     }
 
-    let (samples, sketches_u64): (Vec<String>, Vec<Vec<u64>>) =
-    if weighted {
+    let (samples, sketches_u64): (Vec<String>, Vec<Vec<u64>>) = if weighted {
         if succ {
-            build_sketches_weighted(tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts, portable)?
+            build_sketches_weighted(
+                tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts, portable,
+            )?
         } else {
-            build_sketches_weighted_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts, portable)?
+            build_sketches_weighted_simple(
+                tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts, portable,
+            )?
         }
     } else {
         if succ {
-            build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed, portable)?
+            build_sketches(
+                tree_file, input_tsv, biom_path, k, method, ers_l, seed, portable,
+            )?
         } else {
-            build_sketches_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed, portable)?
+            build_sketches_simple(
+                tree_file, input_tsv, biom_path, k, method, ers_l, seed, portable,
+            )?
         }
     };
     let sketches = trim_sketches_to_bbits(sketches_u64, bbits);
@@ -1684,9 +1696,15 @@ fn main() -> Result<()> {
             out_path_stream_str
         );
         match &sketches {
-            Sketches::U16(s) => write_matrix_streaming_zstd_u16(&samples, s, &out_path_stream_str, block, weighted)?,
-            Sketches::U32(s) => write_matrix_streaming_zstd_u32(&samples, s, &out_path_stream_str, block, weighted)?,
-            Sketches::U64(s) => write_matrix_streaming_zstd_u64(&samples, s, &out_path_stream_str, block, weighted)?,
+            Sketches::U16(s) => {
+                write_matrix_streaming_zstd_u16(&samples, s, &out_path_stream_str, block, weighted)?
+            }
+            Sketches::U32(s) => {
+                write_matrix_streaming_zstd_u32(&samples, s, &out_path_stream_str, block, weighted)?
+            }
+            Sketches::U64(s) => {
+                write_matrix_streaming_zstd_u64(&samples, s, &out_path_stream_str, block, weighted)?
+            }
         }
         info!("Done → {}", out_path_stream_str);
         return Ok(());
@@ -1836,7 +1854,15 @@ mod tests {
         let table = table.to_str().unwrap();
         if weighted {
             build_sketches_weighted_simple(
-                TREE, Some(table), None, K, "dmh", 2048, SEED, false, portable,
+                TREE,
+                Some(table),
+                None,
+                K,
+                "dmh",
+                2048,
+                SEED,
+                false,
+                portable,
             )
         } else {
             build_sketches_simple(TREE, Some(table), None, K, "dmh", 2048, SEED, portable)
@@ -1869,7 +1895,11 @@ mod tests {
             let few = sketch(&subset, weighted, true);
             let all = sketch(Path::new(TABLE), weighted, true);
             let common = shared(&few, &all);
-            assert_eq!(common.len(), 3, "expected the 3 subset samples in both runs");
+            assert_eq!(
+                common.len(),
+                3,
+                "expected the 3 subset samples in both runs"
+            );
             for (name, from_subset, from_full) in common {
                 assert_eq!(
                     from_subset, from_full,
