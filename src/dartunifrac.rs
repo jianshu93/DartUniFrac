@@ -47,15 +47,13 @@ use ndarray::{Array1, Array2};
 #[cfg(feature = "cuda")]
 mod disthamming_gpu;
 
-
 const UNIFRAC_CITATIONS: &str = r#"
 Citations:
   For DartUniFrac, please see:
-  Zhao, J., McDonald, D., Sfiligoi, I., Lladser, M.E., Patel, L., Weng, Y., Khatib, L., Degregori, S., Gonzalez, A., Lozupone, C. and Knight, R., 2026. Enabling Megascale Microbiome Analysis with DartUniFrac. bioRxiv, pp.2026-03. doi: https://doi.org/10.64898/2026.03.01.708916
+  Zhao, J., McDonald, D., Sfiligoi, I. et al. Megascale microbiome analysis with DartUniFrac. Nat Biotechnol (2026). https://doi.org/10.1038/s41587-026-03260-8
 "#;
 
 type NwkTree = newick::NewickTree;
-
 
 fn sketch_with_tree_minhash(wsets: &[Vec<(u64, f64)>], k: usize, seed: u64) -> Vec<Vec<u64>> {
     let mut rng = mt_from_seed(seed);
@@ -191,7 +189,11 @@ struct WorkerSeen {
 
 impl WorkerSeen {
     fn new(n: usize) -> Self {
-        Self { stamp: vec![0u32; n], cur: 1, touched: Vec::new() }
+        Self {
+            stamp: vec![0u32; n],
+            cur: 1,
+            touched: Vec::new(),
+        }
     }
     #[inline]
     fn next_sample(&mut self) {
@@ -225,7 +227,12 @@ struct WorkerAcc {
 
 impl WorkerAcc {
     fn new(n: usize) -> Self {
-        Self { stamp: vec![0u32; n], acc: vec![0f32; n], cur: 1, touched: Vec::new() }
+        Self {
+            stamp: vec![0u32; n],
+            acc: vec![0f32; n],
+            cur: 1,
+            touched: Vec::new(),
+        }
     }
     #[inline]
     fn next_sample(&mut self) {
@@ -300,7 +307,6 @@ fn build_parent_and_lens_simple(t: &NwkTree) -> (Vec<usize>, Vec<f64>) {
     (parent, lens)
 }
 
-
 // Unweighted, build sketches using simple Newick tree parsing (no succparen)
 fn build_sketches_simple(
     tree_file: &str,
@@ -362,44 +368,43 @@ fn build_sketches_simple(
         // Thread-local scratch (reusing WorkerAccum):
         // - acc[v] is used as seen[v] (0.0/1.0)
         // - touched stores which v were set to 1.0 so we can reset only those
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerSeen::new(total_usize),
-                |st, (s, out)| {
-                    out.clear();
-                    st.next_sample();
+        wsets.par_iter_mut().enumerate().for_each_init(
+            || WorkerSeen::new(total_usize),
+            |st, (s, out)| {
+                out.clear();
+                st.next_sample();
 
-                    for (r, lopt) in row2leaf.iter().enumerate() {
-                        if mat[r][s] <= 0.0 {
-                            continue;
-                        }
-                        let lp = match lopt {
-                            Some(v) => *v,
-                            None => continue,
-                        };
-                        let mut v = leaf_ids_ref[lp];
-
-                        loop {
-                            if !st.mark_seen(v) {
-                                break; // already visited this node for this sample
-                            }
-                            let p = parent[v];
-                            if p == usize::MAX { break; }
-                            v = p;
-                        }
+                for (r, lopt) in row2leaf.iter().enumerate() {
+                    if mat[r][s] <= 0.0 {
+                        continue;
                     }
+                    let lp = match lopt {
+                        Some(v) => *v,
+                        None => continue,
+                    };
+                    let mut v = leaf_ids_ref[lp];
 
-                    out.reserve(st.touched.len());
-                    for &v in st.touched.iter() {
-                        let lw = lens_ref[v];
-                        if lw > 0.0 {
-                            out.push((v as u64, lw));
+                    loop {
+                        if !st.mark_seen(v) {
+                            break; // already visited this node for this sample
                         }
+                        let p = parent[v];
+                        if p == usize::MAX {
+                            break;
+                        }
+                        v = p;
                     }
-                },
-            );
+                }
+
+                out.reserve(st.touched.len());
+                for &v in st.touched.iter() {
+                    let lw = lens_ref[v];
+                    if lw > 0.0 {
+                        out.push((v as u64, lw));
+                    }
+                }
+            },
+        );
 
         info!(
             "(simple) built presence sets in {} ms",
@@ -430,42 +435,41 @@ fn build_sketches_simple(
 
         let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
 
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerSeen::new(total_usize),
-                |st, (s, out)| {
-                    out.clear();
-                    st.next_sample();
+        wsets.par_iter_mut().enumerate().for_each_init(
+            || WorkerSeen::new(total_usize),
+            |st, (s, out)| {
+                out.clear();
+                st.next_sample();
 
-                    for kk in colptr[s]..colptr[s + 1] {
-                        let r = rowind[kk];
-                        let lp = match row2leaf[r] {
-                            Some(v) => v,
-                            None => continue,
-                        };
-                        let mut v = leaf_ids_ref[lp];
+                for kk in colptr[s]..colptr[s + 1] {
+                    let r = rowind[kk];
+                    let lp = match row2leaf[r] {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    let mut v = leaf_ids_ref[lp];
 
-                        loop {
-                            if !st.mark_seen(v) {
-                                break;
-                            }
-                            let p = parent[v];
-                            if p == usize::MAX { break; }
-                            v = p;
+                    loop {
+                        if !st.mark_seen(v) {
+                            break;
                         }
-                    }
-
-                    out.reserve(st.touched.len());
-                    for &v in st.touched.iter() {
-                        let lw = lens_ref[v];
-                        if lw > 0.0 {
-                            out.push((v as u64, lw));
+                        let p = parent[v];
+                        if p == usize::MAX {
+                            break;
                         }
+                        v = p;
                     }
-                },
-            );
+                }
+
+                out.reserve(st.touched.len());
+                for &v in st.touched.iter() {
+                    let lw = lens_ref[v];
+                    if lw > 0.0 {
+                        out.push((v as u64, lw));
+                    }
+                }
+            },
+        );
 
         info!(
             "(simple) built presence sets from BIOM in {} ms",
@@ -501,9 +505,7 @@ fn build_sketches_simple(
             used[vid as usize] = true;
         }
     }
-    let active_edges: Vec<usize> = (0..total)
-        .filter(|&v| used[v] && lens[v] > 0.0)
-        .collect();
+    let active_edges: Vec<usize> = (0..total).filter(|&v| used[v] && lens[v] > 0.0).collect();
     if active_edges.is_empty() {
         anyhow::bail!("No active edges after presence accumulation.");
     }
@@ -594,11 +596,7 @@ fn build_sketches_weighted_simple(
         .map(|(i, n)| (n.as_str(), i))
         .collect();
 
-    info!(
-        "(simple) nodes = {}  leaves = {}",
-        total,
-        leaf_ids.len()
-    );
+    info!("(simple) nodes = {}  leaves = {}", total, leaf_ids.len());
 
     // Build per-sample weighted sets
     let (samples, wsets_by_vid): (Vec<String>, Vec<Vec<(u64, f64)>>) = if let Some(tsv) = input_tsv
@@ -624,58 +622,57 @@ fn build_sketches_weighted_simple(
         let t0 = Instant::now();
 
         let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerAcc::new(total_usize),
-                |st, (s, out)| {
-                    out.clear();
+        wsets.par_iter_mut().enumerate().for_each_init(
+            || WorkerAcc::new(total_usize),
+            |st, (s, out)| {
+                out.clear();
 
-                    let denom = col_sums[s];
-                    if !raw_counts && denom == 0.0 {
-                        st.next_sample(); // advance stamp anyway (keeps logic simple)
-                        return;
+                let denom = col_sums[s];
+                if !raw_counts && denom == 0.0 {
+                    st.next_sample(); // advance stamp anyway (keeps logic simple)
+                    return;
+                }
+
+                st.next_sample();
+
+                // scatter from leaves, climb to root
+                for (r, lopt) in row2leaf.iter().enumerate() {
+                    let lp = match lopt {
+                        Some(v) => *v,
+                        None => continue,
+                    };
+                    let val = counts[r][s];
+                    if val <= 0.0 {
+                        continue;
+                    }
+                    let inc = if raw_counts { val } else { val / denom } as f32;
+                    if inc == 0.0 {
+                        continue;
                     }
 
-                    st.next_sample();
-
-                    // scatter from leaves, climb to root
-                    for (r, lopt) in row2leaf.iter().enumerate() {
-                        let lp = match lopt {
-                            Some(v) => *v,
-                            None => continue,
-                        };
-                        let val = counts[r][s];
-                        if val <= 0.0 {
-                            continue;
+                    let mut v = leaf_ids_ref[lp];
+                    loop {
+                        st.add(v, inc);
+                        let p = parent[v];
+                        if p == usize::MAX {
+                            break;
                         }
-                        let inc = if raw_counts { val } else { val / denom } as f32;
-                        if inc == 0.0 {
-                            continue;
-                        }
+                        v = p;
+                    }
+                }
 
-                        let mut v = leaf_ids_ref[lp];
-                        loop {
-                            st.add(v, inc);
-                            let p = parent[v];
-                            if p == usize::MAX { break; }
-                            v = p;
+                out.reserve(st.touched.len());
+                for &v in st.touched.iter() {
+                    let a = st.acc[v] as f64;
+                    if a > 0.0 {
+                        let lw = lens_ref[v];
+                        if lw > 0.0 {
+                            out.push((v as u64, lw * a));
                         }
                     }
-
-                    out.reserve(st.touched.len());
-                    for &v in st.touched.iter() {
-                        let a = st.acc[v] as f64;
-                        if a > 0.0 {
-                            let lw = lens_ref[v];
-                            if lw > 0.0 {
-                                out.push((v as u64, lw * a));
-                            }
-                        }
-                    }
-                },
-            );
+                }
+            },
+        );
 
         info!(
             "(simple) built weighted sets from TSV in {} ms",
@@ -714,55 +711,58 @@ fn build_sketches_weighted_simple(
         let t0 = Instant::now();
 
         let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerAcc::new(total_usize),
-                |st, (s, out)| {
-                    out.clear();
+        wsets.par_iter_mut().enumerate().for_each_init(
+            || WorkerAcc::new(total_usize),
+            |st, (s, out)| {
+                out.clear();
 
-                    let denom = col_sums[s];
-                    if !raw_counts && denom == 0.0 {
-                        st.next_sample();
-                        return;
-                    }
-
+                let denom = col_sums[s];
+                if !raw_counts && denom == 0.0 {
                     st.next_sample();
+                    return;
+                }
 
-                    for kk in colptr[s]..colptr[s + 1] {
-                        let r = rowind[kk];
-                        let lp = match row2leaf[r] {
-                            Some(v) => v,
-                            None => continue,
-                        };
+                st.next_sample();
 
-                        let inc = if raw_counts { vals[kk] } else { vals[kk] / denom } as f32;
-                        if inc == 0.0 {
-                            continue;
-                        }
+                for kk in colptr[s]..colptr[s + 1] {
+                    let r = rowind[kk];
+                    let lp = match row2leaf[r] {
+                        Some(v) => v,
+                        None => continue,
+                    };
 
-                        let mut v = leaf_ids_ref[lp];
-                        loop {
-                            st.add(v, inc);
-                            let p = parent[v];
-                            if p == usize::MAX { break; }
-                            v = p;
-                        }
+                    let inc = if raw_counts {
+                        vals[kk]
+                    } else {
+                        vals[kk] / denom
+                    } as f32;
+                    if inc == 0.0 {
+                        continue;
                     }
 
-                    out.reserve(st.touched.len());
-                    for &v in st.touched.iter() {
-                        let a = st.acc[v] as f64;
-                        if a > 0.0 {
-                            let lw = lens_ref[v];
-                            if lw > 0.0 {
-                                out.push((v as u64, lw * a));
-                            }
+                    let mut v = leaf_ids_ref[lp];
+                    loop {
+                        st.add(v, inc);
+                        let p = parent[v];
+                        if p == usize::MAX {
+                            break;
+                        }
+                        v = p;
+                    }
+                }
+
+                out.reserve(st.touched.len());
+                for &v in st.touched.iter() {
+                    let a = st.acc[v] as f64;
+                    if a > 0.0 {
+                        let lw = lens_ref[v];
+                        if lw > 0.0 {
+                            out.push((v as u64, lw * a));
                         }
                     }
-                },
-            );
+                }
+            },
+        );
 
         info!(
             "(simple) built weighted sets from BIOM in {} ms",
@@ -1018,7 +1018,6 @@ fn read_biom_csr_values(
 
 // Write TSV matrix (parallel formatting, block-wise, d is f32)
 fn write_matrix(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()> {
-
     let file = File::create(path)?;
     let mut out = BufWriter::with_capacity(16 << 20, file);
 
@@ -1052,8 +1051,7 @@ fn write_matrix(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()>
             .into_par_iter()
             .map(|bi| {
                 let i = i0 + bi;
-                let mut line =
-                    String::with_capacity(names[i].len() + 1 + nn * 12); // rough capacity
+                let mut line = String::with_capacity(names[i].len() + 1 + nn * 12); // rough capacity
 
                 // row label
                 line.push_str(&names[i]);
@@ -1084,7 +1082,6 @@ fn write_matrix(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()>
 }
 
 fn write_matrix_zstd(names: &[String], d: &[f32], n: usize, path: &str) -> Result<()> {
-
     // zstd encoder (multi-threaded) + big buffer
     let file = File::create(path)?;
     let mut enc = zstd::Encoder::new(file, 0)?;
@@ -1123,8 +1120,7 @@ fn write_matrix_zstd(names: &[String], d: &[f32], n: usize, path: &str) -> Resul
             .into_par_iter()
             .map(|bi| {
                 let i = i0 + bi;
-                let mut line =
-                    String::with_capacity(names[i].len() + 1 + nn * 12); // rough capacity
+                let mut line = String::with_capacity(names[i].len() + 1 + nn * 12); // rough capacity
 
                 // row label
                 line.push_str(&names[i]);
@@ -1469,7 +1465,6 @@ fn build_sketches(
     let parent = compute_parent(total, &kids);
     let lens: Vec<f64> = lens_f32.iter().map(|&x| x as f64).collect();
 
-
     // Build per-sample presence sets (emit (edge_id, ℓ_v) when present)
     let (samples, wsets_by_vid): (Vec<String>, Vec<Vec<(u64, f64)>>) = if let Some(tsv) = input_tsv
     {
@@ -1489,44 +1484,43 @@ fn build_sketches(
         let t0 = Instant::now();
 
         let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerSeen::new(total_usize),
-                |st, (s, out)| {
-                    out.clear();
-                    st.next_sample();
+        wsets.par_iter_mut().enumerate().for_each_init(
+            || WorkerSeen::new(total_usize),
+            |st, (s, out)| {
+                out.clear();
+                st.next_sample();
 
-                    for (r, lopt) in row2leaf.iter().enumerate() {
-                        if mat[r][s] <= 0.0 {
-                            continue;
-                        }
-                        let lp = match lopt {
-                            Some(v) => *v,
-                            None => continue,
-                        };
-                        let mut v = leaf_ids_ref[lp];
-
-                        loop {
-                            if !st.mark_seen(v) {
-                                break; // already visited this node for this sample
-                            }
-                            let p = parent[v];
-                            if p == usize::MAX { break; }
-                            v = p;
-                        }
+                for (r, lopt) in row2leaf.iter().enumerate() {
+                    if mat[r][s] <= 0.0 {
+                        continue;
                     }
+                    let lp = match lopt {
+                        Some(v) => *v,
+                        None => continue,
+                    };
+                    let mut v = leaf_ids_ref[lp];
 
-                    out.reserve(st.touched.len());
-                    for &v in st.touched.iter() {
-                        let lw = lens_ref[v];
-                        if lw > 0.0 {
-                            out.push((v as u64, lw));
+                    loop {
+                        if !st.mark_seen(v) {
+                            break; // already visited this node for this sample
                         }
+                        let p = parent[v];
+                        if p == usize::MAX {
+                            break;
+                        }
+                        v = p;
                     }
-                },
-            );
+                }
+
+                out.reserve(st.touched.len());
+                for &v in st.touched.iter() {
+                    let lw = lens_ref[v];
+                    if lw > 0.0 {
+                        out.push((v as u64, lw));
+                    }
+                }
+            },
+        );
 
         info!("built presence sets in {} ms", t0.elapsed().as_millis());
         (samples, wsets)
@@ -1553,42 +1547,41 @@ fn build_sketches(
         let t0 = Instant::now();
 
         let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerSeen::new(total_usize),
-                |st, (s, out)| {
-                    out.clear();
-                    st.next_sample();
+        wsets.par_iter_mut().enumerate().for_each_init(
+            || WorkerSeen::new(total_usize),
+            |st, (s, out)| {
+                out.clear();
+                st.next_sample();
 
-                    for kk in colptr[s]..colptr[s + 1] {
-                        let r = rowind[kk];
-                        let lp = match row2leaf[r] {
-                            Some(v) => v,
-                            None => continue,
-                        };
-                        let mut v = leaf_ids_ref[lp];
+                for kk in colptr[s]..colptr[s + 1] {
+                    let r = rowind[kk];
+                    let lp = match row2leaf[r] {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    let mut v = leaf_ids_ref[lp];
 
-                        loop {
-                            if !st.mark_seen(v) {
-                                break;
-                            }
-                            let p = parent[v];
-                            if p == usize::MAX { break; }
-                            v = p;
+                    loop {
+                        if !st.mark_seen(v) {
+                            break;
                         }
-                    }
-
-                    out.reserve(st.touched.len());
-                    for &v in st.touched.iter() {
-                        let lw = lens_ref[v];
-                        if lw > 0.0 {
-                            out.push((v as u64, lw));
+                        let p = parent[v];
+                        if p == usize::MAX {
+                            break;
                         }
+                        v = p;
                     }
-                },
-            );
+                }
+
+                out.reserve(st.touched.len());
+                for &v in st.touched.iter() {
+                    let lw = lens_ref[v];
+                    if lw > 0.0 {
+                        out.push((v as u64, lw));
+                    }
+                }
+            },
+        );
 
         info!("built presence sets in {} ms", t0.elapsed().as_millis());
         (samples, wsets)
@@ -1798,58 +1791,57 @@ fn build_sketches_weighted(
         let t0 = Instant::now();
 
         let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerAcc::new(total_usize),
-                |st, (s, out)| {
-                    out.clear();
+        wsets.par_iter_mut().enumerate().for_each_init(
+            || WorkerAcc::new(total_usize),
+            |st, (s, out)| {
+                out.clear();
 
-                    let denom = col_sums[s];
-                    if !raw_counts && denom == 0.0 {
-                        st.next_sample(); // advance stamp anyway (keeps logic simple)
-                        return;
+                let denom = col_sums[s];
+                if !raw_counts && denom == 0.0 {
+                    st.next_sample(); // advance stamp anyway (keeps logic simple)
+                    return;
+                }
+
+                st.next_sample();
+
+                // scatter from leaves, climb to root
+                for (r, lopt) in row2leaf.iter().enumerate() {
+                    let lp = match lopt {
+                        Some(v) => *v,
+                        None => continue,
+                    };
+                    let val = counts[r][s];
+                    if val <= 0.0 {
+                        continue;
+                    }
+                    let inc = if raw_counts { val } else { val / denom } as f32;
+                    if inc == 0.0 {
+                        continue;
                     }
 
-                    st.next_sample();
-
-                    // scatter from leaves, climb to root
-                    for (r, lopt) in row2leaf.iter().enumerate() {
-                        let lp = match lopt {
-                            Some(v) => *v,
-                            None => continue,
-                        };
-                        let val = counts[r][s];
-                        if val <= 0.0 {
-                            continue;
+                    let mut v = leaf_ids_ref[lp];
+                    loop {
+                        st.add(v, inc);
+                        let p = parent[v];
+                        if p == usize::MAX {
+                            break;
                         }
-                        let inc = if raw_counts { val } else { val / denom } as f32;
-                        if inc == 0.0 {
-                            continue;
-                        }
+                        v = p;
+                    }
+                }
 
-                        let mut v = leaf_ids_ref[lp];
-                        loop {
-                            st.add(v, inc);
-                            let p = parent[v];
-                            if p == usize::MAX { break; }
-                            v = p;
+                out.reserve(st.touched.len());
+                for &v in st.touched.iter() {
+                    let a = st.acc[v] as f64;
+                    if a > 0.0 {
+                        let lw = lens_ref[v];
+                        if lw > 0.0 {
+                            out.push((v as u64, lw * a));
                         }
                     }
-
-                    out.reserve(st.touched.len());
-                    for &v in st.touched.iter() {
-                        let a = st.acc[v] as f64;
-                        if a > 0.0 {
-                            let lw = lens_ref[v];
-                            if lw > 0.0 {
-                                out.push((v as u64, lw * a));
-                            }
-                        }
-                    }
-                },
-            );
+                }
+            },
+        );
 
         info!("built weighted sets in {} ms", t0.elapsed().as_millis());
         (samples, wsets)
@@ -1886,55 +1878,58 @@ fn build_sketches_weighted(
         let t0 = Instant::now();
 
         let mut wsets: Vec<Vec<(u64, f64)>> = vec![Vec::new(); nsamp];
-        wsets
-            .par_iter_mut()
-            .enumerate()
-            .for_each_init(
-                || WorkerAcc::new(total_usize),
-                |st, (s, out)| {
-                    out.clear();
+        wsets.par_iter_mut().enumerate().for_each_init(
+            || WorkerAcc::new(total_usize),
+            |st, (s, out)| {
+                out.clear();
 
-                    let denom = col_sums[s];
-                    if !raw_counts && denom == 0.0 {
-                        st.next_sample();
-                        return;
-                    }
-
+                let denom = col_sums[s];
+                if !raw_counts && denom == 0.0 {
                     st.next_sample();
+                    return;
+                }
 
-                    for kk in colptr[s]..colptr[s + 1] {
-                        let r = rowind[kk];
-                        let lp = match row2leaf[r] {
-                            Some(v) => v,
-                            None => continue,
-                        };
+                st.next_sample();
 
-                        let inc = if raw_counts { vals[kk] } else { vals[kk] / denom } as f32;
-                        if inc == 0.0 {
-                            continue;
-                        }
+                for kk in colptr[s]..colptr[s + 1] {
+                    let r = rowind[kk];
+                    let lp = match row2leaf[r] {
+                        Some(v) => v,
+                        None => continue,
+                    };
 
-                        let mut v = leaf_ids_ref[lp];
-                        loop {
-                            st.add(v, inc);
-                            let p = parent[v];
-                            if p == usize::MAX { break; }
-                            v = p;
-                        }
+                    let inc = if raw_counts {
+                        vals[kk]
+                    } else {
+                        vals[kk] / denom
+                    } as f32;
+                    if inc == 0.0 {
+                        continue;
                     }
 
-                    out.reserve(st.touched.len());
-                    for &v in st.touched.iter() {
-                        let a = st.acc[v] as f64;
-                        if a > 0.0 {
-                            let lw = lens_ref[v];
-                            if lw > 0.0 {
-                                out.push((v as u64, lw * a));
-                            }
+                    let mut v = leaf_ids_ref[lp];
+                    loop {
+                        st.add(v, inc);
+                        let p = parent[v];
+                        if p == usize::MAX {
+                            break;
+                        }
+                        v = p;
+                    }
+                }
+
+                out.reserve(st.touched.len());
+                for &v in st.touched.iter() {
+                    let a = st.acc[v] as f64;
+                    if a > 0.0 {
+                        let lw = lens_ref[v];
+                        if lw > 0.0 {
+                            out.push((v as u64, lw * a));
                         }
                     }
-                },
-            );
+                }
+            },
+        );
 
         info!("built weighted sets in {} ms", t0.elapsed().as_millis());
         (samples, wsets)
@@ -2007,25 +2002,34 @@ fn build_sketches_weighted(
 
         let caps: Vec<f64> = wsets
             .par_iter()
-            .fold(|| vec![0.0f64; d], |mut local, ws| {
-                for &(id, w) in ws {
-                    let idx = id as usize;
-                    if w > local[idx] {
-                        local[idx] = w;
+            .fold(
+                || vec![0.0f64; d],
+                |mut local, ws| {
+                    for &(id, w) in ws {
+                        let idx = id as usize;
+                        if w > local[idx] {
+                            local[idx] = w;
+                        }
                     }
-                }
-                local
-            })
-            .reduce(|| vec![0.0f64; d], |mut a, b| {
-                for i in 0..d {
-                    if b[i] > a[i] {
-                        a[i] = b[i];
+                    local
+                },
+            )
+            .reduce(
+                || vec![0.0f64; d],
+                |mut a, b| {
+                    for i in 0..d {
+                        if b[i] > a[i] {
+                            a[i] = b[i];
+                        }
                     }
-                }
-                a
-            });
+                    a
+                },
+            );
 
-        info!("ERS: caps(max_w) built in {} ms", t_caps.elapsed().as_millis());
+        info!(
+            "ERS: caps(max_w) built in {} ms",
+            t_caps.elapsed().as_millis()
+        );
 
         let ers = ErsWmh::new_mt(&mut rng, &caps, k as u64);
 
@@ -2205,7 +2209,10 @@ fn trim_sketches_to_bbits(sk: Vec<Vec<u64>>, bbits: u8) -> Sketches {
         }
         64 => Sketches::U64(sk),
         other => {
-            log::warn!("trim_sketches_to_bbits: bbits={} not supported; using 16.", other);
+            log::warn!(
+                "trim_sketches_to_bbits: bbits={} not supported; using 16.",
+                other
+            );
             let out: Vec<Vec<u16>> = sk
                 .into_iter()
                 .map(|row| row.into_iter().map(|x| x as u16).collect())
@@ -2446,7 +2453,10 @@ fn main() -> Result<()> {
     let bbits: u8 = match bbits_in {
         16 | 32 | 64 => bbits_in,
         other => {
-            warn!("--bbits={} not supported; using 16 (supported: 16/32/64).", other);
+            warn!(
+                "--bbits={} not supported; using 16 (supported: 16/32/64).",
+                other
+            );
             16
         }
     };
@@ -2460,7 +2470,6 @@ fn main() -> Result<()> {
 
     #[cfg(feature = "cuda")]
     let tile_rows = *m.get_one::<usize>("tile-rows").unwrap();
-
 
     let threads = m
         .get_one::<usize>("threads")
@@ -2489,7 +2498,9 @@ fn main() -> Result<()> {
     }
     if weighted {
         if raw_counts {
-            info!("Weighted mode with raw counts (no per-sample relative-abundance normalization before branch accumulation)");
+            info!(
+                "Weighted mode with raw counts (no per-sample relative-abundance normalization before branch accumulation)"
+            );
         } else {
             info!("Weighted mode with relative abundance normalization");
         }
@@ -2500,20 +2511,23 @@ fn main() -> Result<()> {
         info!("Unweighted mode");
     };
 
-    let (samples, sketches_u64): (Vec<String>, Vec<Vec<u64>>) =
-        if weighted {
-            if succ {
-                build_sketches_weighted(tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts)?
-            } else {
-                build_sketches_weighted_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts)?
-            }
+    let (samples, sketches_u64): (Vec<String>, Vec<Vec<u64>>) = if weighted {
+        if succ {
+            build_sketches_weighted(
+                tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts,
+            )?
         } else {
-            if succ {
-                build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
-            } else {
-                build_sketches_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
-            }
-        };
+            build_sketches_weighted_simple(
+                tree_file, input_tsv, biom_path, k, method, ers_l, seed, raw_counts,
+            )?
+        }
+    } else {
+        if succ {
+            build_sketches(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
+        } else {
+            build_sketches_simple(tree_file, input_tsv, biom_path, k, method, ers_l, seed)?
+        }
+    };
 
     let sketches = trim_sketches_to_bbits(sketches_u64, bbits);
     let nsamp = samples.len();
@@ -2554,14 +2568,19 @@ fn main() -> Result<()> {
             out_path_stream_str
         );
         match &sketches {
-            Sketches::U16(s) => write_matrix_streaming_zstd_u16(&samples, s, &out_path_stream_str, block, weighted)?,
-            Sketches::U32(s) => write_matrix_streaming_zstd_u32(&samples, s, &out_path_stream_str, block, weighted)?,
-            Sketches::U64(s) => write_matrix_streaming_zstd_u64(&samples, s, &out_path_stream_str, block, weighted)?,
+            Sketches::U16(s) => {
+                write_matrix_streaming_zstd_u16(&samples, s, &out_path_stream_str, block, weighted)?
+            }
+            Sketches::U32(s) => {
+                write_matrix_streaming_zstd_u32(&samples, s, &out_path_stream_str, block, weighted)?
+            }
+            Sketches::U64(s) => {
+                write_matrix_streaming_zstd_u64(&samples, s, &out_path_stream_str, block, weighted)?
+            }
         }
         info!("Done → {}", out_path_stream_str);
         return Ok(());
     }
-
 
     // GPU streaming block
     #[cfg(feature = "cuda")]
@@ -2610,8 +2629,8 @@ fn main() -> Result<()> {
                         n,
                         ksk,
                         &out_path_stream_str,
-                        true,      // compress (zstd)
-                        weighted,   // weighted_normalized
+                        true,     // compress (zstd)
+                        weighted, // weighted_normalized
                         tile_cols,
                         tile_rows,
                     )?;
@@ -2705,7 +2724,10 @@ fn main() -> Result<()> {
                         Sketches::U64(s) => compute_pairwise_from_sketches!(s, weighted),
                     };
 
-                    log::info!("pairwise distances (CPU) in {} ms", t2.elapsed().as_millis());
+                    log::info!(
+                        "pairwise distances (CPU) in {} ms",
+                        t2.elapsed().as_millis()
+                    );
                     out
                 }
             }
@@ -2719,7 +2741,7 @@ fn main() -> Result<()> {
                 Sketches::U32(s) => compute_pairwise_from_sketches!(s, weighted),
                 Sketches::U64(s) => compute_pairwise_from_sketches!(s, weighted),
             };
-            
+
             log::info!(
                 "pairwise distances (CPU) in {} ms",
                 t2.elapsed().as_millis()
