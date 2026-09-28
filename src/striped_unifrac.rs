@@ -43,9 +43,16 @@ use succparen::{
 use std::simd::{LaneCount, Simd, SupportedLaneCount};
 
 
+#[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
+mod stripe_common;
 #[cfg(feature = "cuda")]
 mod stripe_cu;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+mod stripe_metal;
 
+
+#[cfg(all(not(feature = "cuda"), feature = "metal", target_os = "macos"))]
+use crate::stripe_common::InputTable;
 
 #[cfg(feature = "cuda")]
 use crate::stripe_cu::{
@@ -60,7 +67,14 @@ fn gpu_available() -> bool {
     {
         stripe_cu::device_count().unwrap_or(0) > 0
     }
-    #[cfg(not(feature = "cuda"))]
+    #[cfg(all(not(feature = "cuda"), feature = "metal", target_os = "macos"))]
+    {
+        stripe_metal::is_available()
+    }
+    #[cfg(all(
+        not(feature = "cuda"),
+        not(all(feature = "metal", target_os = "macos"))
+    ))]
     {
         false
     }
@@ -1868,7 +1882,17 @@ fn main() -> Result<()> {
                         gpu_opts.clone(),
                     )?
                 }
-                #[cfg(not(feature = "cuda"))]
+                #[cfg(all(not(feature = "cuda"), feature = "metal", target_os = "macos"))]
+                {
+                    let table = InputTable::DenseCounts(&counts);
+                    stripe_metal::unifrac_striped_weighted_metal(
+                        &kids, &lens, &leaf_ids, &row2leaf, table, nsamp, &col_sums,
+                    )?
+                }
+                #[cfg(all(
+                    not(feature = "cuda"),
+                    not(all(feature = "metal", target_os = "macos"))
+                ))]
                 {
                     unreachable!()
                 }
@@ -1917,7 +1941,21 @@ fn main() -> Result<()> {
                         gpu_opts.clone(),
                     )?
                 }
-                #[cfg(not(feature = "cuda"))]
+                #[cfg(all(not(feature = "cuda"), feature = "metal", target_os = "macos"))]
+                {
+                    let table = InputTable::Csr {
+                        indptr: &indptr,
+                        indices: &indices,
+                        data: &data,
+                    };
+                    stripe_metal::unifrac_striped_weighted_metal(
+                        &kids, &lens, &leaf_ids, &row2leaf, table, nsamp, &col_sums,
+                    )?
+                }
+                #[cfg(all(
+                    not(feature = "cuda"),
+                    not(all(feature = "metal", target_os = "macos"))
+                ))]
                 {
                     unreachable!()
                 }
@@ -1979,7 +2017,16 @@ fn main() -> Result<()> {
                     gpu_opts.clone(),
                 )?
             }
-            #[cfg(not(feature = "cuda"))]
+            #[cfg(all(not(feature = "cuda"), feature = "metal", target_os = "macos"))]
+            {
+                stripe_metal::unifrac_striped_unweighted_metal(
+                    &post, &kids, &lens, &leaf_ids, masks,
+                )?
+            }
+            #[cfg(all(
+                not(feature = "cuda"),
+                not(all(feature = "metal", target_os = "macos"))
+            ))]
             {
                 unreachable!()
             }
