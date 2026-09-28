@@ -2409,13 +2409,13 @@ fn main() -> Result<()> {
                 .help("Number of rows per chunk, streaming mode only")
                 .value_parser(clap::value_parser!(usize)),
         );
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
     {
         cmd = cmd
             .arg(
                 Arg::new("gpu-streaming")
                     .long("gpu-streaming")
-                    .help("Streaming the distance matrix to disk block by block (multi-GPU support); available only with the 'cuda' feature")
+                    .help("Streaming the distance matrix to disk block by block; available with the 'cuda' or 'metal' feature")
                     .action(clap::ArgAction::SetTrue),
             )
             .arg(
@@ -2464,13 +2464,13 @@ fn main() -> Result<()> {
     };
     info!("bbits = {}", bbits);
 
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
     let gpu_streaming = m.get_flag("gpu-streaming");
 
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
     let tile_cols = *m.get_one::<usize>("tile-cols").unwrap();
 
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
     let tile_rows = *m.get_one::<usize>("tile-rows").unwrap();
 
     let threads = m
@@ -2582,6 +2582,63 @@ fn main() -> Result<()> {
         }
         info!("Done → {}", out_path_stream_str);
         return Ok(());
+    }
+
+    // GPU streaming block (metal)
+    #[cfg(all(not(feature = "cuda"), feature = "metal", target_os = "macos"))]
+    if gpu_streaming {
+        if pcoa {
+            warn!("--pcoa is incompatible with --gpu-streaming; skipping PCoA.");
+        }
+        if compress {
+            warn!("--compress is ignored with --gpu-streaming; output is written as zstd already.");
+        }
+
+        if !disthamming_metal::is_available() {
+            warn!("--gpu-streaming requested but no Metal device found; falling back to normal path.");
+        } else {
+            let out_path_stream: PathBuf = {
+                let p = Path::new(out_file);
+                match p.extension().and_then(|e| e.to_str()) {
+                    Some("zst") => p.to_path_buf(),
+                    _ => PathBuf::from(format!("{out_file}.zst")),
+                }
+            };
+            let out_path_stream_str = out_path_stream.to_string_lossy();
+            let n = nsamp;
+
+            info!(
+                "Metal streaming → {} (tile_cols={}, tile_rows={}, bbits={})",
+                out_path_stream_str, tile_cols, tile_rows, bbits
+            );
+
+            match &sketches {
+                Sketches::U16(v) => {
+                    let flat = flatten_u16(v, n, ksk);
+                    disthamming_metal::write_matrix_streaming_metal_u16(
+                        &samples, &flat, n, ksk, &out_path_stream_str, true, weighted,
+                        tile_cols, tile_rows,
+                    )?;
+                }
+                Sketches::U32(v) => {
+                    let flat = flatten_u32(v, n, ksk);
+                    disthamming_metal::write_matrix_streaming_metal_u32(
+                        &samples, &flat, n, ksk, &out_path_stream_str, true, weighted,
+                        tile_cols, tile_rows,
+                    )?;
+                }
+                Sketches::U64(v) => {
+                    let flat = flatten_u64(v, n, ksk);
+                    disthamming_metal::write_matrix_streaming_metal_u64(
+                        &samples, &flat, n, ksk, &out_path_stream_str, true, weighted,
+                        tile_cols, tile_rows,
+                    )?;
+                }
+            }
+
+            info!("Done → {}", out_path_stream_str);
+            return Ok(());
+        }
     }
 
     // GPU streaming block

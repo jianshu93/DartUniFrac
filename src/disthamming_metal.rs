@@ -11,10 +11,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use log::{debug, info};
 use metal::objc::rc::autoreleasepool;
 use metal::{
-    CompileOptions, ComputePipelineState, Device, MTLResourceOptions, MTLSize, NSUInteger,
+    CommandQueue, CompileOptions, ComputePipelineState, Device, MTLResourceOptions, MTLSize,
+    NSUInteger,
 };
 use rayon::prelude::*;
 use std::ffi::c_void;
+use std::io::Write;
 use std::time::Instant;
 
 /// every staged slot is 8 bytes regardless of element width, so the threadgroup
@@ -30,6 +32,7 @@ struct Params {
     int i0, j0, bw, bh;
     int only_upper, weighted;
     int bk, stride;
+    int out_i0, out_j0, ldo;   // where this tile lands in the output buffer
 };
 
 inline uint lane_diff(ushort4 a, ushort4 b) {
@@ -120,7 +123,7 @@ inline void hamming_impl(device const ELEM *sketches,
     if (inrange && !(P.only_upper && j <= i)) {
         float d = (i == j) ? 0.0f : (float(diff) / float(k));
         if (P.weighted) d = (d < 2.0f) ? (d / (2.0f - d)) : 1.0f;
-        out[(uint)i * (uint)n + (uint)j] = d;
+        out[(ulong)(P.out_i0 + ii) * (ulong)P.ldo + (ulong)(P.out_j0 + jj)] = d;
     }
 }
 
@@ -152,6 +155,9 @@ struct Params {
     weighted: i32,
     bk: i32,
     stride: i32,
+    out_i0: i32,
+    out_j0: i32,
+    ldo: i32,
 }
 
 trait MetalElem: Copy + Send + Sync {
@@ -306,6 +312,9 @@ fn pairwise_hamming_metal<E: MetalElem>(
                 weighted: weighted as i32,
                 bk: tile.bk as i32,
                 stride: tile.stride as i32,
+                out_i0: i0 as i32,
+                out_j0: j0 as i32,
+                ldo: n as i32,
             };
 
             autoreleasepool(|| {
@@ -406,4 +415,245 @@ pub fn pairwise_hamming_metal_u64(
     weighted: bool,
 ) -> Result<()> {
     pairwise_hamming_metal::<u64>(sketches, n, k, out, block_rows, weighted)
+}
+
+/// device, queue and a pipeline specialised for one element type.
+fn setup<E: MetalElem>() -> Result<(Device, CommandQueue, ComputePipelineState, Tile)> {
+    let device = Device::system_default().context("no metal device found")?;
+    let queue = device.new_command_queue();
+
+    let opts = CompileOptions::new();
+    opts.set_fast_math_enabled(false);
+    let library = device
+        .new_library_with_source(SHADER, &opts)
+        .map_err(|e| anyhow!("metal shader compile failed: {e}"))?;
+    let function = library
+        .get_function(E::KERNEL, None)
+        .map_err(|e| anyhow!("metal function '{}' not found: {e}", E::KERNEL))?;
+    let pso = device
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow!("metal pipeline for '{}' failed: {e}", E::KERNEL))?;
+
+    let max_smem = device.max_threadgroup_memory_length() as usize;
+    let tile = choose_tile(&pso, max_smem)?;
+    Ok((device, queue, pso, tile))
+}
+
+/// streams the full n x n matrix to disk a row-block at a time, so nothing larger than
+/// tile_rows x n is ever resident. mirrors write_matrix_streaming_gpu_* in the cuda
+/// backend, minus the device-to-host copy, which unified memory makes unnecessary.
+fn write_matrix_streaming_metal<E: MetalElem>(
+    names: &[String],
+    sketches_flat: &[E],
+    n: usize,
+    k: usize,
+    path: &str,
+    compress: bool,
+    weighted: bool,
+    tile_cols: usize,
+    tile_rows: usize,
+) -> Result<()> {
+    if names.len() != n {
+        bail!("names has {} entries, expected n = {n}", names.len());
+    }
+    if sketches_flat.len() != n * k {
+        bail!(
+            "sketches has {} elements, expected n*k = {}",
+            sketches_flat.len(),
+            n * k
+        );
+    }
+
+    let (device, queue, pso, tile) = setup::<E>()?;
+
+    // a row block is tile_rows x n f32; cap it so the buffer stays bounded for wide n
+    const ROW_BLOCK_BUDGET: usize = 512 << 20;
+    let max_rows = (ROW_BLOCK_BUDGET / (n * 4)).max(1);
+    let tile_rows = tile_rows.clamp(1, n).min(max_rows);
+    let tile_cols = tile_cols.clamp(1, n);
+
+    info!(
+        "metal-streaming: {} | n={} k={} tile_rows={} tile_cols={} (row block {:.1} MiB) tile {}x{}",
+        device.name(),
+        n,
+        k,
+        tile_rows,
+        tile_cols,
+        (tile_rows * n * 4) as f64 / (1024.0 * 1024.0),
+        tile.x,
+        tile.y
+    );
+
+    let b_sketches = device.new_buffer_with_data(
+        sketches_flat.as_ptr() as *const c_void,
+        std::mem::size_of_val(sketches_flat) as NSUInteger,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let b_rows = device.new_buffer(
+        (tile_rows * n * std::mem::size_of::<f32>()) as NSUInteger,
+        MTLResourceOptions::StorageModeShared,
+    );
+
+    let mut writer: Box<dyn Write> = if compress {
+        let file = std::fs::File::create(path)?;
+        let mut enc = zstd::Encoder::new(file, 0)?;
+        let threads = rayon::current_num_threads() as u32;
+        if threads > 1 {
+            enc.multithread(threads)?;
+        }
+        Box::new(std::io::BufWriter::with_capacity(
+            16 << 20,
+            enc.auto_finish(),
+        ))
+    } else {
+        Box::new(std::io::BufWriter::with_capacity(
+            16 << 20,
+            std::fs::File::create(path)?,
+        ))
+    };
+
+    for name in names {
+        writer.write_all(b"\t")?;
+        writer.write_all(name.as_bytes())?;
+    }
+    writer.write_all(b"\n")?;
+
+    let t_all = Instant::now();
+    let mut i0 = 0usize;
+    while i0 < n {
+        let bw = (n - i0).min(tile_rows);
+
+        // every column chunk of this row block goes into one submission
+        autoreleasepool(|| {
+            let cb = queue.new_command_buffer();
+            let enc = cb.new_compute_command_encoder();
+            enc.set_compute_pipeline_state(&pso);
+            enc.set_buffer(0, Some(&b_sketches), 0);
+            enc.set_buffer(2, Some(&b_rows), 0);
+            enc.set_threadgroup_memory_length(0, tile.smem as NSUInteger);
+
+            let mut j0 = 0usize;
+            while j0 < n {
+                let bh = (n - j0).min(tile_cols);
+                let params = Params {
+                    n: n as i32,
+                    k: k as i32,
+                    i0: i0 as i32,
+                    j0: j0 as i32,
+                    bw: bw as i32,
+                    bh: bh as i32,
+                    only_upper: 0,
+                    weighted: weighted as i32,
+                    bk: tile.bk as i32,
+                    stride: tile.stride as i32,
+                    out_i0: 0,
+                    out_j0: j0 as i32,
+                    ldo: n as i32,
+                };
+                enc.set_bytes(
+                    1,
+                    std::mem::size_of::<Params>() as NSUInteger,
+                    &params as *const Params as *const c_void,
+                );
+                enc.dispatch_thread_groups(
+                    MTLSize::new(
+                        bh.div_ceil(tile.x) as NSUInteger,
+                        bw.div_ceil(tile.y) as NSUInteger,
+                        1,
+                    ),
+                    MTLSize::new(tile.x as NSUInteger, tile.y as NSUInteger, 1),
+                );
+                j0 += bh;
+            }
+
+            enc.end_encoding();
+            cb.commit();
+            cb.wait_until_completed();
+        });
+
+        // safety: b_rows holds tile_rows*n f32 and the submission above has completed
+        let rows: &[f32] =
+            unsafe { std::slice::from_raw_parts(b_rows.contents() as *const f32, tile_rows * n) };
+
+        let lines: Vec<String> = (0..bw)
+            .into_par_iter()
+            .map(|ii| {
+                let mut fmt = ryu::Buffer::new();
+                let mut line = String::with_capacity(12 * n + names[i0 + ii].len());
+                line.push_str(&names[i0 + ii]);
+                let row = &rows[ii * n..ii * n + n];
+                for &d in row {
+                    line.push('\t');
+                    line.push_str(fmt.format_finite(d));
+                }
+                line
+            })
+            .collect();
+
+        for line in lines {
+            writer.write_all(line.as_bytes())?;
+            writer.write_all(b"\n")?;
+        }
+
+        debug!("metal-streaming: rows {}..{} done", i0, i0 + bw);
+        i0 += bw;
+    }
+
+    writer.flush()?;
+    info!(
+        "metal-streaming: wrote {n}x{n} in {} ms",
+        t_all.elapsed().as_millis()
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn write_matrix_streaming_metal_u16(
+    names: &[String],
+    sketches: &[u16],
+    n: usize,
+    k: usize,
+    path: &str,
+    compress: bool,
+    weighted: bool,
+    tile_cols: usize,
+    tile_rows: usize,
+) -> Result<()> {
+    write_matrix_streaming_metal::<u16>(
+        names, sketches, n, k, path, compress, weighted, tile_cols, tile_rows,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn write_matrix_streaming_metal_u32(
+    names: &[String],
+    sketches: &[u32],
+    n: usize,
+    k: usize,
+    path: &str,
+    compress: bool,
+    weighted: bool,
+    tile_cols: usize,
+    tile_rows: usize,
+) -> Result<()> {
+    write_matrix_streaming_metal::<u32>(
+        names, sketches, n, k, path, compress, weighted, tile_cols, tile_rows,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn write_matrix_streaming_metal_u64(
+    names: &[String],
+    sketches: &[u64],
+    n: usize,
+    k: usize,
+    path: &str,
+    compress: bool,
+    weighted: bool,
+    tile_cols: usize,
+    tile_rows: usize,
+) -> Result<()> {
+    write_matrix_streaming_metal::<u64>(
+        names, sketches, n, k, path, compress, weighted, tile_cols, tile_rows,
+    )
 }
