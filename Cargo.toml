@@ -10,12 +10,12 @@ keywords = ["unifrac", "phylogenetic", "MinHash", "succint", "Jaccard"]
 
 [[bin]]
 
-name = "dartunifrac-cuda"
+name = "dartunifrac-gpu"
 path = "src/dartunifrac.rs"
 
 [[bin]]
 
-name = "striped_unifrac-cuda"
+name = "striped_unifrac-gpu"
 path = "src/striped_unifrac.rs"
 
 [dependencies]
