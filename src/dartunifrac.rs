@@ -46,6 +46,8 @@ use ndarray::{Array1, Array2};
 
 #[cfg(feature = "cuda")]
 mod disthamming_gpu;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+mod disthamming_metal;
 
 const UNIFRAC_CITATIONS: &str = r#"
 Citations:
@@ -2733,7 +2735,63 @@ fn main() -> Result<()> {
             }
         }
 
-        #[cfg(not(feature = "cuda"))]
+
+        #[cfg(all(not(feature = "cuda"), feature = "metal", target_os = "macos"))]
+        {
+            if disthamming_metal::is_available() {
+                log::info!(
+                    "Metal device detected ({}). Computing pairwise distances on GPU …",
+                    disthamming_metal::device_name().unwrap_or_else(|| "unknown".into())
+                );
+                let t2 = Instant::now();
+
+                let mut out = vec![0.0f32; n * n];
+
+                match &sketches {
+                    Sketches::U16(v) => {
+                        let flat = flatten_u16(v, n, ksk);
+                        disthamming_metal::pairwise_hamming_metal_u16(
+                            &flat, n, ksk, &mut out, 8192, weighted,
+                        )?;
+                    }
+                    Sketches::U32(v) => {
+                        let flat = flatten_u32(v, n, ksk);
+                        disthamming_metal::pairwise_hamming_metal_u32(
+                            &flat, n, ksk, &mut out, 8192, weighted,
+                        )?;
+                    }
+                    Sketches::U64(v) => {
+                        let flat = flatten_u64(v, n, ksk);
+                        disthamming_metal::pairwise_hamming_metal_u64(
+                            &flat, n, ksk, &mut out, 8192, weighted,
+                        )?;
+                    }
+                }
+
+                log::info!(
+                    "pairwise distances (GPU) in {} ms",
+                    t2.elapsed().as_millis()
+                );
+                out
+            } else {
+                log::info!("Metal not available. Falling back to CPU.");
+
+                let t2 = Instant::now();
+                let dist: Vec<f32> = match &sketches {
+                    Sketches::U16(s) => compute_pairwise_from_sketches!(s, weighted),
+                    Sketches::U32(s) => compute_pairwise_from_sketches!(s, weighted),
+                    Sketches::U64(s) => compute_pairwise_from_sketches!(s, weighted),
+                };
+
+                log::info!(
+                    "pairwise distances (CPU) in {} ms",
+                    t2.elapsed().as_millis()
+                );
+                dist
+            }
+        }
+        #[cfg(all(not(feature = "cuda"),
+                  not(all(feature = "metal", target_os = "macos"))))]
         {
             let t2 = Instant::now();
             let dist: Vec<f32> = match &sketches {

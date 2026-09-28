@@ -51,6 +51,13 @@ cudarc = { version = "0.18.1", features = [
     "nvrtc",
     "cuda-version-from-build-system"], optional = true }
 
+# Metal GPU backend, Apple silicon only.
+# Declared under a target table so that on Linux/Windows the crate is not even part of
+# the dependency graph -- `--features metal` there resolves to nothing instead of
+# failing to build an Apple-only crate.
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = { version = "0.33", optional = true }
+
 
 [features]
 default = []
@@ -62,3 +69,4 @@ macos-accelerate = ["fpcoa/macos-accelerate"]
 
 stdsimd = []
 cuda = ["dep:cudarc"]
+metal = ["dep:metal"]
