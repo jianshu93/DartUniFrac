@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  RUST_NIGHTLY: nightly-2026-09-28
+
+jobs:
+  cuda:
+    name: cuda check (linux)
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:12.6.2-devel-ubuntu22.04
+    steps:
+      - name: System dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential cmake
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain "$RUST_NIGHTLY" --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - run: cargo check --release --features stdsimd,cuda --bins
+
+  metal:
+    name: metal check (macos)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install "$RUST_NIGHTLY" --profile minimal
+      - run: cargo +$RUST_NIGHTLY check --release --features stdsimd,metal --bins
