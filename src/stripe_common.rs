@@ -254,7 +254,7 @@ pub(crate) fn build_unweighted_node_bits_and_active(
     Ok((node_bits, active_per_strip, blk))
 }
 
-pub(crate) enum InputTable<'a> {
+pub enum InputTable<'a> {
     DenseCounts(&'a [Vec<f64>]), // rows x nsamp
     Csr {
         indptr: &'a [u32],

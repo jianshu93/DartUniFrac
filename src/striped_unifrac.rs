@@ -51,13 +51,12 @@ mod stripe_cu;
 mod stripe_metal;
 
 
-#[cfg(all(not(feature = "cuda"), feature = "metal", target_os = "macos"))]
+#[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
 use crate::stripe_common::InputTable;
 
 #[cfg(feature = "cuda")]
 use crate::stripe_cu::{
     GpuOptions,
-    InputTable,
     unifrac_striped_unweighted_gpu,
     unifrac_striped_weighted_gpu,
 };
