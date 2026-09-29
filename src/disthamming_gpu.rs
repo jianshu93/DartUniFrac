@@ -172,11 +172,14 @@ __device__ __forceinline__ unsigned long long pack_u16x4(const unsigned short* p
          | ((unsigned long long)p[3] << 48);
 }
 
+// counts the nonzero 16-bit lanes of x, i.e. the mismatching sketch ids.
+// clearing each lane's top bit first caps the addends at 0x7fff, so the add can never
+// carry out of a lane; a byte-wise zero test instead lets a borrow cross the lane
+// boundary and report a 0x01 byte as zero, undercounting mismatches.
 __device__ __forceinline__ unsigned mismatch_u16x4_from_xor(unsigned long long x) {
-    unsigned long long m = (x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL;
-    unsigned long long w = (m & (m >> 8)) & 0x0080008000800080ULL;
-    unsigned zeros = __popcll(w);
-    return 4u - zeros;
+    unsigned long long t =
+        ((x & 0x7fff7fff7fff7fffULL) + 0x7fff7fff7fff7fffULL) | x;
+    return (unsigned)__popcll(t & 0x8000800080008000ULL);
 }
 
 #ifndef BK16

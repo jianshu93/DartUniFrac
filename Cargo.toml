@@ -12,11 +12,25 @@ keywords = ["unifrac", "phylogenetic", "MinHash", "succint", "Jaccard"]
 
 name = "dartunifrac-cuda"
 path = "src/dartunifrac.rs"
+required-features = ["cuda"]
 
 [[bin]]
 
 name = "striped_unifrac-cuda"
 path = "src/striped_unifrac.rs"
+required-features = ["cuda"]
+
+[[bin]]
+
+name = "dartunifrac-metal"
+path = "src/dartunifrac.rs"
+required-features = ["metal"]
+
+[[bin]]
+
+name = "striped_unifrac-metal"
+path = "src/striped_unifrac.rs"
+required-features = ["metal"]
 
 [dependencies]
 emojis = "0.7"
@@ -51,6 +65,13 @@ cudarc = { version = "0.18.1", features = [
     "nvrtc",
     "cuda-version-from-build-system"], optional = true }
 
+# Metal GPU backend, Apple silicon only.
+# Declared under a target table so that on Linux/Windows the crate is not even part of
+# the dependency graph -- `--features metal` there resolves to nothing instead of
+# failing to build an Apple-only crate.
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = { version = "0.33", optional = true }
+
 
 [features]
 default = []
@@ -62,3 +83,4 @@ macos-accelerate = ["fpcoa/macos-accelerate"]
 
 stdsimd = []
 cuda = ["dep:cudarc"]
+metal = ["dep:metal"]
