@@ -30,10 +30,10 @@ conda install -c bioconda -c conda-forge dartunifrac-gpu
 Or if you have older driver (before 12.4), you can use the pre-built binary on Linux
 
 ```bash
-wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.3.0/dartunifrac-gpu_Linux_x86-64_v0.3.0.zip
-unzip dartunifrac-gpu_Linux_x86-64_v0.3.0.zip
-chmod a+x ./dartunifrac-gpu
-./dartunifrac-gpu -h
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.3.0/dartunifrac-cuda_Linux_x86-64_v0.3.0.zip
+unzip dartunifrac-cuda_Linux_x86-64_v0.3.0.zip
+chmod a+x ./dartunifrac-cuda
+./dartunifrac-cuda -h
 
 ```
 
@@ -55,7 +55,7 @@ wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.2.3/GWMC_rep_
 dartunifrac -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom -m dmh -s 3072 -o unifrac_unweighted.tsv
 dartunifrac -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted -m dmh -s 3072 -o unifrac_weighted.tsv
 #### if you have GPU device and driver installed (bioconda binary was compiled using CUDA 13.0 or later, or toolkit 25.11)
-dartunifrac-gpu -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted -m dmh -s 3072 -o unifrac_weighted.tsv
+dartunifrac-cuda -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted -m dmh -s 3072 -o unifrac_weighted.tsv
 
 ### obtain the truth via striped unifrac algorithm (SIMD supported), extremely slow at the million-sample scale
 striped_unifrac -t ./GWMC_rep_seqs_all.tre -m ./GWMC_16S_otutab.biom --weighted -o unifrac_weighted_striped.tsv
@@ -65,9 +65,9 @@ striped_unifrac -t ./GWMC_rep_seqs_all.tre -m ./GWMC_16S_otutab.biom --weighted 
 GPU on example data:
 
 ```bash
-dartunifrac-gpu -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom -m dmh -s 3072 -o unifrac_unweighted.tsv
+dartunifrac-cuda -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom -m dmh -s 3072 -o unifrac_unweighted.tsv
 
-dartunifrac-gpu -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted -m dmh -s 3072 -o unifrac_weighted.tsv
+dartunifrac-cuda -t ./GWMC_rep_seqs_all.tre -b ./GWMC_16S_otutab.biom --weighted -m dmh -s 3072 -o unifrac_weighted.tsv
 
 ```
 
@@ -224,10 +224,10 @@ dartunifrac -t ./data/ASVs_aligned.tre -b ./data/ASVs_counts.biom -m dmh -s 2048
 ### Pre-built binary
 
 ```bash
-wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.3.0/dartunifrac-gpu_Linux_x86-64_v0.3.0.zip
-unzip dartunifrac-gpu_Linux_x86-64_v0.3.0.zip
-chmod a+x ./dartunifrac-gpu
-./dartunifrac-gpu -h
+wget https://github.com/jianshu93/DartUniFrac/releases/download/v0.3.0/dartunifrac-cuda_Linux_x86-64_v0.3.0.zip
+unzip dartunifrac-cuda_Linux_x86-64_v0.3.0.zip
+chmod a+x ./dartunifrac-cuda
+./dartunifrac-cuda -h
 
 ```
 
@@ -246,7 +246,7 @@ We provide Nvidia GPU support via CUDA Toolkit (CUDA v12.9.1 or later must be in
 git clone --branch DartUniFrac-GPU https://github.com/jianshu93/DartUniFrac.git
 cd DartUniFrac
 cargo build --release --features intel-mkl-static,stdsimd,cuda
-./target/release/dartunifrac-gpu -h
+./target/release/dartunifrac-cuda -h
 
 ```
 ### Use Nvidia HPC SDK (recommended)
@@ -271,13 +271,13 @@ source setup_nv_compiler.sh
 Compile:
 ```bash
 cargo build --release --features intel-mkl-static,stdsimd,cuda
-./target/release/dartunifrac-gpu -h
+./target/release/dartunifrac-cuda -h
 ```
 
 
 Speed benchmark for 50k samples, 4 Nvidia RTX 6000 Pro were available
 ```bash
-$ RUST_LOG=info dartunifrac-gpu -t ./ag_emp.tre -b ag_emp_even500.biom --weighted -m dmh -s 2048
+$ RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ag_emp_even500.biom --weighted -m dmh -s 2048
 
  ************** initializing logger *****************
 
@@ -301,7 +301,7 @@ $ RUST_LOG=info dartunifrac-gpu -t ./ag_emp.tre -b ag_emp_even500.biom --weighte
 
 2 Nividia A100
 ```bash
-$ RUST_LOG=info dartunifrac-gpu -t ./ag_emp.tre -b ./ag_emp_even500.biom --weighted -m dmh -s 3072 -o ag_emp.weighted.dmh.cuda.tsv --compress --pcoa
+$ RUST_LOG=info dartunifrac-cuda -t ./ag_emp.tre -b ./ag_emp_even500.biom --weighted -m dmh -s 3072 -o ag_emp.weighted.dmh.cuda.tsv --compress --pcoa
 
  ************** initializing logger *****************
 
