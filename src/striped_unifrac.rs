@@ -40,7 +40,7 @@ use succparen::{
 };
 
 #[cfg(feature = "stdsimd")]
-use std::simd::{LaneCount, Simd, SupportedLaneCount};
+use std::simd::Simd;
 
 
 #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
@@ -776,10 +776,7 @@ fn build_stripe_csr(
 
 #[cfg(feature = "stdsimd")]
 #[inline]
-fn add_const_to_row_simd<const LANES: usize>(buf: &mut [f64], add: f64, start: usize)
-where
-    LaneCount<LANES>: SupportedLaneCount,
-{
+fn add_const_to_row_simd<const LANES: usize>(buf: &mut [f64], add: f64, start: usize) {
     let addv = Simd::<f64, LANES>::splat(add);
     let mut j = start;
     while j + LANES <= buf.len() {
