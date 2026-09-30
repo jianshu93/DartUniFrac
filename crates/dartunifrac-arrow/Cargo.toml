@@ -1,0 +1,34 @@
+[package]
+name = "dartunifrac-arrow"
+description = "Arrow C Data Interface marshaling for DartUniFrac: converts a caller's tree arrays and feature-table stream into dartunifrac-core's types, and streams distances back out as COO batches."
+version.workspace = true
+edition.workspace = true
+# Same floor as dartunifrac-core, and it is not a coincidence: arrow-array 59
+# declares rust-version = "1.85" too. Verified by building under 1.85.0, not
+# inferred. The workspace's rust-toolchain.toml still pins nightly for the
+# binary's anndists dependency, so verifying this needs an explicit override --
+# `cargo +1.85.0` or RUSTUP_TOOLCHAIN, since a toolchain file wins over neither.
+rust-version = "1.85"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords = ["unifrac", "arrow", "ffi", "MinHash"]
+
+[dependencies]
+# The Arrow C Data Interface. `ffi` is what supplies ffi_stream::{FFI_ArrowArrayStream,
+# ArrowArrayStreamReader}; it turns on arrow-schema/ffi and arrow-data/ffi in turn.
+# Pinned to 59 to match the version the consumer (duckdb-miint's rype) already
+# links, so cargo unifies the two into one copy inside its staticlib rather than
+# linking two Arrow implementations side by side.
+arrow-array = { version = "59", default-features = false, features = ["ffi"] }
+arrow-schema = { version = "59", default-features = false }
+# The engine this crate marshals for.
+dartunifrac-core = { path = "../dartunifrac-core", version = "0.3.2" }
+# Per-sample parallelism for the canonical-order sort. Proven on
+# wasm32-unknown-emscripten.
+rayon = "1.10"
+
+# Deliberately absent: the `arrow` umbrella crate. These two sub-crates are all
+# the C Data Interface needs, and the umbrella additionally pulls compute
+# kernels, IPC, CSV and JSON -- none of which this crate uses, all of which
+# would be compiled for wasm.

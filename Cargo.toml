@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/dartunifrac-core"]
+members = ["crates/dartunifrac-core", "crates/dartunifrac-arrow"]
 
 # Shared by the root package and every member, so they cannot drift apart.
 [workspace.package]
