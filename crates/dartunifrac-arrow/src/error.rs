@@ -16,6 +16,10 @@ pub enum MarshalError {
     Tree(String),
     /// The caller's `RecordBatchReader` returned an error; text preserved.
     Stream(String),
+    /// The sketch set cannot be compared as given: rows of differing length,
+    /// rows with no values at all, an unsupported `bbits`, or an id count that
+    /// disagrees with the sketch count.
+    Sketch(String),
 }
 
 impl fmt::Display for MarshalError {
@@ -25,6 +29,7 @@ impl fmt::Display for MarshalError {
             Self::Data(m) => write!(f, "data: {m}"),
             Self::Tree(m) => write!(f, "tree: {m}"),
             Self::Stream(m) => write!(f, "stream: {m}"),
+            Self::Sketch(m) => write!(f, "sketch: {m}"),
         }
     }
 }
