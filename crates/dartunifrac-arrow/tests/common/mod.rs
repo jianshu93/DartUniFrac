@@ -7,7 +7,10 @@
 
 use std::sync::Arc;
 
-use arrow_array::{Float64Array, Int64Array, RecordBatch, RecordBatchIterator};
+use arrow_array::{
+    Array, Float32Array, Float64Array, Int64Array, RecordBatch, RecordBatchIterator,
+    RecordBatchReader,
+};
 use arrow_schema::{ArrowError, Schema, SchemaRef};
 use dartunifrac_core::{Method, SketchParams, Table, Tree, NO_PARENT};
 
@@ -163,4 +166,64 @@ impl<T, E> UnwrapErrNoDebug<E> for Result<T, E> {
             Err(e) => e,
         }
     }
+}
+
+/// Drain a reader, failing loudly on any batch that errors.
+pub fn drain(mut r: Box<dyn RecordBatchReader + Send>) -> Vec<RecordBatch> {
+    let mut out = Vec::new();
+    for b in r.by_ref() {
+        out.push(b.expect("no batch should fail"));
+    }
+    out
+}
+
+/// Flatten COO batches into `(i, j, distance)` triples.
+pub fn triples(batches: &[RecordBatch]) -> Vec<(i64, i64, f32)> {
+    use dartunifrac_arrow::{DISTANCE, I, J};
+    let mut out = Vec::new();
+    for b in batches {
+        let i = b.column_by_name(I).unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
+        let j = b.column_by_name(J).unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
+        let d = b
+            .column_by_name(DISTANCE)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        for r in 0..b.num_rows() {
+            out.push((i.value(r), j.value(r), d.value(r)));
+        }
+    }
+    out
+}
+
+/// `n` deterministic sketches of `k` values each, drawn from `alphabet` distinct
+/// values (splitmix64, so the fixture is reproducible without a dependency).
+///
+/// The alphabet must be small. Full-width random u64s would collide essentially
+/// never, every pair would sit at distance 1.0, and a test comparing against a
+/// reference would pass no matter how badly the tiling scrambled which pair was
+/// which. Callers pair this with [`assert_distances_vary`].
+pub fn fake_sketches(n: usize, k: usize, alphabet: u64) -> Vec<Vec<u64>> {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    (0..n).map(|_| (0..k).map(|_| next() % alphabet).collect()).collect()
+}
+
+/// Guard against a vacuous comparison: if every pair has the same distance, a
+/// test that checks values against a reference cannot detect a tiling that
+/// emitted the right values against the wrong pairs.
+pub fn assert_distances_vary(triples: &[(i64, i64, f32)]) {
+    assert!(triples.len() > 1, "need at least two pairs to compare");
+    let first = triples[0].2;
+    assert!(
+        triples.iter().any(|t| t.2 != first),
+        "every distance is {first}; this fixture cannot detect a mis-paired result"
+    );
 }
