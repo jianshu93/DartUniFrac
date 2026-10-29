@@ -1,0 +1,23 @@
+# Valgrind suppressions for the dartunifrac C harness.
+#
+# One, and only what the harness has been seen to need (`valgrind -s` lists
+# which suppressions matched). A dedicated rayon pool is not joined when it is
+# dropped: its threads are told to stop and exit on their own, so threads still
+# running when the process ends leave glibc's per-thread TLS block "possibly
+# lost". Anchoring on pthread_create keeps this narrow: our code never creates a
+# thread, so no block allocated by our own code can match, even when that code
+# runs on a pool worker.
+#
+# Deliberately not suppressed: the pool's registry, which is "still reachable"
+# for the same reason. That kind is not an error, so the gate passes without
+# hiding anything. sc's broader rayon/crossbeam patterns are left out for the
+# same reason; add one only when `valgrind -s` shows it matching a specific
+# block.
+
+{
+   rayon-pool-thread-tls
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:pthread_create*
+}
