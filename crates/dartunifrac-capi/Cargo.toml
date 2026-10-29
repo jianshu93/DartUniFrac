@@ -1,0 +1,42 @@
+[package]
+name = "dartunifrac-capi"
+description = "The reentrant C ABI for DartUniFrac: opaque handles, a per-context rayon pool, a panic barrier, status codes and a cbindgen-generated header."
+version.workspace = true
+edition.workspace = true
+# The same floor as dartunifrac-arrow, and for the same reason: arrow-array 60
+# declares rust-version = "1.88". Verified with `cargo +1.88.0`, not inferred.
+rust-version = "1.88"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords = ["unifrac", "ffi", "c-api", "MinHash"]
+
+[lib]
+# staticlib for the C harness and valgrind; rlib for a Rust umbrella staticlib
+# (duckdb-miint's glue links every engine into one archive through
+# `extern crate`). No cdylib: nothing loads this as a shared object, and one
+# would only add link work to every consumer's build.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# The engine: the tree type and, from M5b, the sketcher.
+dartunifrac-core = { path = "../dartunifrac-core", version = "0.3.2" }
+# Every conversion between the caller's data and core's types. This crate owns
+# only the C ABI policy: handles, pool, panics, status codes.
+dartunifrac-arrow = { path = "../dartunifrac-arrow", version = "0.3.2" }
+# The per-context thread pool.
+rayon = "1.10"
+
+[dev-dependencies]
+# Only for the fixtures shared with dartunifrac-arrow's tests (see src/tests.rs),
+# which build Arrow batches.
+arrow-array = { version = "60", default-features = false }
+arrow-schema = { version = "60", default-features = false }
+
+[build-dependencies]
+# Regenerates dartunifrac.h on every build, so the header cannot drift from the
+# `#[unsafe(no_mangle)]` surface. A build tool only: never linked into the library.
+cbindgen = { version = "0.29", default-features = false }
+
+# Deliberately absent: libc. The ABI needs only fixed-width integers, `bool` and
+# `c_char`, which core::ffi and the primitive types already spell.
