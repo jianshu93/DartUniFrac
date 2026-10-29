@@ -26,6 +26,24 @@ pub fn output_schema() -> Schema {
     ])
 }
 
+/// Assemble one COO batch. The only place either reader builds an array, so the
+/// column order and the array types cannot drift away from [`output_schema`].
+pub(crate) fn coo_batch(
+    schema: &SchemaRef,
+    i: Vec<i64>,
+    j: Vec<i64>,
+    d: Vec<f32>,
+) -> Result<RecordBatch, ArrowError> {
+    RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(i)),
+            Arc::new(Int64Array::from(j)),
+            Arc::new(Float32Array::from(d)),
+        ],
+    )
+}
+
 /// Batch `(i, j, distance)` triples into record batches of `batch_rows` rows.
 ///
 /// `pairs` are indices into `ids`, which is the sketch set's `kept` vector: the
@@ -86,15 +104,7 @@ impl<I: Iterator<Item = (u32, u32, f32)>> CooReader<I> {
         if i.is_empty() {
             return Ok(None);
         }
-        RecordBatch::try_new(
-            self.schema.clone(),
-            vec![
-                Arc::new(Int64Array::from(i)),
-                Arc::new(Int64Array::from(j)),
-                Arc::new(Float32Array::from(d)),
-            ],
-        )
-        .map(Some)
+        coo_batch(&self.schema, i, j, d).map(Some)
     }
 }
 

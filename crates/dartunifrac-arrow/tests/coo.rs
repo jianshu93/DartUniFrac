@@ -2,36 +2,10 @@
 
 mod common;
 
-use arrow_array::{Array, Float32Array, Int64Array, RecordBatch, RecordBatchReader};
+use arrow_array::RecordBatchReader;
 use common::*;
-use dartunifrac_arrow::{coo_reader, output_schema, table_from_stream, DISTANCE, I, J};
+use dartunifrac_arrow::{coo_reader, output_schema, table_from_stream, I, J};
 use dartunifrac_core::build_sketches;
-
-fn drain(mut r: Box<dyn RecordBatchReader + Send>) -> Vec<RecordBatch> {
-    let mut out = Vec::new();
-    for b in r.by_ref() {
-        out.push(b.expect("no batch should fail"));
-    }
-    out
-}
-
-fn triples(batches: &[RecordBatch]) -> Vec<(i64, i64, f32)> {
-    let mut out = Vec::new();
-    for b in batches {
-        let i = b.column_by_name(I).unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
-        let j = b.column_by_name(J).unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
-        let d = b
-            .column_by_name(DISTANCE)
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .unwrap();
-        for r in 0..b.num_rows() {
-            out.push((i.value(r), j.value(r), d.value(r)));
-        }
-    }
-    out
-}
 
 #[test]
 fn the_index_columns_carry_the_same_type_as_the_input_sample_idx() {

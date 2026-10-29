@@ -19,11 +19,13 @@
 //! genuinely Arrow.
 
 mod coo;
+mod distances;
 mod error;
 mod table;
 mod tree;
 
 pub use coo::{coo_reader, output_schema, DISTANCE, I, J};
+pub use distances::{distances_reader, trim_to_bbits, Sketches};
 pub use error::MarshalError;
 pub use table::{input_schema, table_from_stream, INDEX_TYPE, NODE_IDX, SAMPLE_IDX, VALUE};
 pub use tree::{tree_from_arrays, NO_PARENT_IN};
