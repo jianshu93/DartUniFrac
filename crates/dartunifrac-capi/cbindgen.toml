@@ -42,17 +42,107 @@ header = """
  *   DF_ERR_NULL_POINTER, never a crash. An array argument may be NULL when its
  *   length is 0.
  *
- * Threads. A df_ctx_t may be used by one thread at a time. A df_tree_t is
- *   immutable once built and may be shared across threads and contexts.
+ * Arrow out-params. Every struct ArrowArray, ArrowSchema or ArrowArrayStream
+ *   out-param is first set to a released one (release == NULL), so it is safe
+ *   to inspect on every status. On success the caller owns what was written,
+ *   and must call its release callback.
+ *
+ * Input stream. df_sketch consumes its input stream on every status, success
+ *   or failure: on return its release is NULL, and the producer's release
+ *   callback has run exactly once. A stream that was already released is
+ *   DF_ERR_ARROW, and its release is not called again. The producer's
+ *   callbacks are called from Rust, so they must return normally: a C++
+ *   exception or a longjmp out of one is undefined behaviour, not a status.
+ *
+ * Output streams. A stream from df_distances holds what it needs, including
+ *   its context's pool, so it stays valid after df_sketches_free() and
+ *   df_ctx_free(). Release it when done. A dedicated pool's threads are told
+ *   to exit, but not joined, when the last of the context and its streams is
+ *   gone, so do not unload the library just after that.
+ *
+ * Threads. A df_ctx_t may be used by one thread at a time. A df_tree_t and a
+ *   df_sketches_t are immutable once built and may be shared across threads
+ *   and contexts. df_sketch reads its input inside the context's pool, so the
+ *   producer's get_schema, get_next and release may run on a pool thread,
+ *   though never two at once; when a call fails before reading, release runs
+ *   on the calling thread. A stream from df_distances computes each batch in
+ *   its context's pool, whichever thread calls get_next. Streams are not bound
+ *   by their context's one-thread rule: several may be read at once on
+ *   different threads, each by one thread at a time. A producer callback must
+ *   not call df_* functions on the context that is reading it.
  *
  * Panics. Built with panic = "unwind" (Rust's default), a panic never reaches
  *   C: a fallible call returns DF_ERR_PANIC, the df_*_free() functions swallow
- *   it, and df_*_last_error() returns NULL. Built with panic = "abort", a panic
- *   aborts the process instead.
+ *   it, and df_*_last_error() returns NULL. Inside a stream from df_distances,
+ *   a panic becomes a stream error whose message contains "panic: ", and the
+ *   stream then ends. Built with panic = "abort", a panic aborts the process
+ *   instead.
  *
  * Known limits. An allocation failure aborts the process, as it does anywhere
- *   in Rust. A cycle in the tree is detected only when a non-empty table is
- *   sketched against it. */"""
+ *   in Rust. n_samples, k and batch_rows each size an allocation up front, so
+ *   an absurd value can cause one. A cycle in the tree is detected only when a
+ *   non-empty table is sketched against it. */"""
+
+# The canonical Arrow C Data and C Stream Interface structs, so this header
+# stands alone. arrow-rs's FFI structs are laid out identically, and
+# [export.rename] below makes cbindgen refer to these names.
+after_includes = """
+
+/* The Arrow C Data and C Stream Interface structs, under the guards the Arrow
+ * spec and DuckDB use: whichever header is included first defines them.
+ * DuckDB's versions add C++ Init() methods, so in C++ include DuckDB's
+ * arrow.hpp before this header. */
+
+#ifndef ARROW_C_DATA_INTERFACE
+#define ARROW_C_DATA_INTERFACE
+
+struct ArrowSchema {
+    const char *format;
+    const char *name;
+    const char *metadata;
+    int64_t flags;
+    int64_t n_children;
+    struct ArrowSchema **children;
+    struct ArrowSchema *dictionary;
+    void (*release)(struct ArrowSchema *);
+    void *private_data;
+};
+
+struct ArrowArray {
+    int64_t length;
+    int64_t null_count;
+    int64_t offset;
+    int64_t n_buffers;
+    int64_t n_children;
+    const void **buffers;
+    struct ArrowArray **children;
+    struct ArrowArray *dictionary;
+    void (*release)(struct ArrowArray *);
+    void *private_data;
+};
+
+#endif  /* ARROW_C_DATA_INTERFACE */
+
+#ifndef ARROW_C_STREAM_INTERFACE
+#define ARROW_C_STREAM_INTERFACE
+
+struct ArrowArrayStream {
+    int (*get_schema)(struct ArrowArrayStream *, struct ArrowSchema *out);
+    int (*get_next)(struct ArrowArrayStream *, struct ArrowArray *out);
+    const char *(*get_last_error)(struct ArrowArrayStream *);
+    void (*release)(struct ArrowArrayStream *);
+    void *private_data;
+};
+
+#endif  /* ARROW_C_STREAM_INTERFACE */
+"""
+
+[export.rename]
+# Bridge arrow-rs's FFI structs to the canonical Arrow names defined above.
+# ABI-identical, so this is purely a naming substitution.
+"FFI_ArrowArray" = "struct ArrowArray"
+"FFI_ArrowSchema" = "struct ArrowSchema"
+"FFI_ArrowArrayStream" = "struct ArrowArrayStream"
 
 [enum]
 rename_variants = "None"

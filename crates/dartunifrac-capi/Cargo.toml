@@ -19,7 +19,12 @@ keywords = ["unifrac", "ffi", "c-api", "MinHash"]
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-# The engine: the tree type and, from M5b, the sketcher.
+# The Arrow C Data Interface: the caller's input stream, and the streams and
+# arrays handed back. The same versions dartunifrac-arrow uses, which they must
+# be, since the two crates pass Arrow types to each other.
+arrow-array = { version = "60", default-features = false, features = ["ffi"] }
+arrow-schema = { version = "60", default-features = false }
+# The engine: the tree type and the sketcher.
 dartunifrac-core = { path = "../dartunifrac-core", version = "0.3.2" }
 # Every conversion between the caller's data and core's types. This crate owns
 # only the C ABI policy: handles, pool, panics, status codes.
@@ -27,15 +32,10 @@ dartunifrac-arrow = { path = "../dartunifrac-arrow", version = "0.3.2" }
 # The per-context thread pool.
 rayon = "1.10"
 
-[dev-dependencies]
-# Only for the fixtures shared with dartunifrac-arrow's tests (see src/tests.rs),
-# which build Arrow batches.
-arrow-array = { version = "60", default-features = false }
-arrow-schema = { version = "60", default-features = false }
-
 [build-dependencies]
-# Regenerates dartunifrac.h on every build, so the header cannot drift from the
-# `#[unsafe(no_mangle)]` surface. A build tool only: never linked into the library.
+# Generates dartunifrac.h from the source in build.rs, so the header cannot drift
+# from the `#[unsafe(no_mangle)]` surface. A build tool only: never linked into
+# the library.
 cbindgen = { version = "0.29", default-features = false }
 
 # Deliberately absent: libc. The ABI needs only fixed-width integers, `bool` and

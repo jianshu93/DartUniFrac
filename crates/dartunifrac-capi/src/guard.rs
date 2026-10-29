@@ -87,7 +87,7 @@ pub(crate) fn record_error(ctx: *const df_ctx_t, message: &str) {
     }
 }
 
-fn panic_message(payload: Box<dyn Any + Send>) -> String {
+pub(crate) fn panic_message(payload: Box<dyn Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_owned()
     } else if let Some(s) = payload.downcast_ref::<String>() {
