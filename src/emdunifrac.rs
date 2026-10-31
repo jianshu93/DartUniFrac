@@ -1,8 +1,8 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Arg, Command};
-use hdf5::{types::VarLenUnicode, File as H5File};
+use hdf5::{File as H5File, types::VarLenUnicode};
 use log::{info, warn};
-use newick::{one_from_string, Newick, NodeID};
+use newick::{Newick, NodeID, one_from_string};
 use rayon::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
@@ -13,9 +13,9 @@ use std::{
 use succparen::{
     bitwise::SparseOneNnd,
     tree::{
+        LabelVec,
         balanced_parens::BalancedParensTree,
         traversal::{DepthFirstTraverse, VisitNode},
-        LabelVec,
     },
 };
 
@@ -100,7 +100,7 @@ fn main() -> Result<()> {
     env_logger::init();
 
     let matches = Command::new("EMDUniFrac")
-        .version("0.3.1")
+        .version("0.3.3")
         .about("Fast EMD UniFrac using newick + succparen with observed-subtree pruning")
         .arg(
             Arg::new("tree")
@@ -270,7 +270,10 @@ fn main() -> Result<()> {
         })
         .collect();
 
-    info!("pairwise distances completed in {:.2?}", dist_start.elapsed());
+    info!(
+        "pairwise distances completed in {:.2?}",
+        dist_start.elapsed()
+    );
 
     let mut dist_matrix = vec![0.0_f64; n_samples * n_samples];
 
@@ -899,7 +902,10 @@ fn validate_observation_csr(
     }
 
     if indptr[0] != 0 {
-        bail!("invalid observation CSR: indptr[0] is {}, expected 0", indptr[0]);
+        bail!(
+            "invalid observation CSR: indptr[0] is {}, expected 0",
+            indptr[0]
+        );
     }
 
     if indptr[n_obs] as usize != data.len() {
