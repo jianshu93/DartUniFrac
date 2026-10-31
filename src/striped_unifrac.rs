@@ -40,7 +40,7 @@ use succparen::{
 };
 
 #[cfg(feature = "stdsimd")]
-use std::simd::{LaneCount, Simd, SupportedLaneCount};
+use std::simd::Simd;
 
 // Plain new-type – automatically `Copy`.
 #[derive(Clone, Copy)]
@@ -461,7 +461,7 @@ fn unweighted_accumulate_node(
         for &ii_u16 in a_idx {
             let ii = ii_u16 as usize;
             let row = &mut union[ii * bh..(ii + 1) * bh];
-            add_const_to_row_simd::<8>(row, len, 0);
+            add_const_to_row_simd(row, len, 0);
         }
         // Col baseline: for j in B, union[*,j] += len
         for &jj_u16 in b_idx {
@@ -495,7 +495,7 @@ fn unweighted_accumulate_node(
             continue;
         }
         let row = &mut union[ii * bh..(ii + 1) * bh];
-        add_const_to_row_simd::<8>(row, len, start_j);
+        add_const_to_row_simd(row, len, start_j);
     }
 
     // Col baseline (j in B): union[i<j, j] += len
@@ -915,10 +915,9 @@ fn build_stripe_csr(
 
 #[cfg(feature = "stdsimd")]
 #[inline]
-fn add_const_to_row_simd<const LANES: usize>(buf: &mut [f64], add: f64, start: usize)
-where
-    LaneCount<LANES>: SupportedLaneCount,
-{
+fn add_const_to_row_simd(buf: &mut [f64], add: f64, start: usize) {
+    // Every caller uses eight lanes; a concrete width supports both SIMD APIs.
+    const LANES: usize = 8;
     let addv = Simd::<f64, LANES>::splat(add);
     let mut j = start;
     while j + LANES <= buf.len() {
@@ -935,7 +934,7 @@ where
 
 #[cfg(not(feature = "stdsimd"))]
 #[inline]
-fn add_const_to_row_simd<const LANES: usize>(buf: &mut [f64], add: f64, start: usize) {
+fn add_const_to_row_simd(buf: &mut [f64], add: f64, start: usize) {
     for j in start..buf.len() {
         buf[j] += add;
     }
@@ -1050,8 +1049,8 @@ fn unifrac_striped_par_weighted(
                         let start_j = if diagonal_block { ii + 1 } else { 0 };
                         let row_n = &mut num[ii * bh..(ii + 1) * bh];
                         let row_d = &mut den[ii * bh..(ii + 1) * bh];
-                        add_const_to_row_simd::<8>(row_n, a, start_j);
-                        add_const_to_row_simd::<8>(row_d, a, start_j);
+                        add_const_to_row_simd(row_n, a, start_j);
+                        add_const_to_row_simd(row_d, a, start_j);
                     }
                 }
 
@@ -1520,9 +1519,9 @@ fn unifrac_striped_par_generalized(
                     let start_j = if diagonal_block { ii + 1 } else { 0 };
                     let row_n = &mut num[ii * bh..(ii + 1) * bh];
                     let row_d = &mut den[ii * bh..(ii + 1) * bh];
-                    add_const_to_row_simd::<8>(row_n, base, start_j);
+                    add_const_to_row_simd(row_n, base, start_j);
                     if alpha.abs() > 1e-12 {
-                        add_const_to_row_simd::<8>(row_d, base, start_j);
+                        add_const_to_row_simd(row_d, base, start_j);
                     }
                 }
             }
