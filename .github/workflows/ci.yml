@@ -29,4 +29,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal
-      - run: cargo test -p dartunifrac-core -p dartunifrac-arrow --all-targets
+      - run: cargo test -p dartunifrac-core -p dartunifrac-arrow -p dartunifrac-capi --all-targets
+      # The C harness on Mach-O: the header, the layouts and the link line there.
+      # Linux runs it, under valgrind too, in the capi job below.
+      - if: runner.os == 'macOS'
+        run: make ctest
+
+  # The C ABI as a C caller sees it: the generated header compiles as C11 with
+  # warnings as errors, its struct layouts match the Rust side, the staticlib
+  # links, and valgrind finds no leak in the handle paths. Linux only, because
+  # that is where valgrind runs; the Rust-side tests above cover macOS.
+  capi:
+    name: C harness under valgrind
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - run: sudo apt-get update && sudo apt-get install -y valgrind
+      - run: make ctest leaks

@@ -122,12 +122,18 @@ pub fn trim_to_bbits(sk: Vec<Vec<u64>>, bbits: u8) -> Result<Sketches, MarshalEr
 /// small values are legal but wasteful: the tile side is the square root, so a
 /// `batch_rows` of 100 spreads 100 pairs over 10 rayon tasks and pays a whole
 /// `RecordBatch` for them.
+///
+/// `sketches` is shared, not copied, when passed as an `Arc`: a C API handle
+/// and every stream drawn from it can then hold the one sketch set, and a
+/// stream stays valid after the handle is freed. A plain [`Sketches`] works
+/// too, and is simply moved into a new `Arc`.
 pub fn distances_reader(
-    sketches: Sketches,
+    sketches: impl Into<Arc<Sketches>>,
     ids: Vec<i64>,
     weighted: bool,
     batch_rows: usize,
 ) -> Result<Box<dyn RecordBatchReader + Send>, MarshalError> {
+    let sketches = sketches.into();
     sketches.validate()?;
     let n = sketches.count();
     if ids.len() != n {
@@ -154,7 +160,7 @@ pub fn distances_reader(
 }
 
 struct TiledReader {
-    sketches: Sketches,
+    sketches: Arc<Sketches>,
     ids: Vec<i64>,
     weighted: bool,
     n: usize,
@@ -250,7 +256,7 @@ impl TiledReader {
             .collect();
 
         let (ids, weighted) = (&self.ids, self.weighted);
-        per_width!(&self.sketches, |rows| {
+        per_width!(&*self.sketches, |rows| {
             work.par_iter_mut().for_each(|(i, iv, jv, dv)| {
                 let i = *i;
                 // `ids[..]` and `rows[..]` are unchecked because both were
