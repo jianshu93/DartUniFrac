@@ -13,8 +13,12 @@ use arrow_array::ffi_stream::{FFI_ArrowArrayStream, RecordBatchStreamReader};
 use arrow_array::{Int64Array, RecordBatch, RecordBatchIterator, RecordBatchReader};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use dartunifrac_arrow::{Sketches, distances_reader, table_from_stream, trim_to_bbits};
-use dartunifrac_core::{Method, NO_PARENT, SketchParams, build_sketches};
+use dartunifrac_core::{Method, NO_PARENT, SketchParams, Table, Tree, build_sketches};
 
+use crate::fingerprint::{
+    DARTMINHASH_VERSION, KEY_TAG, Key, SELFTEST_RUNS, libm_digest, libm_digest_with,
+    selftest_digest, selftest_digest_with, tree_digest,
+};
 use crate::guard::{ApiError, THREAD_LAST_ERROR, guard, guard_cstr, guard_void, record_error};
 use crate::stream::PoolReader;
 use crate::*;
@@ -476,7 +480,7 @@ fn abi_struct_sizes() {
 
     assert_eq!(
         (size_of::<df_params_t>(), align_of::<df_params_t>()),
-        (24, 8)
+        (32, 8)
     );
     assert_eq!(offset_of!(df_params_t, method), 0);
     assert_eq!(offset_of!(df_params_t, k), 4);
@@ -484,6 +488,7 @@ fn abi_struct_sizes() {
     assert_eq!(offset_of!(df_params_t, bbits), 16);
     assert_eq!(offset_of!(df_params_t, weighted), 20);
     assert_eq!(offset_of!(df_params_t, raw_counts), 21);
+    assert_eq!(offset_of!(df_params_t, data_version), 24);
 
     // Four callbacks and a pointer, on 64-bit and 32-bit targets alike.
     assert_eq!(size_of::<FFI_ArrowArrayStream>(), 5 * size_of::<usize>());
@@ -615,6 +620,7 @@ fn params(method: u32, weighted: bool, raw_counts: bool, bbits: u32) -> df_param
         bbits,
         weighted,
         raw_counts,
+        data_version: 0,
     }
 }
 
@@ -1713,5 +1719,1107 @@ fn null_pointers_on_every_new_entry_point_return_a_status_and_reset_outputs() {
     unsafe {
         df_sketches_free(s);
         df_sketches_free(ptr::null_mut());
+    }
+}
+
+// ===========================================================================
+// Fingerprints (M6)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// The tree's term
+// ---------------------------------------------------------------------------
+
+/// df_tree_new keeps the digest of the arrays exactly as the caller passed
+/// them, -1 roots and all, rather than of its own `usize` copy, which is a
+/// different width on wasm32. This is a wiring test: on a 64-bit host the two
+/// would hash alike, so only a wasm32 run of the known answers below can tell
+/// them apart.
+#[test]
+fn df_tree_new_keeps_the_digest_of_the_callers_arrays() {
+    let ctx = new_ctx();
+    let (parent, lens) = fixture_arrays();
+    let digest = tree_digest(&parent, &lens);
+    for _ in 0..2 {
+        let (status, tree) = tree_new(ctx, &parent, &lens);
+        assert_eq!(status, DF_OK, "{:?}", ctx_error(ctx));
+        assert_eq!(unsafe { &*tree }.digest, digest);
+        unsafe { df_tree_free(tree) };
+    }
+    // Not vacuous: a constant digest would also be "kept".
+    assert_ne!(digest, tree_digest(&parent[1..], &lens[1..]));
+    unsafe { df_ctx_free(ctx) };
+}
+
+/// The tree's term is everything core reads from the tree: each parent and each
+/// branch length, at every node. Changing any one element changes the digest.
+/// One that skipped an element (the unused node 0, say) would let two different
+/// trees share sketches. The smallest change is used: a parent moved to another
+/// in-range node, and a branch length one ulp away.
+#[test]
+fn the_tree_digest_changes_with_every_element_of_either_array() {
+    let (parent, lens) = fixture_arrays();
+    let base = tree_digest(&parent, &lens);
+    assert_eq!(tree_digest(&parent, &lens), base, "not deterministic");
+    for i in 0..parent.len() {
+        let mut p = parent.clone();
+        p[i] = if p[i] == 1 { 2 } else { 1 };
+        assert_ne!(tree_digest(&p, &lens), base, "parent[{i}]");
+        let mut l = lens.clone();
+        l[i] = f64::from_bits(l[i].to_bits() ^ 1);
+        assert_ne!(tree_digest(&parent, &l), base, "branch_length[{i}]");
+    }
+}
+
+/// Branch lengths are hashed as bits, not as values, so -0.0 and 0.0 differ.
+/// Core sketches neither, so two such trees sketch alike: refusing to compare
+/// their sketches costs a recomputation and nothing else, where a canonicalising
+/// rule would be one more thing to get wrong.
+#[test]
+fn the_tree_digest_hashes_branch_lengths_as_bits() {
+    let (parent, mut lens) = fixture_arrays();
+    let base = tree_digest(&parent, &lens);
+    assert_eq!(lens[0].to_bits(), 0.0f64.to_bits());
+    lens[0] = -0.0;
+    assert_ne!(tree_digest(&parent, &lens), base);
+}
+
+/// Node numbering acts as part of the seed (id-space.md): the same topology
+/// numbered differently changes every distance. Swapping nodes 8 (a tip) and 9
+/// (the parent of 10-12), siblings under node 7, is such a renumbering, and the
+/// key must treat it as another tree.
+#[test]
+fn the_tree_digest_tells_two_numberings_of_one_topology_apart() {
+    let (parent, lens) = fixture_arrays();
+    let (mut p, mut l) = (parent.clone(), lens.clone());
+    l.swap(8, 9);
+    for x in p.iter_mut().filter(|x| **x == 9) {
+        *x = 8;
+    }
+    assert_eq!((p[8], p[9]), (7, 7), "8 and 9 stay siblings under 7");
+    let ctx = new_ctx();
+    let (status, tree) = tree_new(ctx, &p, &l);
+    assert_eq!(status, DF_OK, "the renumbered tree is a valid tree");
+    assert_ne!(unsafe { &*tree }.digest, tree_digest(&parent, &lens));
+    unsafe {
+        df_tree_free(tree);
+        df_ctx_free(ctx);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The key
+// ---------------------------------------------------------------------------
+
+/// The fixture tree under weighted DMH, by this build.
+fn fixture_key() -> Key {
+    let (parent, lens) = fixture_arrays();
+    Key::new(
+        tree_digest(&parent, &lens),
+        &params(DF_METHOD_DMH, true, false, 16),
+    )
+}
+
+/// Key::new is where df_params_t and the build meet. Each parameter is carried
+/// across unchanged, and the build's terms are this build's own.
+#[test]
+fn the_key_carries_the_callers_parameters_and_this_builds_identity() {
+    let p = df_params_t {
+        method: DF_METHOD_TMH,
+        k: 33,
+        seed: 99,
+        bbits: 64,
+        weighted: true,
+        raw_counts: true,
+        data_version: 0xDEAD_BEEF,
+    };
+    let key = Key::new([7; 32], &p);
+    assert_eq!(
+        (key.tree, key.method, key.k, key.seed, key.bbits),
+        ([7; 32], DF_METHOD_TMH, 33, 99, 64)
+    );
+    assert_eq!(
+        (key.weighted, key.raw_counts, key.data_version),
+        (true, true, 0xDEAD_BEEF)
+    );
+    assert_eq!(key.dartminhash, DARTMINHASH_VERSION);
+    assert_eq!(key.library, env!("CARGO_PKG_VERSION"));
+    // The full target triple, which starts with the architecture on every
+    // supported target (not on i686, whose ARCH is "x86"; see abi_struct_sizes).
+    assert!(
+        key.target.starts_with(std::env::consts::ARCH),
+        "target {:?}",
+        key.target
+    );
+    assert_eq!(key.libm, libm_digest());
+    assert_eq!(key.selftest, selftest_digest());
+}
+
+/// Every term of the compatibility key (API-DESIGN §3, id-space.md) must reach
+/// the fingerprint, or two sets that differ in it would be compared. Each is
+/// changed alone. Every result differs from the base and from every other one:
+/// a digest that, say, summed weighted and raw_counts would let (true, false)
+/// pass for (false, true).
+#[test]
+fn every_key_field_and_the_format_tag_reach_the_fingerprint() {
+    let base = fixture_key();
+    let variants: [(&str, Key); 13] = [
+        // The tree: its topology, branch lengths and node numbering.
+        ("tree", Key { tree: [1; 32], ..base }),
+        // The sketcher and its parameters, each of which changes sketch values.
+        (
+            "method",
+            Key {
+                method: DF_METHOD_TMH,
+                ..base
+            },
+        ),
+        ("k", Key { k: base.k + 1, ..base }),
+        (
+            "seed",
+            Key {
+                seed: base.seed + 1,
+                ..base
+            },
+        ),
+        ("bbits", Key { bbits: 32, ..base }),
+        (
+            "weighted",
+            Key {
+                weighted: !base.weighted,
+                ..base
+            },
+        ),
+        (
+            "raw_counts",
+            Key {
+                raw_counts: !base.raw_counts,
+                ..base
+            },
+        ),
+        // The caller's data: rarefied sketches must not mix with unrarefied ones.
+        (
+            "data_version",
+            Key {
+                data_version: 1,
+                ..base
+            },
+        ),
+        // The hash family: another DartMinHash release may hash differently.
+        (
+            "dartminhash",
+            Key {
+                dartminhash: "0.1.9",
+                ..base
+            },
+        ),
+        // This library: a release may change how sketches are made (Decision 5).
+        (
+            "library",
+            Key {
+                library: "999.0.0",
+                ..base
+            },
+        ),
+        // The platform, and the libm tmh's -ln(u) draws through.
+        (
+            "target",
+            Key {
+                target: "riscv64gc-unknown-linux-gnu",
+                ..base
+            },
+        ),
+        ("libm", Key { libm: [2; 32], ..base }),
+        // What this build's sketcher computes, whatever its version says.
+        (
+            "selftest",
+            Key {
+                selftest: [3; 32],
+                ..base
+            },
+        ),
+    ];
+    let mut seen = vec![("base", base.digest())];
+    for (field, key) in variants {
+        seen.push((field, key.digest()));
+    }
+    // The format version: a new encoding must not read an old one's rows.
+    seen.push((
+        "format tag",
+        base.digest_with("dartunifrac/sketch-key/v2"),
+    ));
+    assert_eq!(base.digest_with(KEY_TAG), base.digest());
+    for (i, (a, da)) in seen.iter().enumerate() {
+        for (b, db) in &seen[..i] {
+            assert_ne!(da, db, "{a} and {b} give the same fingerprint");
+        }
+    }
+}
+
+/// Strings in the key are length-prefixed. Without that, moving a character
+/// from one to the next would hash the same bytes: "0.1.8" then "0.3.2", and
+/// "0.1.80" then ".3.2", both read "0.1.80.3.2".
+#[test]
+fn moving_a_character_between_two_key_strings_changes_the_fingerprint() {
+    let base = Key {
+        dartminhash: "0.1.8",
+        library: "0.3.2",
+        ..fixture_key()
+    };
+    let moved = Key {
+        dartminhash: "0.1.80",
+        library: ".3.2",
+        ..base
+    };
+    assert_ne!(base.digest(), moved.digest());
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Known answers. Every other fingerprint test is relative, so a change to the
+/// encoding (native-endian for little-endian, two fields swapped, a narrower
+/// length prefix) would pass them all on this host, and silently orphan every
+/// stored sketch unless KEY_TAG moved with it. These digests were computed
+/// outside this code, by Python's hashlib over the encoding the docs describe:
+/// each string as a u64 length then its bytes; integers fixed-width
+/// little-endian; bools as one byte each; branch lengths as f64 bits. If one
+/// changes, the encoding changed: bump the tag rather than the expected value.
+/// The key's build terms (versions, target, libm, self-test) are fields here,
+/// so both answers hold on every platform.
+#[test]
+fn the_encoding_gives_known_answers_computed_independently() {
+    let (parent, lens) = fixture_arrays();
+    assert_eq!(
+        hex(&tree_digest(&parent, &lens)),
+        "5c82e311d035bc50b0defcca2ada9eb2513179458ac9def8edeb29d614b1b96c"
+    );
+    let key = Key {
+        tree: [0x11; 32],
+        method: 1,
+        k: 2048,
+        seed: 1337,
+        bbits: 16,
+        weighted: true,
+        raw_counts: false,
+        data_version: 42,
+        dartminhash: "0.1.8",
+        library: "0.3.2",
+        target: "aarch64-apple-darwin",
+        libm: [0x22; 32],
+        selftest: [0x33; 32],
+    };
+    assert_eq!(
+        hex(&key.digest()),
+        "0e2cebf268c56fb7e973a6f3b0a9f9170fb8c0bd89a4117b327e59b5e26e9e78"
+    );
+}
+
+/// The DartMinHash term is a constant, so it is only true if the build really
+/// uses that release. The manifest pins it exactly, so no build graph, a
+/// consumer's included, can resolve another release under a key that names
+/// this one (a caret range would let it). Bumping the pin fails here until the
+/// constant, and so every fingerprint, follows. The lock needs no check of its
+/// own: an exact pin leaves Cargo nothing else to resolve.
+#[test]
+fn the_dartminhash_version_in_the_key_is_the_one_pinned_exactly() {
+    let pin = format!("dartminhash = \"={DARTMINHASH_VERSION}\"");
+    let manifest = include_str!("../Cargo.toml");
+    assert!(
+        manifest.lines().any(|l| l.trim() == pin),
+        "Cargo.toml has no `{pin}`"
+    );
+}
+
+/// The libm term measures ln where tmh uses it. One result changed by one ulp,
+/// the size of difference that broke two tmh golden vectors between x86-64
+/// Linux and an arm64 Mac, changes the digest. Across platforms this test is
+/// vacuous by design: a process can only see its own libm.
+#[test]
+fn the_libm_digest_sees_a_one_ulp_difference_in_ln() {
+    let here = libm_digest();
+    assert_eq!(libm_digest(), here, "not stable within a process");
+    assert_eq!(libm_digest_with(f64::ln), here);
+    let first = std::cell::Cell::new(true);
+    let one_off = |u: f64| {
+        let r = u.ln();
+        match first.replace(false) {
+            true => f64::from_bits(r.to_bits() + 1),
+            false => r,
+        }
+    };
+    assert_ne!(libm_digest_with(one_off), here);
+}
+
+/// Core's sketcher, as the self-test calls it.
+fn real(t: &Tree, tb: &Table, p: &SketchParams) -> Result<dartunifrac_core::SketchSet, dartunifrac_core::CoreError> {
+    build_sketches(t, tb, p, "")
+}
+
+/// The self-test term is what this build's sketcher actually computes. One
+/// sketch value changed in any one of its six runs (each method, unweighted,
+/// weighted and raw) changes the digest, and each run's change gives a digest of
+/// its own. That is what catches what no version string can: dartminhash's
+/// `mixed_tab` feature, a patched or forked dartminhash, a libm function other
+/// than ln, or a change to core between releases.
+#[test]
+fn the_selftest_sees_one_changed_value_in_any_of_its_runs() {
+    let here = selftest_digest_with(real);
+    assert_eq!(selftest_digest(), here);
+    assert_eq!(selftest_digest(), here, "not stable within a process");
+    let mut seen = vec![here];
+    for (method, weighted, raw) in SELFTEST_RUNS {
+        let changed = selftest_digest_with(|t, tb, p| {
+            let mut set = real(t, tb, p)?;
+            if (p.method, p.weighted, p.raw_counts) == (method, weighted, raw) {
+                set.sketches[0][0] ^= 1;
+            }
+            Ok(set)
+        });
+        let label = format!("{method:?} weighted={weighted} raw={raw}");
+        assert!(!seen.contains(&changed), "{label}: the change was not seen");
+        seen.push(changed);
+    }
+}
+
+/// Sketches do not depend on the thread count, so neither may the self-test:
+/// otherwise two contexts of one process could disagree on every fingerprint.
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "rayon cannot spawn threads on wasm")]
+fn the_selftest_is_the_same_in_any_pool() {
+    let pool = |n: usize| rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap();
+    let n = distinct_thread_count() as usize;
+    let one = pool(1).install(|| selftest_digest_with(real));
+    let many = pool(n).install(|| selftest_digest_with(real));
+    assert_eq!(one, many);
+    assert_eq!(one, selftest_digest());
+}
+
+// ---------------------------------------------------------------------------
+// A sketch set's fingerprint
+// ---------------------------------------------------------------------------
+
+fn fingerprint_of(s: *const df_sketches_t) -> [u8; DF_FINGERPRINT_LEN] {
+    let mut out = [0; DF_FINGERPRINT_LEN];
+    assert_eq!(
+        unsafe { df_sketches_fingerprint(s, out.as_mut_ptr()) },
+        DF_OK,
+        "{:?}",
+        thread_error()
+    );
+    out
+}
+
+/// df_sketch stamps each set with the key of its tree and parameters, exactly
+/// as Key::new builds it, so the fingerprint is the documented key and nothing
+/// else.
+#[test]
+fn a_sketch_set_carries_the_key_of_its_tree_and_parameters() {
+    let w = World::new();
+    let p = params(DF_METHOD_TMH, true, true, 32);
+    let s = sketch_ok(&w, &p, &common::test_rows(), 3);
+    let (parent, lens) = fixture_arrays();
+    let expected = Key::new(tree_digest(&parent, &lens), &p).digest();
+    assert_eq!(fingerprint_of(s), expected);
+    assert_eq!(handle(s).k, p.k);
+    unsafe { df_sketches_free(s) };
+}
+
+/// Each df_params_t field changed in turn from `base`, which must be weighted
+/// and not raw_counts, so that every variant is itself valid.
+fn key_variants(base: &df_params_t) -> Vec<(&'static str, df_params_t)> {
+    assert!(base.weighted && !base.raw_counts && base.bbits == 16);
+    vec![
+        (
+            "method",
+            df_params_t {
+                method: base.method ^ 1,
+                ..*base
+            },
+        ),
+        ("k", df_params_t { k: base.k + 1, ..*base }),
+        (
+            "seed",
+            df_params_t {
+                seed: base.seed + 1,
+                ..*base
+            },
+        ),
+        ("bbits", df_params_t { bbits: 32, ..*base }),
+        (
+            "weighted",
+            df_params_t {
+                weighted: false,
+                ..*base
+            },
+        ),
+        (
+            "raw_counts",
+            df_params_t {
+                raw_counts: true,
+                ..*base
+            },
+        ),
+        (
+            "data_version",
+            df_params_t {
+                data_version: base.data_version + 1,
+                ..*base
+            },
+        ),
+    ]
+}
+
+/// The fixture tree with one branch length's last bit changed: another tree,
+/// which still holds every tip the table names.
+fn nudged_tree() -> World {
+    let (parent, mut lens) = fixture_arrays();
+    lens[12] = f64::from_bits(lens[12].to_bits() + 1);
+    let ctx = new_ctx();
+    let (status, tree) = tree_new(ctx, &parent, &lens);
+    assert_eq!(status, DF_OK);
+    World { ctx, tree }
+}
+
+/// End to end through df_sketch: each df_params_t field, and the tree, give a
+/// set its own fingerprint, so an import or a cross comparison can refuse to
+/// mix them. The tree here differs from the fixture by one branch length's last
+/// bit, and still holds every tip the table names.
+#[test]
+fn each_parameter_and_the_tree_give_a_set_its_own_fingerprint() {
+    let rows = common::test_rows();
+    let fingerprint = |w: &World, p: &df_params_t| {
+        let s = sketch_ok(w, p, &rows, 3);
+        let f = fingerprint_of(s);
+        unsafe { df_sketches_free(s) };
+        f
+    };
+    let w = World::new();
+    let base = params(DF_METHOD_DMH, true, false, 16);
+    let mut seen = vec![("base", fingerprint(&w, &base))];
+    for (field, p) in &key_variants(&base) {
+        seen.push((*field, fingerprint(&w, p)));
+    }
+    seen.push(("tree", fingerprint(&nudged_tree(), &base)));
+
+    for (i, (a, da)) in seen.iter().enumerate() {
+        for (b, db) in &seen[..i] {
+            assert_ne!(da, db, "{a} and {b} give the same fingerprint");
+        }
+    }
+}
+
+/// The fingerprint names what makes sketches comparable, not the sketches. A
+/// different table, an empty result, another thread count or another batch
+/// size all leave it unchanged. Otherwise sets sketched in separate runs, which
+/// is what portable sketches exist for, could never be merged.
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "rayon cannot spawn threads on wasm")]
+fn the_fingerprint_ignores_the_samples_and_the_run() {
+    let p = dmh(true);
+    let w = World::new();
+    let all = sketch_ok(&w, &p, &common::test_rows(), 3);
+    let some = sketch_ok(&w, &p, &samples_0_and_2(), 3);
+    let sample_0: Vec<_> = common::test_rows()
+        .into_iter()
+        .filter(|r| r.0 == 0)
+        .collect();
+    let empty = sketch_ok(&w, &p, &sample_0, 3);
+    assert_eq!(samples_of(empty), Vec::<i64>::new());
+    let elsewhere = World::with(distinct_thread_count(), 7);
+    let other_run = sketch_ok(&elsewhere, &p, &common::test_rows(), 3);
+    let expected = fingerprint_of(all);
+    for (label, s) in [("some", some), ("empty", empty), ("other run", other_run)] {
+        assert_eq!(fingerprint_of(s), expected, "{label}");
+    }
+    for s in [all, some, empty, other_run] {
+        unsafe { df_sketches_free(s) };
+    }
+}
+
+/// A NULL is a status, reported on the thread since there is no ctx, and the
+/// caller's buffer is left as it was rather than half-written.
+#[test]
+fn fingerprint_null_pointers_are_a_status_and_leave_the_buffer_alone() {
+    let w = World::new();
+    let s = sketch_ok(&w, &dmh(false), &common::test_rows(), 3);
+
+    clear_thread_error();
+    let mut out = [0xAB; DF_FINGERPRINT_LEN];
+    let status = unsafe { df_sketches_fingerprint(ptr::null(), out.as_mut_ptr()) };
+    assert_eq!(status, DF_ERR_NULL_POINTER);
+    assert_eq!(thread_error().as_deref(), Some("null pointer: sketches"));
+    assert_eq!(out, [0xAB; DF_FINGERPRINT_LEN]);
+
+    clear_thread_error();
+    let status = unsafe { df_sketches_fingerprint(s, ptr::null_mut()) };
+    assert_eq!(status, DF_ERR_NULL_POINTER);
+    assert_eq!(thread_error().as_deref(), Some("null pointer: out"));
+    unsafe { df_sketches_free(s) };
+}
+
+// ===========================================================================
+// Export and import (M6)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// df_sketches_export that must succeed.
+fn export(w: &World, s: *const df_sketches_t) -> FFI_ArrowArrayStream {
+    let mut out = FFI_ArrowArrayStream::empty();
+    assert_eq!(
+        unsafe { df_sketches_export(w.ctx, s, &mut out) },
+        DF_OK,
+        "{}",
+        w.error()
+    );
+    out
+}
+
+fn import(
+    w: &World,
+    p: &df_params_t,
+    stream: &mut FFI_ArrowArrayStream,
+) -> (df_status_t, *mut df_sketches_t) {
+    let mut out = sentinel();
+    let status = unsafe { df_sketches_import(w.ctx, w.tree, p, stream, &mut out) };
+    (status, out)
+}
+
+/// df_sketches_import that must succeed.
+fn import_ok(w: &World, p: &df_params_t, stream: &mut FFI_ArrowArrayStream) -> *mut df_sketches_t {
+    let (status, s) = import(w, p, stream);
+    assert_eq!(status, DF_OK, "{}", w.error());
+    s
+}
+
+/// Exported batches handed back as a caller's stream, as a store would return
+/// them.
+fn stored(batches: &[RecordBatch]) -> Input {
+    input_from(
+        batches[0].schema(),
+        batches.iter().cloned().map(Ok).collect(),
+    )
+}
+
+/// Everything a set is through the API: its sample ids, its values at its
+/// width, its fingerprint, k, whether it is weighted, and its distances.
+type Snapshot = (
+    Vec<i64>,
+    (u32, Vec<Vec<u64>>),
+    [u8; DF_FINGERPRINT_LEN],
+    u32,
+    bool,
+    Vec<(i64, i64, u32)>,
+);
+
+fn snapshot(w: &World, s: *const df_sketches_t) -> Snapshot {
+    let h = handle(s);
+    (
+        samples_of(s),
+        sketch_values(&h.sketches),
+        fingerprint_of(s),
+        h.k,
+        h.weighted,
+        bits(&distances(w, s)),
+    )
+}
+
+fn sizes(batches: &[RecordBatch]) -> Vec<usize> {
+    batches.iter().map(|b| b.num_rows()).collect()
+}
+
+/// Four samples on the fixture tree, each touching three or four tips, so either
+/// half of them still sketches (core empties a set of fewer than two), and the
+/// per-sample totals a weighted run needs.
+fn four_samples() -> (Vec<(i64, i64, f64)>, Vec<f64>) {
+    let rows = vec![
+        (0, 3, 2.0),
+        (0, 6, 5.0),
+        (0, 8, 3.0),
+        (1, 5, 3.0),
+        (1, 10, 9.0),
+        (1, 11, 6.0),
+        (2, 3, 4.0),
+        (2, 6, 7.0),
+        (2, 12, 3.0),
+        (3, 5, 1.0),
+        (3, 8, 4.0),
+        (3, 11, 2.0),
+        (3, 12, 5.0),
+    ];
+    (rows, vec![10.0, 18.0, 14.0, 12.0])
+}
+
+/// df_sketch of `rows` over `col_sums.len()` samples, which must succeed.
+fn sketch_table(
+    w: &World,
+    p: &df_params_t,
+    rows: &[(i64, i64, f64)],
+    col_sums: &[f64],
+) -> *mut df_sketches_t {
+    let mut inp = input(rows, p.weighted);
+    let mut out = sentinel();
+    let n = col_sums.len() as i64;
+    let status = unsafe {
+        df_sketch(w.ctx, w.tree, p, &mut inp.stream, n, col_sums.as_ptr(), &mut out)
+    };
+    assert_eq!(status, DF_OK, "{}", w.error());
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Round trip
+// ---------------------------------------------------------------------------
+
+/// Acceptance 1: a set exported and imported is the set, bit for bit, for every
+/// method, weighting and width. The stream goes straight from one call to the
+/// other, as a C caller would pass it.
+#[test]
+fn export_then_import_reproduces_the_set_bit_for_bit() {
+    let w = World::new();
+    for (_, method) in METHODS {
+        for (weighted, raw_counts) in WEIGHTINGS {
+            for bbits in [16, 32, 64] {
+                let p = params(method, weighted, raw_counts, bbits);
+                let label = format!("method {method}, weighted {weighted}, raw {raw_counts}, bbits {bbits}");
+                let s = sketch_ok(&w, &p, &common::test_rows(), 3);
+                let want = snapshot(&w, s);
+                assert_eq!(want.0, vec![0, 1, 2], "{label}");
+                let mut stream = export(&w, s);
+                let back = import_ok(&w, &p, &mut stream);
+                assert!(stream.release().is_none(), "{label}: not consumed");
+                assert_eq!(snapshot(&w, back), want, "{label}");
+                unsafe {
+                    df_sketches_free(s);
+                    df_sketches_free(back);
+                }
+            }
+        }
+    }
+}
+
+/// What a store receives: the documented schema at the set's own k and width,
+/// the set's sample ids ascending, its fingerprint on every row, and its values.
+#[test]
+fn export_writes_the_sets_ids_fingerprint_and_values() {
+    let w = World::new();
+    for bbits in [16, 32, 64] {
+        let p = params(DF_METHOD_DMH, true, false, bbits);
+        let s = sketch_ok(&w, &p, &samples_0_and_2(), 3);
+        let reader = RecordBatchStreamReader::try_new(export(&w, s)).unwrap();
+        let schema = dartunifrac_arrow::sketches_schema(p.k as usize, bbits as u8).unwrap();
+        assert_eq!(*reader.schema(), schema, "bbits {bbits}");
+        let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+        let rows = common::sketch_rows(&batches);
+        let (width, values) = sketch_values(&handle(s).sketches);
+        assert_eq!(width, bbits);
+        let ids: Vec<i64> = rows.iter().map(|r| r.0).collect();
+        assert_eq!(ids, vec![0, 2], "bbits {bbits}");
+        for (r, (_, f, v)) in rows.iter().enumerate() {
+            assert_eq!(f[..], fingerprint_of(s), "bbits {bbits}, row {r}");
+            assert_eq!(*v, values[r], "bbits {bbits}, row {r}");
+        }
+        unsafe { df_sketches_free(s) };
+    }
+}
+
+/// An export batch holds at most max(1, batch_rows / k) rows. batch_rows then
+/// bounds the values a batch carries, as it bounds the pairs of a distance
+/// batch, so a large k cannot make a large batch. Here k is 16.
+#[test]
+fn export_batches_hold_at_most_batch_rows_over_k_rows() {
+    for (batch_rows, want) in [
+        (1, vec![1, 1, 1]),
+        (16, vec![1, 1, 1]),
+        (33, vec![2, 1]),
+        (48, vec![3]),
+        (0, vec![3]),
+    ] {
+        let w = World::with(0, batch_rows);
+        let s = sketch_ok(&w, &dmh(false), &common::test_rows(), 3);
+        assert_eq!(
+            sizes(&drain_stream(export(&w, s))),
+            want,
+            "batch_rows {batch_rows}"
+        );
+        unsafe { df_sketches_free(s) };
+    }
+}
+
+/// Like a distance stream, an export builds each batch in its context's pool,
+/// so the caller's thread budget covers it, and so the stream holds the pool
+/// from creation until release.
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "rayon cannot spawn threads on wasm")]
+fn df_sketches_export_gives_its_stream_the_ctx_pool() {
+    let w = World::with_threads(2);
+    let s = sketch_ok(&w, &dmh(false), &common::test_rows(), 3);
+    let holders = || Arc::strong_count(unsafe { &*w.ctx }.pool.as_ref().unwrap());
+    assert_eq!(holders(), 1);
+    let stream = export(&w, s);
+    assert_eq!(holders(), 2, "the stream does not hold the context's pool");
+    drop(stream);
+    assert_eq!(holders(), 1, "releasing the stream did not let go of the pool");
+    unsafe { df_sketches_free(s) };
+}
+
+/// A store writes an export long after the call that made it. The stream must
+/// not depend on the set or the context.
+#[test]
+fn an_export_outlives_its_ctx_and_sketches() {
+    let threads = if cfg!(target_family = "wasm") { 0 } else { 2 };
+    let w = World::with_threads(threads);
+    let s = sketch_ok(&w, &dmh(true), &common::test_rows(), 3);
+    let want = common::sketch_rows(&drain_stream(export(&w, s)));
+    let stream = export(&w, s);
+    unsafe { df_sketches_free(s) };
+    drop(w);
+    assert_eq!(common::sketch_rows(&drain_stream(stream)), want);
+    assert_eq!(want.len(), 3);
+}
+
+/// Acceptance 2, findings §2 through the API: two halves of a table, sketched
+/// in separate calls and exported, then read back as one stream, shuffled and
+/// in mixed batches, give the distances one joint df_sketch gives, bit for bit.
+/// That is what lets a caller grow a store a few samples at a time.
+#[test]
+fn merging_separately_sketched_halves_equals_one_joint_sketch() {
+    let (rows, col_sums) = four_samples();
+    let half = |keep: [i64; 2]| -> Vec<_> {
+        rows.iter().copied().filter(|r| keep.contains(&r.0)).collect()
+    };
+    // k = 16: one row per export batch in `one`, two in `two`.
+    let (one, two) = (World::with(0, 16), World::with(0, 32));
+    for (_, method) in METHODS {
+        for (weighted, raw_counts) in WEIGHTINGS {
+            let p = params(method, weighted, raw_counts, 16);
+            let label = format!("method {method}, weighted {weighted}, raw {raw_counts}");
+            let joint = sketch_table(&one, &p, &rows, &col_sums);
+            let want = snapshot(&one, joint);
+            assert_eq!(want.0, vec![0, 1, 2, 3], "{label}");
+            assert!(
+                want.5.iter().any(|t| t.2 != want.5[0].2),
+                "{label}: every distance is equal, so a mis-paired merge would pass"
+            );
+
+            let a = sketch_table(&one, &p, &half([0, 2]), &col_sums);
+            let b = sketch_table(&two, &p, &half([1, 3]), &col_sums);
+            let (a_rows, b_rows) = (drain_stream(export(&one, a)), drain_stream(export(&two, b)));
+            assert_eq!((sizes(&a_rows), sizes(&b_rows)), (vec![1, 1], vec![2]));
+            // Samples 1 and 3, then 2, then 0.
+            let mixed = [b_rows[0].clone(), a_rows[1].clone(), a_rows[0].clone()];
+            let mut inp = stored(&mixed);
+            let merged = import_ok(&one, &p, &mut inp.stream);
+            assert_eq!(snapshot(&one, merged), want, "{label}");
+            unsafe {
+                for s in [joint, a, b, merged] {
+                    df_sketches_free(s);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Refusals
+// ---------------------------------------------------------------------------
+
+/// Acceptance 3, end to end: rows exported under one key and imported under any
+/// other (another tree, or any one df_params_t field changed) are refused,
+/// naming a sample, instead of becoming plausible, wrong distances. That holds
+/// for k and bbits too: the fingerprint is checked before the rows' shape, so
+/// the message names the real cause.
+#[test]
+fn import_under_any_other_key_is_rejected_naming_a_sample() {
+    let w = World::new();
+    let base = params(DF_METHOD_DMH, true, false, 16);
+    let s = sketch_ok(&w, &base, &common::test_rows(), 3);
+    let rows = drain_stream(export(&w, s));
+    let elsewhere = nudged_tree();
+    let mut cases: Vec<(&str, &World, df_params_t)> = key_variants(&base)
+        .into_iter()
+        .map(|(field, p)| (field, &w, p))
+        .collect();
+    cases.push(("tree", &elsewhere, df_params_t { ..base }));
+    for (label, world, p) in cases {
+        let mut inp = stored(&rows);
+        let (status, out) = import(world, &p, &mut inp.stream);
+        assert_eq!(status, DF_ERR_INVALID_INPUT, "{label}: {}", world.error());
+        assert!(out.is_null(), "{label}");
+        let m = world.error();
+        assert!(
+            m.contains("fingerprint") && m.contains("sample_idx 0"),
+            "{label}: should name the fingerprint and sample_idx 0; got {m:?}"
+        );
+    }
+    // The same rows under their own key import: the refusals are the key's.
+    let mut inp = stored(&rows);
+    let back = import_ok(&w, &base, &mut inp.stream);
+    unsafe {
+        df_sketches_free(back);
+        df_sketches_free(s);
+    }
+}
+
+/// The rule df_sketch keeps, kept here too: the caller cannot tell from a status
+/// whether its stream was read, so it is always consumed, released exactly
+/// once, whatever happens.
+#[test]
+fn import_stream_is_consumed_exactly_once_on_every_status() {
+    let w = World::new();
+    let good = dmh(false);
+    let s = sketch_ok(&w, &good, &common::test_rows(), 3);
+    let rows = drain_stream(export(&w, s));
+    let foreign = df_params_t {
+        data_version: 1,
+        ..good
+    };
+    let bad = df_params_t { k: 0, ..good };
+    let wrong_schema = || {
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1]))])
+            .unwrap();
+        input_from(schema, vec![Ok(batch)])
+    };
+    let next_fails = || {
+        input_from(
+            rows[0].schema(),
+            vec![Err(ArrowError::ComputeError("broke".into()))],
+        )
+    };
+    type Call<'a> =
+        Box<dyn Fn(*mut FFI_ArrowArrayStream, *mut *mut df_sketches_t) -> df_status_t + 'a>;
+    let with = |ctx, tree, p: *const df_params_t| -> Call {
+        Box::new(move |inp, out| unsafe { df_sketches_import(ctx, tree, p, inp, out) })
+    };
+    let ok = || with(w.ctx, w.tree, &good);
+    let cases: Vec<(&str, Input, df_status_t, Call)> = vec![
+        (
+            "out NULL",
+            stored(&rows),
+            DF_ERR_NULL_POINTER,
+            Box::new(|inp, _| ok()(inp, ptr::null_mut())),
+        ),
+        (
+            "ctx NULL",
+            stored(&rows),
+            DF_ERR_NULL_POINTER,
+            with(ptr::null_mut(), w.tree, &good),
+        ),
+        (
+            "tree NULL",
+            stored(&rows),
+            DF_ERR_NULL_POINTER,
+            with(w.ctx, ptr::null(), &good),
+        ),
+        (
+            "params NULL",
+            stored(&rows),
+            DF_ERR_NULL_POINTER,
+            with(w.ctx, w.tree, ptr::null()),
+        ),
+        (
+            "bad params",
+            stored(&rows),
+            DF_ERR_INVALID_INPUT,
+            with(w.ctx, w.tree, &bad),
+        ),
+        ("wrong schema", wrong_schema(), DF_ERR_INVALID_INPUT, ok()),
+        ("get_next fails", next_fails(), DF_ERR_ARROW, ok()),
+        (
+            "another key",
+            stored(&rows),
+            DF_ERR_INVALID_INPUT,
+            with(w.ctx, w.tree, &foreign),
+        ),
+        ("success", stored(&rows), DF_OK, ok()),
+    ];
+    for (label, mut inp, expected, call) in cases {
+        let mut out = sentinel();
+        let status = call(&mut inp.stream, &mut out);
+        assert_eq!(status, expected, "{label}: {}", w.error());
+        assert!(
+            inp.stream.release().is_none(),
+            "{label}: the caller's stream still has a release"
+        );
+        assert_eq!(
+            inp.drops.load(SeqCst),
+            1,
+            "{label}: released {} times",
+            inp.drops.load(SeqCst)
+        );
+        if status == DF_OK {
+            unsafe { df_sketches_free(out) };
+        } else if label != "out NULL" {
+            // That case passes NULL in place of `out`, so `out` is never seen.
+            assert!(out.is_null(), "{label}: out was not reset");
+        }
+    }
+
+    // Already released: refused, and its release is not called a second time.
+    let mut inp = stored(&rows);
+    drop(std::mem::replace(
+        &mut inp.stream,
+        FFI_ArrowArrayStream::empty(),
+    ));
+    let mut out = sentinel();
+    assert_eq!(ok()(&mut inp.stream, &mut out), DF_ERR_ARROW);
+    assert!(out.is_null());
+    assert_eq!(inp.drops.load(SeqCst), 1);
+    unsafe { df_sketches_free(s) };
+}
+
+/// As for df_sketch, the caller's stream is read inside the context's pool, so
+/// its thread budget covers the reading too.
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "rayon cannot spawn threads on wasm")]
+fn import_get_next_runs_inside_the_ctx_pool() {
+    let n = distinct_thread_count();
+    let w = World::with_threads(n);
+    let s = sketch_ok(&w, &dmh(false), &common::test_rows(), 3);
+    let mut inp = stored(&drain_stream(export(&w, s)));
+    let back = import_ok(&w, &dmh(false), &mut inp.stream);
+    let seen = inp.seen.lock().unwrap().clone();
+    assert!(seen.len() >= 2, "{seen:?}"); // one batch, then the end
+    for (threads, index) in seen {
+        assert_eq!(threads, n as usize);
+        assert!(index.is_some(), "get_next ran on the calling thread");
+    }
+    unsafe {
+        df_sketches_free(back);
+        df_sketches_free(s);
+    }
+}
+
+/// A NULL is a status, never a crash; an out-param is reset on failure, so a
+/// caller's cleanup path can always release or free it.
+#[test]
+fn export_and_import_null_pointers_return_a_status_and_reset_outputs() {
+    let w = World::new();
+    let s = sketch_ok(&w, &dmh(false), &common::test_rows(), 3);
+
+    // A NULL ctx reports on the thread; otherwise on the ctx.
+    for (label, ctx, sk) in [
+        ("ctx", ptr::null_mut(), s.cast_const()),
+        ("sketches", w.ctx, ptr::null()),
+    ] {
+        clear_thread_error();
+        let mut stream = garbage::<FFI_ArrowArrayStream>();
+        assert_eq!(
+            unsafe { df_sketches_export(ctx, sk, stream.as_mut_ptr()) },
+            DF_ERR_NULL_POINTER,
+            "{label}"
+        );
+        let msg = if ctx.is_null() {
+            thread_error()
+        } else {
+            ctx_error(ctx)
+        };
+        assert_eq!(msg, Some(format!("null pointer: {label}")));
+        assert!(released_stream(stream), "{label}: stream not reset");
+    }
+    assert_eq!(
+        unsafe { df_sketches_export(w.ctx, s, ptr::null_mut()) },
+        DF_ERR_NULL_POINTER
+    );
+    assert_eq!(w.error(), "null pointer: out");
+
+    let rows = drain_stream(export(&w, s));
+    let p = dmh(false);
+    for (label, ctx, tree, params) in [
+        ("ctx", ptr::null_mut(), w.tree.cast_const(), &p as *const df_params_t),
+        ("tree", w.ctx, ptr::null(), &p),
+        ("params", w.ctx, w.tree, ptr::null()),
+    ] {
+        clear_thread_error();
+        let mut inp = stored(&rows);
+        let mut out = sentinel();
+        let status = unsafe { df_sketches_import(ctx, tree, params, &mut inp.stream, &mut out) };
+        assert_eq!(status, DF_ERR_NULL_POINTER, "{label}");
+        let msg = if ctx.is_null() {
+            thread_error()
+        } else {
+            ctx_error(ctx)
+        };
+        assert_eq!(msg, Some(format!("null pointer: {label}")));
+        assert!(out.is_null(), "{label}: out not reset");
+    }
+    let mut out = sentinel();
+    let status = unsafe { df_sketches_import(w.ctx, w.tree, &p, ptr::null_mut(), &mut out) };
+    assert_eq!(status, DF_ERR_NULL_POINTER);
+    assert_eq!(w.error(), "null pointer: input");
+    assert!(out.is_null());
+    let mut inp = stored(&rows);
+    let status = unsafe { df_sketches_import(w.ctx, w.tree, &p, &mut inp.stream, ptr::null_mut()) };
+    assert_eq!(status, DF_ERR_NULL_POINTER);
+    assert_eq!(w.error(), "null pointer: out");
+
+    unsafe { df_sketches_free(s) };
+}
+
+// ---------------------------------------------------------------------------
+// Edge sizes
+// ---------------------------------------------------------------------------
+
+/// A set of fewer than two sketched samples is empty, and still exports: no
+/// rows, under the schema of its own k and width, so a store made from it takes
+/// a later set's rows. It imports back as an empty set with the same
+/// fingerprint.
+#[test]
+fn an_empty_set_exports_and_imports_as_an_empty_set() {
+    let w = World::new();
+    let p = params(DF_METHOD_TMH, false, false, 32);
+    let sample_0: Vec<_> = common::test_rows()
+        .into_iter()
+        .filter(|r| r.0 == 0)
+        .collect();
+    let s = sketch_ok(&w, &p, &sample_0, 3);
+    assert_eq!(samples_of(s), Vec::<i64>::new());
+
+    let reader = RecordBatchStreamReader::try_new(export(&w, s)).unwrap();
+    assert_eq!(
+        *reader.schema(),
+        dartunifrac_arrow::sketches_schema(16, 32).unwrap()
+    );
+    assert_eq!(reader.map(|b| b.unwrap().num_rows()).sum::<usize>(), 0);
+
+    let mut stream = export(&w, s);
+    let back = import_ok(&w, &p, &mut stream);
+    assert_eq!(snapshot(&w, back), snapshot(&w, s));
+    assert_eq!(sketch_values(&handle(back).sketches), (32, vec![]));
+    unsafe {
+        df_sketches_free(back);
+        df_sketches_free(s);
+    }
+}
+
+/// One row imports as a set of one, where df_sketch of one sample gives an
+/// empty set. Core refuses fewer than two samples because there is nothing to
+/// compare, but one stored sample is the start of a store, or one side of a
+/// cross comparison (M7). On its own it has no pairs.
+#[test]
+fn a_one_row_import_is_kept_and_has_no_pairs() {
+    let w = World::new();
+    let p = dmh(true);
+    let s = sketch_ok(&w, &p, &common::test_rows(), 3);
+    let rows = drain_stream(export(&w, s));
+    assert_eq!(sizes(&rows), vec![3]);
+    let mut inp = stored(&[rows[0].slice(1, 1)]);
+    let one = import_ok(&w, &p, &mut inp.stream);
+    assert_eq!(samples_of(one), vec![1]);
+    let (width, values) = sketch_values(&handle(s).sketches);
+    assert_eq!(
+        sketch_values(&handle(one).sketches),
+        (width, vec![values[1].clone()])
+    );
+    assert_eq!(fingerprint_of(one), fingerprint_of(s));
+    assert!(bits(&distances(&w, one)).is_empty());
+    unsafe {
+        df_sketches_free(one);
+        df_sketches_free(s);
     }
 }

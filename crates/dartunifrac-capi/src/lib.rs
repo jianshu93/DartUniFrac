@@ -16,6 +16,7 @@
 // `# Safety` sections would repeat it verbatim.
 #![allow(clippy::missing_safety_doc)]
 
+mod fingerprint;
 mod guard;
 mod stream;
 
@@ -28,11 +29,13 @@ use arrow_array::ffi::{FFI_ArrowArray, FFI_ArrowSchema, to_ffi};
 use arrow_array::ffi_stream::{FFI_ArrowArrayStream, RecordBatchStreamReader};
 use arrow_array::{Array, Int64Array};
 use dartunifrac_arrow::{
-    Sketches, distances_reader, table_from_stream, tree_from_arrays, trim_to_bbits,
+    Sketches, distances_reader, sketches_from_stream, sketches_reader, table_from_stream,
+    tree_from_arrays, trim_to_bbits,
 };
 use dartunifrac_core::{CoreError, Method, NO_PARENT, SketchParams, Tree, build_sketches};
 use rayon::ThreadPool;
 
+use fingerprint::{Key, tree_digest};
 use guard::{ApiError, guard, guard_cstr, guard_void, slice_or_empty};
 use stream::PoolReader;
 
@@ -72,6 +75,11 @@ pub const DF_DEFAULT_BATCH_ROWS: u64 = 65536;
 /// failure aborts the process rather than returning an error.
 pub const DF_MAX_BATCH_ROWS: u64 = 1 << 26;
 
+/// Bytes in a sketch set's fingerprint: a sha256.
+pub const DF_FINGERPRINT_LEN: usize = 32;
+// A literal above, for cbindgen; the column it is stored in must agree.
+const _: () = assert!(DF_FINGERPRINT_LEN == dartunifrac_arrow::FINGERPRINT_LEN);
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -109,6 +117,11 @@ pub struct df_params_t {
     /// Weighted only: weight entries by raw counts rather than by each
     /// sample's relative abundance.
     pub raw_counts: bool,
+    /// The caller's own identity for the data it sketches, such as a
+    /// rarefaction's depth and seed. It changes no sketch value, but it is part
+    /// of the fingerprint, so sets made from different data versions are never
+    /// mixed. Opaque here; 0 is an ordinary value.
+    pub data_version: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -136,11 +149,13 @@ pub struct df_tree_t {
     tree: Tree,
     // Whether each node has no children. A table entry must name a tip.
     is_tip: Vec<bool>,
+    // The sha256 of the caller's arrays: the tree's term in every fingerprint.
+    digest: [u8; 32],
 }
 
 /// One sketch per sample that had any branch to sketch, in the tree's portable
-/// id space. Immutable once built, so it may be shared across threads and
-/// contexts.
+/// id space: made by df_sketch, or read back by df_sketches_import. Immutable
+/// once built, so it may be shared across threads and contexts.
 pub struct df_sketches_t {
     // `Arc` so that every stream drawn from this handle shares the one sketch
     // set, and outlives the handle.
@@ -148,6 +163,10 @@ pub struct df_sketches_t {
     // The caller's sample_idx for each sketch, ascending.
     ids: Vec<i64>,
     weighted: bool,
+    // Values per sketch, kept because an empty set has no sketch to measure.
+    k: u32,
+    // The compatibility key's sha256: which sets this one may be compared with.
+    fingerprint: [u8; DF_FINGERPRINT_LEN],
 }
 
 /// Run `f` on `pool` when there is one. Otherwise run it on the calling thread,
@@ -348,7 +367,15 @@ pub unsafe extern "C" fn df_tree_new(
             }
         }
 
-        unsafe { out.write(Box::into_raw(Box::new(df_tree_t { tree, is_tip }))) };
+        // From the caller's arrays, not `tree`: its `usize` parents are a different
+        // width on wasm32, and the digest must not be.
+        let digest = tree_digest(parent, branch_length);
+        let tree = df_tree_t {
+            tree,
+            is_tip,
+            digest,
+        };
+        unsafe { out.write(Box::into_raw(Box::new(tree))) };
         Ok(())
     })
 }
@@ -424,12 +451,26 @@ pub unsafe extern "C" fn df_sketch(
             true => Some(unsafe { slice_or_empty(col_sums, n, "col_sums") }?),
             false => None,
         };
-
+        // From the params just validated, before the sketching: the fingerprint
+        // must describe what was sketched, whatever the caller does meanwhile.
+        // In the pool, because the process's first fingerprint runs the
+        // self-test, which sketches with rayon, and the caller's thread budget
+        // covers that too.
+        let (weighted, k) = (params.weighted, params.k);
         let pool = ctx.pool.clone();
-        let sketches = run_in_pool(pool.as_deref(), move || {
+        let fingerprint = run_in_pool(pool.as_deref(), || Key::new(tree.digest, params).digest());
+
+        let (sketches, ids) = run_in_pool(pool.as_deref(), move || {
             sketch_in_pool(tree, stream, n, col_sums, &sketch_params, bbits)
         })?;
-        unsafe { out.write(Box::into_raw(Box::new(sketches))) };
+        let set = df_sketches_t {
+            sketches: Arc::new(sketches),
+            ids,
+            weighted,
+            k,
+            fingerprint,
+        };
+        unsafe { out.write(Box::into_raw(Box::new(set))) };
         Ok(())
     })
 }
@@ -485,7 +526,8 @@ fn sketch_params(p: &df_params_t) -> Result<(SketchParams, u8), ApiError> {
 
 /// Everything in df_sketch that touches the caller's data, run in the
 /// context's pool: reading the stream (so the producer's callbacks run there
-/// too), building the table, and sketching.
+/// too), building the table, and sketching. Returns the sketches and the
+/// caller's sample_idx of each.
 fn sketch_in_pool(
     tree: &df_tree_t,
     stream: FFI_ArrowArrayStream,
@@ -493,19 +535,14 @@ fn sketch_in_pool(
     col_sums: Option<&[f64]>,
     params: &SketchParams,
     bbits: u8,
-) -> Result<df_sketches_t, ApiError> {
-    let weighted = params.weighted;
-    let empty = || -> Result<df_sketches_t, ApiError> {
-        Ok(df_sketches_t {
-            sketches: Arc::new(trim_to_bbits(Vec::new(), bbits)?),
-            ids: Vec::new(),
-            weighted,
-        })
+) -> Result<(Sketches, Vec<i64>), ApiError> {
+    let empty = || -> Result<(Sketches, Vec<i64>), ApiError> {
+        Ok((trim_to_bbits(Vec::new(), bbits)?, Vec::new()))
     };
 
     let reader = RecordBatchStreamReader::try_new(stream)
         .map_err(|e| ApiError::new(DF_ERR_ARROW, format!("stream: {e}")))?;
-    let table = table_from_stream(reader, n_samples, col_sums, weighted)?;
+    let table = table_from_stream(reader, n_samples, col_sums, params.weighted)?;
     // No entries at all: core would refuse a weighted table with no weights as
     // malformed, but this is simply fewer than two samples.
     if table.node.is_empty() {
@@ -538,11 +575,7 @@ fn sketch_in_pool(
     };
     // Within 0..n_samples, which is at most u32::MAX: exact in i64.
     let ids = set.kept.iter().map(|&s| s as i64).collect();
-    Ok(df_sketches_t {
-        sketches: Arc::new(trim_to_bbits(set.sketches, bbits)?),
-        ids,
-        weighted,
-    })
+    Ok((trim_to_bbits(set.sketches, bbits)?, ids))
 }
 
 /// Free a sketch set. NULL is a no-op. Streams already drawn from it stay valid.
@@ -550,7 +583,8 @@ fn sketch_in_pool(
 pub unsafe extern "C" fn df_sketches_free(sketches: *mut df_sketches_t) {
     guard_void(|| {
         if !sketches.is_null() {
-            // SAFETY: a non-NULL handle came from df_sketch, and is freed once.
+            // SAFETY: a non-NULL handle came from df_sketch or df_sketches_import,
+            // and is freed once.
             drop(unsafe { Box::from_raw(sketches) });
         }
     });
@@ -587,6 +621,136 @@ pub unsafe extern "C" fn df_sketch_samples(
             out.write(array);
             out_schema.write(schema);
         }
+        Ok(())
+    })
+}
+
+/// Write the set's fingerprint, DF_FINGERPRINT_LEN bytes, to `out`: a sha256 over
+/// everything that must match for two sketch sets to be comparable. That is the
+/// tree (its exact parent and branch length arrays), every df_params_t field,
+/// the DartMinHash release, this library's version, the target platform and its
+/// libm. It depends on nothing about the samples, so sets sketched in separate
+/// calls from the same tree and parameters share it. On failure `out` is left
+/// as it was. Errors are recorded per thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn df_sketches_fingerprint(
+    sketches: *const df_sketches_t,
+    out: *mut u8,
+) -> df_status_t {
+    guard(ptr::null(), || {
+        // SAFETY (every dereference here): the API contract.
+        let sketches = unsafe { sketches.as_ref() }.ok_or_else(|| ApiError::null("sketches"))?;
+        if out.is_null() {
+            return Err(ApiError::null("out"));
+        }
+        // `out` holds DF_FINGERPRINT_LEN bytes of the caller's; u8 needs no alignment.
+        unsafe {
+            ptr::copy_nonoverlapping(sketches.fingerprint.as_ptr(), out, DF_FINGERPRINT_LEN)
+        };
+        Ok(())
+    })
+}
+
+/// Stream the set as rows a caller can store, one per sample: `(sample_idx
+/// int64, fingerprint fixed_size_binary(DF_FINGERPRINT_LEN), sketch
+/// fixed_size_list<uintN>[k])`, where N is the set's bbits, in ascending
+/// sample_idx. Batches hold at most max(1, batch_rows / k) rows, so batch_rows
+/// bounds the values in a batch. An empty set gives a stream with that schema
+/// and no rows. df_sketches_import reads the rows back.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn df_sketches_export(
+    ctx: *mut df_ctx_t,
+    sketches: *const df_sketches_t,
+    out: *mut FFI_ArrowArrayStream,
+) -> df_status_t {
+    guard(ctx, || {
+        // SAFETY (every dereference here): the API contract.
+        if !out.is_null() {
+            unsafe { out.write(FFI_ArrowArrayStream::empty()) };
+        }
+        let ctx = unsafe { ctx.as_ref() }.ok_or_else(|| ApiError::null("ctx"))?;
+        let sketches = unsafe { sketches.as_ref() }.ok_or_else(|| ApiError::null("sketches"))?;
+        if out.is_null() {
+            return Err(ApiError::null("out"));
+        }
+        // A handle's k is at least 1: df_sketch and df_sketches_import validate it.
+        let k = sketches.k as usize;
+        let inner = sketches_reader(
+            sketches.sketches.clone(),
+            sketches.ids.clone(),
+            k,
+            sketches.fingerprint,
+            (ctx.batch_rows / k).max(1),
+        )?;
+        let reader = PoolReader {
+            inner,
+            pool: ctx.pool.clone(),
+            done: false,
+        };
+        unsafe { out.write(FFI_ArrowArrayStream::new(Box::new(reader))) };
+        Ok(())
+    })
+}
+
+/// Rebuild a sketch set from rows that df_sketches_export wrote, in any order
+/// and any batching; columns are matched by name, and others are ignored. The
+/// rows may have been through DuckDB or Parquet: a sketch column of list or
+/// large_list, and a fingerprint column of binary or large_binary, are accepted
+/// too, as long as the elements are exactly uintN for params->bbits and every
+/// sketch holds params->k values.
+///
+/// Every row's fingerprint must be the one `tree` and `params` give, so the
+/// rows were sketched against this tree with these parameters by this build;
+/// otherwise the call fails naming the row and its sample_idx. A repeated, null
+/// or negative sample_idx is an error too, and every rejection names its row,
+/// counted from 0 across the stream. `input` is consumed on every status (see
+/// the header's contract). Zero rows give DF_OK and an empty set, whatever the
+/// stream's schema; one row gives a set of one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn df_sketches_import(
+    ctx: *mut df_ctx_t,
+    tree: *const df_tree_t,
+    params: *const df_params_t,
+    input: *mut FFI_ArrowArrayStream,
+    out: *mut *mut df_sketches_t,
+) -> df_status_t {
+    guard(ctx, || {
+        // SAFETY (every dereference here): the API contract.
+        if !out.is_null() {
+            unsafe { out.write(ptr::null_mut()) };
+        }
+        // Take the input stream before anything can fail, as df_sketch does: from
+        // here dropping `stream` releases it, on every path out.
+        let stream = (!input.is_null()).then(|| unsafe { FFI_ArrowArrayStream::from_raw(input) });
+
+        if out.is_null() {
+            return Err(ApiError::null("out"));
+        }
+        let ctx = unsafe { ctx.as_ref() }.ok_or_else(|| ApiError::null("ctx"))?;
+        let tree = unsafe { tree.as_ref() }.ok_or_else(|| ApiError::null("tree"))?;
+        let params = unsafe { params.as_ref() }.ok_or_else(|| ApiError::null("params"))?;
+        let stream = stream.ok_or_else(|| ApiError::null("input"))?;
+        // Nothing is sketched, but the parameters define the key, so they are
+        // held to what df_sketch accepts.
+        let (_, bbits) = sketch_params(params)?;
+        let (weighted, k) = (params.weighted, params.k);
+        // In the pool, for the reasons df_sketch gives.
+        let pool = ctx.pool.clone();
+        let fingerprint = run_in_pool(pool.as_deref(), || Key::new(tree.digest, params).digest());
+
+        let (sketches, ids) = run_in_pool(pool.as_deref(), move || {
+            let reader = RecordBatchStreamReader::try_new(stream)
+                .map_err(|e| ApiError::new(DF_ERR_ARROW, format!("stream: {e}")))?;
+            Ok::<_, ApiError>(sketches_from_stream(reader, k as usize, bbits, &fingerprint)?)
+        })?;
+        let set = df_sketches_t {
+            sketches: Arc::new(sketches),
+            ids,
+            weighted,
+            k,
+            fingerprint,
+        };
+        unsafe { out.write(Box::into_raw(Box::new(set))) };
         Ok(())
     })
 }

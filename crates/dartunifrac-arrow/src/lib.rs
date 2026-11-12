@@ -15,17 +15,21 @@
 //! The name is a mild misnomer — [`tree_from_arrays`] takes plain slices,
 //! because the C API receives the tree as `const int64_t *` / `const double *`
 //! and wrapping two dense arrays in Arrow would buy nothing. Only the feature
-//! table and the distances are streamed, and those are the parts that are
-//! genuinely Arrow.
+//! table, the distances and stored sketch sets are streamed, and those are the
+//! parts that are genuinely Arrow.
 
 mod coo;
 mod distances;
 mod error;
+mod sketches;
 mod table;
 mod tree;
 
 pub use coo::{coo_reader, output_schema, DISTANCE, I, J};
 pub use distances::{distances_reader, trim_to_bbits, Sketches};
 pub use error::MarshalError;
+pub use sketches::{
+    sketches_from_stream, sketches_reader, sketches_schema, FINGERPRINT, FINGERPRINT_LEN, SKETCH,
+};
 pub use table::{input_schema, table_from_stream, INDEX_TYPE, NODE_IDX, SAMPLE_IDX, VALUE};
 pub use tree::{tree_from_arrays, NO_PARENT_IN};

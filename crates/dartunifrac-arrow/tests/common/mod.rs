@@ -7,11 +7,13 @@
 
 use std::sync::Arc;
 
+use arrow_array::cast::AsArray;
+use arrow_array::types::{Int64Type, UInt16Type, UInt32Type, UInt64Type};
 use arrow_array::{
     Array, Float32Array, Float64Array, Int64Array, RecordBatch, RecordBatchIterator,
     RecordBatchReader,
 };
-use arrow_schema::{ArrowError, Schema, SchemaRef};
+use arrow_schema::{ArrowError, DataType, Schema, SchemaRef};
 use dartunifrac_core::{Method, SketchParams, Table, Tree, NO_PARENT};
 
 /// `data/test.nwk` as `build_parent_and_lens_simple` numbers it. Node 0 is the
@@ -192,6 +194,34 @@ pub fn triples(batches: &[RecordBatch]) -> Vec<(i64, i64, f32)> {
             .unwrap();
         for r in 0..b.num_rows() {
             out.push((i.value(r), j.value(r), d.value(r)));
+        }
+    }
+    out
+}
+
+/// Exported sketch-set rows as `(sample_idx, fingerprint, values widened to
+/// u64)`, read without the reader under test so an export is checked against an
+/// independent reading of its documented types: `int64`, `fixed_size_binary`
+/// and a `fixed_size_list` of unsigned integers. Anything else panics.
+pub fn sketch_rows(batches: &[RecordBatch]) -> Vec<(i64, Vec<u8>, Vec<u64>)> {
+    let mut out = Vec::new();
+    for b in batches {
+        let ids = b.column_by_name("sample_idx").unwrap().as_primitive::<Int64Type>();
+        let fps = b.column_by_name("fingerprint").unwrap().as_fixed_size_binary();
+        let sketches = b.column_by_name("sketch").unwrap().as_fixed_size_list();
+        for r in 0..b.num_rows() {
+            let v = sketches.value(r);
+            let values: Vec<u64> = match v.data_type() {
+                DataType::UInt16 => {
+                    v.as_primitive::<UInt16Type>().values().iter().map(|&x| x.into()).collect()
+                }
+                DataType::UInt32 => {
+                    v.as_primitive::<UInt32Type>().values().iter().map(|&x| x.into()).collect()
+                }
+                DataType::UInt64 => v.as_primitive::<UInt64Type>().values().to_vec(),
+                other => panic!("sketch elements are {other:?}"),
+            };
+            out.push((ids.value(r), fps.value(r).to_vec(), values));
         }
     }
     out

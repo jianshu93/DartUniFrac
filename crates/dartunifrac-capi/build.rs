@@ -44,6 +44,12 @@ fn main() {
         None => define,
     });
 
+    // The target triple is a term of every fingerprint (src/fingerprint.rs):
+    // tmh's sketch values depend on the platform's libm. A build script runs
+    // once per target, so this needs no rerun trigger of its own.
+    let target = std::env::var("TARGET").expect("TARGET");
+    println!("cargo:rustc-env=DF_TARGET={target}");
+
     let bindings = cbindgen::generate_with_config(&crate_dir, config)
         .expect("cbindgen failed to generate the C header");
 

@@ -31,3 +31,8 @@ rayon = "1.10"
 # the C Data Interface needs, and the umbrella additionally pulls compute
 # kernels, IPC, CSV and JSON -- none of which this crate uses, all of which
 # would be compiled for wasm.
+
+[dev-dependencies]
+# Tests only, and already in the graph through arrow-array: building a byte array
+# whose offsets no valid producer would send, to show an import refuses it.
+arrow-buffer = { version = "60", default-features = false }
