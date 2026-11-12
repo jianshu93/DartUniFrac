@@ -34,7 +34,7 @@ _Static_assert(sizeof(df_config_t) == 16, "df_config_t size");
 _Static_assert(_Alignof(df_config_t) == 8, "df_config_t alignment");
 _Static_assert(offsetof(df_config_t, n_threads) == 0, "df_config_t.n_threads");
 _Static_assert(offsetof(df_config_t, batch_rows) == 8, "df_config_t.batch_rows");
-_Static_assert(sizeof(df_params_t) == 24, "df_params_t size");
+_Static_assert(sizeof(df_params_t) == 32, "df_params_t size");
 _Static_assert(_Alignof(df_params_t) == 8, "df_params_t alignment");
 _Static_assert(offsetof(df_params_t, method) == 0, "df_params_t.method");
 _Static_assert(offsetof(df_params_t, k) == 4, "df_params_t.k");
@@ -42,7 +42,9 @@ _Static_assert(offsetof(df_params_t, seed) == 8, "df_params_t.seed");
 _Static_assert(offsetof(df_params_t, bbits) == 16, "df_params_t.bbits");
 _Static_assert(offsetof(df_params_t, weighted) == 20, "df_params_t.weighted");
 _Static_assert(offsetof(df_params_t, raw_counts) == 21, "df_params_t.raw_counts");
+_Static_assert(offsetof(df_params_t, data_version) == 24, "df_params_t.data_version");
 _Static_assert(sizeof(struct ArrowArrayStream) == 5 * sizeof(void *), "ArrowArrayStream size");
+_Static_assert(DF_FINGERPRINT_LEN == 32, "a fingerprint is a sha256");
 
 /* data/test.nwk as dartunifrac-arrow's tests/common/mod.rs numbers it. */
 #define N_NODES 13
@@ -172,6 +174,42 @@ static const int64_t *int64_values(const struct ArrowArray *a) {
     return (const int64_t *)a->buffers[1] + a->offset;
 }
 
+typedef struct {
+    int64_t i, j;
+    float d;
+} pair_t;
+
+/* Read a df_distances stream to its end, at most `cap` pairs, checking each,
+ * then release it. Returns the number of pairs. */
+static int64_t read_pairs(struct ArrowArrayStream *out, pair_t *pairs, int64_t cap) {
+    struct ArrowSchema schema;
+    CHECK(out->get_schema(out, &schema) == 0);
+    CHECK(strcmp(schema.format, "+s") == 0 && schema.n_children == 3);
+    schema.release(&schema);
+
+    int64_t rows = 0;
+    for (;;) {
+        struct ArrowArray batch;
+        CHECK(out->get_next(out, &batch) == 0);
+        if (batch.release == NULL) {
+            break; /* the end */
+        }
+        CHECK(batch.n_children == 3);
+        const int64_t *i = int64_values(batch.children[0]);
+        const int64_t *j = int64_values(batch.children[1]);
+        const float *d = (const float *)batch.children[2]->buffers[1] + batch.children[2]->offset;
+        for (int64_t r = 0; r < batch.length; r++) {
+            CHECK(i[r] < j[r]);
+            CHECK(d[r] >= 0.0f && d[r] <= 1.0f);
+            CHECK(rows < cap);
+            pairs[rows++] = (pair_t){.i = i[r], .j = j[r], .d = d[r]};
+        }
+        batch.release(&batch);
+    }
+    out->release(out);
+    return rows;
+}
+
 static void version(void) {
     CHECK(strcmp(df_version(), DF_VERSION) == 0);
 }
@@ -233,7 +271,8 @@ static void sketch_and_distances(int32_t n_threads) {
                           .seed = 1337,
                           .bbits = 16,
                           .weighted = false,
-                          .raw_counts = false};
+                          .raw_counts = false,
+                          .data_version = 0};
     struct ArrowArrayStream input;
     make_producer(&input);
     producer_releases = 0;
@@ -259,31 +298,8 @@ static void sketch_and_distances(int32_t n_threads) {
     df_tree_free(tree);
     df_ctx_free(ctx);
 
-    struct ArrowSchema schema;
-    CHECK(out.get_schema(&out, &schema) == 0);
-    CHECK(strcmp(schema.format, "+s") == 0 && schema.n_children == 3);
-    schema.release(&schema);
-
-    int64_t rows = 0;
-    for (;;) {
-        struct ArrowArray batch;
-        CHECK(out.get_next(&out, &batch) == 0);
-        if (batch.release == NULL) {
-            break; /* the end */
-        }
-        CHECK(batch.n_children == 3);
-        const int64_t *i = int64_values(batch.children[0]);
-        const int64_t *j = int64_values(batch.children[1]);
-        const float *d = (const float *)batch.children[2]->buffers[1] + batch.children[2]->offset;
-        for (int64_t r = 0; r < batch.length; r++) {
-            CHECK(i[r] < j[r]);
-            CHECK(d[r] >= 0.0f && d[r] <= 1.0f);
-        }
-        rows += batch.length;
-        batch.release(&batch);
-    }
-    CHECK(rows == 3); /* 3 samples, 3 pairs */
-    out.release(&out);
+    pair_t pairs[3];
+    CHECK(read_pairs(&out, pairs, 3) == 3); /* 3 samples, 3 pairs */
 }
 
 /* A rejected call still consumes its input stream, exactly once. */
@@ -293,7 +309,8 @@ static void bad_params_still_release_the_input(void) {
     df_tree_t *tree = NULL;
     CHECK(df_tree_new(ctx, PARENT, LENS, N_NODES, &tree) == DF_OK);
 
-    df_params_t params = {.method = DF_METHOD_DMH, .k = 0, .seed = 1337, .bbits = 16};
+    df_params_t params = {
+        .method = DF_METHOD_DMH, .k = 0, .seed = 1337, .bbits = 16, .data_version = 0};
     struct ArrowArrayStream input;
     make_producer(&input);
     producer_releases = 0;
@@ -306,6 +323,121 @@ static void bad_params_still_release_the_input(void) {
 
     df_tree_free(tree);
     df_ctx_free(ctx);
+}
+
+/* Sets sketched from the same tree and parameters share a fingerprint; another
+ * data_version gives another one. */
+static void fingerprints(void) {
+    df_ctx_t *ctx = NULL;
+    CHECK(df_ctx_new(NULL, &ctx) == DF_OK);
+    df_tree_t *tree = NULL;
+    CHECK(df_tree_new(ctx, PARENT, LENS, N_NODES, &tree) == DF_OK);
+
+    uint8_t fp[3][DF_FINGERPRINT_LEN] = {{0}};
+    for (int i = 0; i < 3; i++) {
+        df_params_t params = {.method = DF_METHOD_DMH,
+                              .k = 64,
+                              .seed = 1337,
+                              .bbits = 16,
+                              .weighted = false,
+                              .raw_counts = false,
+                              .data_version = (uint64_t)(i == 2)};
+        struct ArrowArrayStream input;
+        make_producer(&input);
+        df_sketches_t *sketches = NULL;
+        CHECK(df_sketch(ctx, tree, &params, &input, 3, NULL, &sketches) == DF_OK);
+        CHECK(df_sketches_fingerprint(sketches, fp[i]) == DF_OK);
+        df_sketches_free(sketches);
+    }
+    CHECK(memcmp(fp[0], fp[1], DF_FINGERPRINT_LEN) == 0);
+    CHECK(memcmp(fp[0], fp[2], DF_FINGERPRINT_LEN) != 0);
+    CHECK(df_sketches_fingerprint(NULL, fp[0]) == DF_ERR_NULL_POINTER);
+
+    df_tree_free(tree);
+    df_ctx_free(ctx);
+}
+
+/* Export a set, pass the stream straight to import, and get the same set back:
+ * the same fingerprint, ids and distances. The export is read after the set it
+ * came from is freed, and the imported set outlives its tree and context.
+ * Under another data_version the same rows are refused, and still consumed. */
+static void export_and_import(int32_t n_threads) {
+    df_config_t cfg = {.n_threads = n_threads, .batch_rows = 64}; /* 1 row per batch at k = 64 */
+    df_ctx_t *ctx = NULL;
+    CHECK(df_ctx_new(&cfg, &ctx) == DF_OK);
+    df_tree_t *tree = NULL;
+    CHECK(df_tree_new(ctx, PARENT, LENS, N_NODES, &tree) == DF_OK);
+
+    df_params_t params = {.method = DF_METHOD_DMH,
+                          .k = 64,
+                          .seed = 1337,
+                          .bbits = 32,
+                          .weighted = false,
+                          .raw_counts = false,
+                          .data_version = 7};
+    struct ArrowArrayStream input;
+    make_producer(&input);
+    df_sketches_t *original = NULL;
+    CHECK(df_sketch(ctx, tree, &params, &input, 3, NULL, &original) == DF_OK);
+    uint8_t fp[2][DF_FINGERPRINT_LEN];
+    CHECK(df_sketches_fingerprint(original, fp[0]) == DF_OK);
+    struct ArrowArrayStream d;
+    CHECK(df_distances(ctx, original, &d) == DF_OK);
+    pair_t want[3];
+    CHECK(read_pairs(&d, want, 3) == 3);
+
+    struct ArrowArrayStream rows;
+    CHECK(df_sketches_export(ctx, original, &rows) == DF_OK);
+    df_sketches_free(original);
+
+    /* The columns as a C consumer sees them. */
+    struct ArrowSchema schema;
+    CHECK(rows.get_schema(&rows, &schema) == 0);
+    CHECK(strcmp(schema.format, "+s") == 0 && schema.n_children == 3);
+    CHECK(strcmp(schema.children[0]->name, "sample_idx") == 0);
+    CHECK(strcmp(schema.children[0]->format, "l") == 0);
+    CHECK(strcmp(schema.children[1]->name, "fingerprint") == 0);
+    CHECK(strcmp(schema.children[1]->format, "w:32") == 0);
+    CHECK(strcmp(schema.children[2]->name, "sketch") == 0);
+    CHECK(strcmp(schema.children[2]->format, "+w:64") == 0);
+    CHECK(schema.children[2]->n_children == 1);
+    CHECK(strcmp(schema.children[2]->children[0]->format, "I") == 0); /* uint32 */
+    schema.release(&schema);
+
+    df_sketches_t *imported = NULL;
+    CHECK(df_sketches_import(ctx, tree, &params, &rows, &imported) == DF_OK);
+    CHECK(rows.release == NULL);
+
+    /* Another key: the same rows, refused, and the stream still consumed. */
+    CHECK(df_sketches_export(ctx, imported, &rows) == DF_OK);
+    df_params_t other = params;
+    other.data_version = 8;
+    df_sketches_t *refused = (df_sketches_t *)&other; /* must come back NULL */
+    CHECK(df_sketches_import(ctx, tree, &other, &rows, &refused) == DF_ERR_INVALID_INPUT);
+    CHECK(refused == NULL);
+    CHECK(rows.release == NULL);
+    CHECK(strstr(df_ctx_last_error(ctx), "fingerprint") != NULL);
+    df_tree_free(tree);
+
+    CHECK(df_sketches_fingerprint(imported, fp[1]) == DF_OK);
+    CHECK(memcmp(fp[0], fp[1], DF_FINGERPRINT_LEN) == 0);
+    struct ArrowArray ids;
+    struct ArrowSchema ids_schema;
+    CHECK(df_sketch_samples(imported, &ids, &ids_schema) == DF_OK);
+    CHECK(ids.length == 3);
+    const int64_t *id = int64_values(&ids);
+    CHECK(id[0] == 0 && id[1] == 1 && id[2] == 2);
+    ids.release(&ids);
+    ids_schema.release(&ids_schema);
+
+    CHECK(df_distances(ctx, imported, &d) == DF_OK);
+    df_ctx_free(ctx);
+    df_sketches_free(imported);
+    pair_t got[3];
+    CHECK(read_pairs(&d, got, 3) == 3);
+    for (int r = 0; r < 3; r++) {
+        CHECK(got[r].i == want[r].i && got[r].j == want[r].j && got[r].d == want[r].d);
+    }
 }
 
 static void frees_accept_null(void) {
@@ -322,6 +454,9 @@ int main(void) {
     sketch_and_distances(2); /* a dedicated pool */
     sketch_and_distances(0); /* rayon's global pool */
     bad_params_still_release_the_input();
+    fingerprints();
+    export_and_import(2); /* a dedicated pool */
+    export_and_import(0); /* rayon's global pool */
     frees_accept_null();
     puts("dartunifrac C harness: ok");
     return 0;

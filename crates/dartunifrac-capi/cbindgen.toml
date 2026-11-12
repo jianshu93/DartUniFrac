@@ -47,36 +47,54 @@ header = """
  *   to inspect on every status. On success the caller owns what was written,
  *   and must call its release callback.
  *
- * Input stream. df_sketch consumes its input stream on every status, success
- *   or failure: on return its release is NULL, and the producer's release
- *   callback has run exactly once. A stream that was already released is
- *   DF_ERR_ARROW, and its release is not called again. The producer's
- *   callbacks are called from Rust, so they must return normally: a C++
- *   exception or a longjmp out of one is undefined behaviour, not a status.
+ * Input stream. df_sketch and df_sketches_import consume their input stream
+ *   on every status, success or failure: on return its release is NULL, and
+ *   the producer's release callback has run exactly once. A stream that was
+ *   already released is DF_ERR_ARROW, and its release is not called again.
+ *   The producer's callbacks are called from Rust, so they must return
+ *   normally: a C++ exception or a longjmp out of one is undefined behaviour,
+ *   not a status.
  *
- * Output streams. A stream from df_distances holds what it needs, including
- *   its context's pool, so it stays valid after df_sketches_free() and
- *   df_ctx_free(). Release it when done. A dedicated pool's threads are told
- *   to exit, but not joined, when the last of the context and its streams is
- *   gone, so do not unload the library just after that.
+ * Output streams. A stream from df_distances or df_sketches_export holds what
+ *   it needs, including its context's pool, so it stays valid after
+ *   df_sketches_free() and df_ctx_free(). Release it when done. A dedicated
+ *   pool's threads are told to exit, but not joined, when the last of the
+ *   context and its streams is gone, so do not unload the library just after
+ *   that.
+ *
+ * Fingerprints. Every sketch set carries a DF_FINGERPRINT_LEN-byte sha256 of
+ *   what must match for two sets to be comparable: the tree's exact parent and
+ *   branch length arrays (so its node numbering too), every df_params_t field
+ *   including data_version, the DartMinHash release, this library's version
+ *   (DF_VERSION), the target platform and its libm, and what this build
+ *   actually sketches on a fixed self-test fixture (computed once per process,
+ *   in the pool of the first context that sketches). It depends on nothing
+ *   about the samples, so sets sketched in separate calls from one tree and one
+ *   df_params_t share it. df_sketches_export writes it on every row, and
+ *   df_sketches_import refuses any row that does not carry the one its tree
+ *   and df_params_t give. So rows stored by one build stop importing after an
+ *   upgrade of this library, or on another platform, by design: tmh draws
+ *   -ln(u), libm implementations differ by an ulp, and that changes every
+ *   sketch value.
  *
  * Threads. A df_ctx_t may be used by one thread at a time. A df_tree_t and a
  *   df_sketches_t are immutable once built and may be shared across threads
- *   and contexts. df_sketch reads its input inside the context's pool, so the
- *   producer's get_schema, get_next and release may run on a pool thread,
- *   though never two at once; when a call fails before reading, release runs
- *   on the calling thread. A stream from df_distances computes each batch in
- *   its context's pool, whichever thread calls get_next. Streams are not bound
- *   by their context's one-thread rule: several may be read at once on
- *   different threads, each by one thread at a time. A producer callback must
- *   not call df_* functions on the context that is reading it.
+ *   and contexts. df_sketch and df_sketches_import read their input inside
+ *   the context's pool, so the producer's get_schema, get_next and release may
+ *   run on a pool thread, though never two at once; when a call fails before
+ *   reading, release runs on the calling thread. A stream from df_distances or
+ *   df_sketches_export builds each batch in its context's pool, whichever
+ *   thread calls get_next. Streams are not bound by their context's one-thread
+ *   rule: several may be read at once on different threads, each by one thread
+ *   at a time. A producer callback must not call df_* functions on the
+ *   context that is reading it.
  *
  * Panics. Built with panic = "unwind" (Rust's default), a panic never reaches
  *   C: a fallible call returns DF_ERR_PANIC, the df_*_free() functions swallow
- *   it, and df_*_last_error() returns NULL. Inside a stream from df_distances,
- *   a panic becomes a stream error whose message contains "panic: ", and the
- *   stream then ends. Built with panic = "abort", a panic aborts the process
- *   instead.
+ *   it, and df_*_last_error() returns NULL. Inside a stream from df_distances
+ *   or df_sketches_export, a panic becomes a stream error whose message
+ *   contains "panic: ", and the stream then ends. Built with panic = "abort",
+ *   a panic aborts the process instead.
  *
  * Known limits. An allocation failure aborts the process, as it does anywhere
  *   in Rust. n_samples, k and batch_rows each size an allocation up front, so
