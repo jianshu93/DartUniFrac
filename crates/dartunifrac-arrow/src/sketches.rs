@@ -262,14 +262,17 @@ pub fn sketches_from_stream<R: RecordBatchReader>(
     })
 }
 
+/// One sketch per row, as [`Sketches`] holds them.
+type Rows<T> = Vec<Vec<T>>;
+
 /// Drain `reader` into sketches of `T`, then put them in `sample_idx` order.
 fn read<T: ArrowPrimitiveType>(
     reader: impl RecordBatchReader,
     k: usize,
     fingerprint: &[u8; FINGERPRINT_LEN],
-) -> Result<(Vec<Vec<T::Native>>, Vec<i64>), MarshalError> {
+) -> Result<(Rows<T::Native>, Vec<i64>), MarshalError> {
     let mut ids: Vec<i64> = Vec::new();
-    let mut rows: Vec<Vec<T::Native>> = Vec::new();
+    let mut rows: Rows<T::Native> = Vec::new();
     let mut first = 0usize; // the stream's row number of this batch's row 0
     for batch in reader {
         let batch = batch.map_err(|e| MarshalError::Stream(e.to_string()))?;
@@ -422,7 +425,7 @@ fn read_sketches<T: ArrowPrimitiveType>(
     first: usize,
     ids: &Int64Array,
     k: usize,
-    out: &mut Vec<Vec<T::Native>>,
+    out: &mut Rows<T::Native>,
 ) -> Result<(), MarshalError> {
     let col = column(batch, SKETCH)?;
     match col.data_type() {
@@ -484,7 +487,7 @@ fn take_rows<T: ArrowPrimitiveType>(
     first: usize,
     ids: &Int64Array,
     k: usize,
-    out: &mut Vec<Vec<T::Native>>,
+    out: &mut Rows<T::Native>,
 ) -> Result<(), MarshalError> {
     // Checked against the list's declared element type already, so this is
     // only reachable from an array that contradicts its own schema.
@@ -524,10 +527,7 @@ fn take_rows<T: ArrowPrimitiveType>(
 /// Put the rows in `sample_idx` order, refusing a repeated one, and naming the
 /// first two rows that hold it. The index of a row here is its row number in
 /// the stream.
-fn ascending<T>(
-    ids: Vec<i64>,
-    mut rows: Vec<Vec<T>>,
-) -> Result<(Vec<Vec<T>>, Vec<i64>), MarshalError> {
+fn ascending<T>(ids: Vec<i64>, mut rows: Rows<T>) -> Result<(Rows<T>, Vec<i64>), MarshalError> {
     let mut order: Vec<usize> = (0..ids.len()).collect();
     // The row breaks ties, so a repeat is reported at its first two rows.
     order.sort_unstable_by_key(|&i| (ids[i], i));

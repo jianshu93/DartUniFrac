@@ -519,7 +519,8 @@ fn a_list_row_of_another_length_is_rejected_naming_the_row() {
 /// row 1.
 #[test]
 fn a_null_anywhere_in_a_row_is_rejected_naming_the_row() {
-    let cases: [(&str, &str, fn(&mut Row)); 4] = [
+    type Spoil = fn(&mut Row);
+    let cases: [(&str, &str, Spoil); 4] = [
         ("a null sample_idx", SAMPLE_IDX, |r| r.id = None),
         ("a null fingerprint", FINGERPRINT, |r| r.fp = None),
         ("a null sketch", SKETCH, |r| r.sketch = None),
