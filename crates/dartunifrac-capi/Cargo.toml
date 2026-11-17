@@ -31,6 +31,16 @@ dartunifrac-core = { path = "../dartunifrac-core", version = "0.3.2" }
 dartunifrac-arrow = { path = "../dartunifrac-arrow", version = "0.3.2" }
 # The per-context thread pool.
 rayon = "1.10"
+# The fingerprint's hash: sha256, jianshu93's choice (PR #2). Pure Rust; the
+# default features add only std.
+sha2 = { version = "0.10", default-features = false }
+# Not called from here. Pinned exactly because its version is a term of every
+# fingerprint (DARTMINHASH_VERSION in src/fingerprint.rs): a caret range would
+# let a consumer's lock resolve another release under a key that names this one.
+# Bump the two together; a test reads Cargo.lock to hold them to each other.
+# Core's dependency is the same crate with the same (default) features, so this
+# changes nothing it builds. Its `mixed_tab` feature must never be enabled.
+dartminhash = "=0.1.8"
 
 [build-dependencies]
 # Generates dartunifrac.h from the source in build.rs, so the header cannot drift

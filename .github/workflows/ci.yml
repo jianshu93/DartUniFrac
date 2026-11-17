@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14] # x86_64-linux, aarch64-darwin
+        os: [ubuntu-latest, macos-15] # x86_64-linux, aarch64-darwin
     env:
       # rust-toolchain.toml pins nightly for the binary's anndists dependency.
       # These crates are required to build on stable, and RUSTUP_TOOLCHAIN takes

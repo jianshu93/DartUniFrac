@@ -753,6 +753,7 @@ name = "dartunifrac-arrow"
 version = "0.3.2"
 dependencies = [
  "arrow-array",
+ "arrow-buffer",
  "arrow-schema",
  "dartunifrac-core",
  "rayon",
@@ -765,9 +766,11 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "cbindgen",
+ "dartminhash",
  "dartunifrac-arrow",
  "dartunifrac-core",
  "rayon",
+ "sha2",
 ]
 
 [[package]]
