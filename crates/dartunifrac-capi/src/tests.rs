@@ -13,10 +13,12 @@ use arrow_array::ffi_stream::{FFI_ArrowArrayStream, RecordBatchStreamReader};
 use arrow_array::{Int64Array, RecordBatch, RecordBatchIterator, RecordBatchReader};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use dartunifrac_arrow::{Sketches, distances_reader, table_from_stream, trim_to_bbits};
-use dartunifrac_core::{Method, NO_PARENT, SketchParams, Table, Tree, build_sketches};
+use dartunifrac_core::{
+    Method, NO_PARENT, SketchParams, Table, Tree, build_sketches, unifrac_from_sketches,
+};
 
 use crate::fingerprint::{
-    DARTMINHASH_VERSION, KEY_TAG, Key, SELFTEST_RUNS, libm_digest, libm_digest_with,
+    DARTMINHASH_VERSION, KEY_TAG, Key, SELFTEST_RUNS, hex, libm_digest, libm_digest_with,
     selftest_digest, selftest_digest_with, tree_digest,
 };
 use crate::guard::{ApiError, THREAD_LAST_ERROR, guard, guard_cstr, guard_void, record_error};
@@ -1906,10 +1908,11 @@ fn every_key_field_and_the_format_tag_reach_the_fingerprint() {
             },
         ),
         // The hash family: another DartMinHash release may hash differently.
+        // Not a real next release, so no future pin can equal it.
         (
             "dartminhash",
             Key {
-                dartminhash: "0.1.9",
+                dartminhash: "999.0.0",
                 ..base
             },
         ),
@@ -1972,10 +1975,6 @@ fn moving_a_character_between_two_key_strings_changes_the_fingerprint() {
         ..base
     };
     assert_ne!(base.digest(), moved.digest());
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Known answers. Every other fingerprint test is relative, so a change to the
@@ -2821,5 +2820,453 @@ fn a_one_row_import_is_kept_and_has_no_pairs() {
     unsafe {
         df_sketches_free(one);
         df_sketches_free(s);
+    }
+}
+
+// ===========================================================================
+// Cross distances (M7)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// df_distances_cross that must succeed, drained.
+fn cross(w: &World, rows: *const df_sketches_t, cols: *const df_sketches_t) -> Vec<RecordBatch> {
+    let mut out = FFI_ArrowArrayStream::empty();
+    assert_eq!(
+        unsafe { df_distances_cross(w.ctx, rows, cols, &mut out) },
+        DF_OK,
+        "{}",
+        w.error()
+    );
+    drain_stream(out)
+}
+
+/// Pairs in `(i, j)` order. A cross stream comes tile by tile, so comparisons
+/// that are about values rather than order sort first.
+fn by_pair(mut v: Vec<(i64, i64, u32)>) -> Vec<(i64, i64, u32)> {
+    v.sort_unstable_by_key(|t| (t.0, t.1));
+    v
+}
+
+/// The naive cross of two sets' own values: every rows × cols pair through the
+/// kernel, row-major. Widening to u64 keeps every slot's equality, so the
+/// distances are the ones at the sets' width.
+fn naive_cross(rows: *const df_sketches_t, cols: *const df_sketches_t) -> Vec<(i64, i64, u32)> {
+    let (r, c) = (handle(rows), handle(cols));
+    let ((wr, a), (wc, b)) = (sketch_values(&r.sketches), sketch_values(&c.sketches));
+    assert_eq!(wr, wc, "the reference compares one width");
+    let mut out = Vec::new();
+    for (&i, x) in r.ids.iter().zip(&a) {
+        for (&j, y) in c.ids.iter().zip(&b) {
+            out.push((i, j, unifrac_from_sketches(x, y, r.weighted).to_bits()));
+        }
+    }
+    out
+}
+
+/// `n` deterministic samples on the fixture tree's seven tips, each touching
+/// three to five of them with counts of 1 to 9, and each sample's total. Enough
+/// samples for anchors and two batches, which `four_samples` is not.
+fn synthetic_samples(n: i64) -> (Vec<(i64, i64, f64)>, Vec<f64>) {
+    const TIPS: [i64; 7] = [3, 5, 6, 8, 10, 11, 12];
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let (mut rows, mut totals) = (Vec::new(), vec![0.0; n as usize]);
+    for s in 0..n {
+        let touched = 3 + (next() % 3) as usize;
+        let start = next() as usize % TIPS.len();
+        for t in 0..touched {
+            // A stride of 3 is coprime with 7, so the tips are distinct.
+            let tip = TIPS[(start + 3 * t) % TIPS.len()];
+            let count = (1 + next() % 9) as f64;
+            rows.push((s, tip, count));
+            totals[s as usize] += count;
+        }
+    }
+    (rows, totals)
+}
+
+fn samples_in(rows: &[(i64, i64, f64)], ids: std::ops::Range<i64>) -> Vec<(i64, i64, f64)> {
+    rows.iter().copied().filter(|r| ids.contains(&r.0)).collect()
+}
+
+/// Two separately sketched sets of the synthetic samples: 0..5 and 5..12.
+fn two_sets(w: &World, p: &df_params_t) -> (*mut df_sketches_t, *mut df_sketches_t) {
+    let (rows, totals) = synthetic_samples(12);
+    (
+        sketch_table(w, p, &samples_in(&rows, 0..5), &totals),
+        sketch_table(w, p, &samples_in(&rows, 5..12), &totals),
+    )
+}
+
+/// A raw handle that may cross threads, for the test that shares one set.
+#[derive(Clone, Copy)]
+struct Shared(*const df_sketches_t);
+// SAFETY: the header's contract: a df_sketches_t is immutable once built and
+// may be shared across threads and contexts. That is what the test checks.
+unsafe impl Send for Shared {}
+unsafe impl Sync for Shared {}
+
+impl Shared {
+    /// Through a method, so a closure captures the whole wrapper, which is
+    /// Send, rather than (under edition 2024's disjoint capture) its pointer.
+    fn get(self) -> *const df_sketches_t {
+        self.0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Values
+// ---------------------------------------------------------------------------
+
+/// SC1 through the C ABI: every rows × cols pair of two separately sketched
+/// sets, with each side's own ids, bit for bit with the kernel on the sets'
+/// own values, for every method, weighting and width.
+#[test]
+fn df_distances_cross_matches_a_naive_cross_bit_for_bit() {
+    let w = World::with(0, 4); // tiles of 2 × 2, so the rectangle spans several
+    for (_, method) in METHODS {
+        for (weighted, raw) in WEIGHTINGS {
+            for bbits in [16, 32, 64] {
+                let p = params(method, weighted, raw, bbits);
+                let (a, b) = two_sets(&w, &p);
+                let label = format!("method {method}, weighted {weighted}, raw {raw}, bbits {bbits}");
+                assert_eq!(samples_of(a), vec![0, 1, 2, 3, 4], "{label}");
+                assert_eq!(samples_of(b), vec![5, 6, 7, 8, 9, 10, 11], "{label}");
+                let got = by_pair(bits(&cross(&w, a, b)));
+                assert_eq!(got.len(), 35, "{label}: every rows × cols pair once");
+                assert_eq!(got, by_pair(naive_cross(a, b)), "{label}");
+                assert!(got.iter().any(|t| t.2 != got[0].2), "{label}: distances do not vary");
+                unsafe {
+                    df_sketches_free(a);
+                    df_sketches_free(b);
+                }
+            }
+        }
+    }
+}
+
+/// SC2, the shape miint's progressive PCoA uses: anchors sketched once and
+/// kept (stored through export and import, as miint will keep them), batches
+/// sketched one at a time, and every block a batch needs assembled from
+/// df_distances and df_distances_cross. Each assembled pair equals the joint
+/// run's, and together they are the joint run, each pair once, cross-batch
+/// pairs included. Small tiles and the default both.
+#[test]
+fn blocks_assembled_the_progressive_way_equal_the_joint_run() {
+    let (rows, totals) = synthetic_samples(12);
+    for batch_rows in [4u64, 0] {
+        let w = World::with(0, batch_rows);
+        for (_, method) in METHODS {
+            for (weighted, raw) in WEIGHTINGS {
+                for bbits in [16, 32, 64] {
+                    let p = params(method, weighted, raw, bbits);
+                    let label = format!(
+                        "batch_rows {batch_rows}, method {method}, weighted {weighted}, raw {raw}, bbits {bbits}"
+                    );
+                    let all = sketch_table(&w, &p, &rows, &totals);
+                    let joint = by_pair(bits(&distances(&w, all)));
+                    assert_eq!(joint.len(), 66, "{label}");
+                    assert!(joint.iter().any(|t| t.2 != joint[0].2), "{label}: distances do not vary");
+
+                    let sketched = sketch_table(&w, &p, &samples_in(&rows, 0..4), &totals);
+                    let mut kept = stored(&drain_stream(export(&w, sketched)));
+                    let anchors = import_ok(&w, &p, &mut kept.stream);
+                    let batch_a = sketch_table(&w, &p, &samples_in(&rows, 4..8), &totals);
+                    let batch_b = sketch_table(&w, &p, &samples_in(&rows, 8..12), &totals);
+
+                    let mut blocks = Vec::new();
+                    blocks.push(distances(&w, anchors)); // anchor × anchor, once
+                    for batch in [batch_a, batch_b] {
+                        blocks.push(distances(&w, batch)); // batch × batch
+                        blocks.push(cross(&w, batch, anchors)); // batch × anchors
+                    }
+                    blocks.push(cross(&w, batch_a, batch_b)); // across batches
+                    if batch_rows == 4 {
+                        for batch in blocks.iter().flatten() {
+                            assert!(batch.num_rows() <= 4, "{label}: a batch exceeds batch_rows");
+                        }
+                    }
+                    let assembled = by_pair(
+                        blocks
+                            .iter()
+                            .flat_map(|b| bits(b))
+                            .map(|(i, j, d)| (i.min(j), i.max(j), d))
+                            .collect(),
+                    );
+                    assert_eq!(assembled, joint, "{label}");
+                    unsafe {
+                        for s in [all, sketched, anchors, batch_a, batch_b] {
+                            df_sketches_free(s);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The fingerprint
+// ---------------------------------------------------------------------------
+
+/// SC3: two sets whose fingerprints differ are not comparable, whichever side
+/// each is on. The call fails before anything is streamed, and names both
+/// fingerprints, so the caller can tell which store a set came from. Each
+/// df_params_t field and the tree in turn.
+#[test]
+fn sets_whose_fingerprints_differ_are_refused_naming_both() {
+    let w = World::new();
+    let base = params(DF_METHOD_DMH, true, false, 16);
+    let (rows, totals) = synthetic_samples(12);
+    let a = sketch_table(&w, &base, &samples_in(&rows, 0..5), &totals);
+    let elsewhere = nudged_tree();
+    let mut cases: Vec<(&str, &World, df_params_t)> = key_variants(&base)
+        .into_iter()
+        .map(|(field, p)| (field, &w, p))
+        .collect();
+    cases.push(("tree", &elsewhere, df_params_t { ..base }));
+    for (label, world, p) in cases {
+        let b = sketch_table(world, &p, &samples_in(&rows, 5..12), &totals);
+        for (rows_side, cols_side) in [(a, b), (b, a)] {
+            let mut out = garbage::<FFI_ArrowArrayStream>();
+            assert_eq!(
+                unsafe { df_distances_cross(w.ctx, rows_side, cols_side, out.as_mut_ptr()) },
+                DF_ERR_INVALID_INPUT,
+                "{label}"
+            );
+            assert!(released_stream(out), "{label}: the stream was not reset");
+            let m = w.error();
+            assert!(
+                m.contains("fingerprint")
+                    && m.contains(&hex(&fingerprint_of(a)))
+                    && m.contains(&hex(&fingerprint_of(b))),
+                "{label}: should name both fingerprints; got {m:?}"
+            );
+        }
+        unsafe { df_sketches_free(b) };
+    }
+    // Under one key the same samples cross: the refusals are the key's.
+    let b = sketch_table(&w, &base, &samples_in(&rows, 5..12), &totals);
+    assert_eq!(bits(&cross(&w, a, b)).len(), 35);
+    unsafe {
+        df_sketches_free(a);
+        df_sketches_free(b);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases (G1: no special handling)
+// ---------------------------------------------------------------------------
+
+/// The same set on both sides is the full square: every pair in both orders
+/// with one value, a zero diagonal, and the upper half df_distances' triangle.
+#[test]
+fn the_same_set_on_both_sides_gives_the_full_square() {
+    let w = World::with(0, 4);
+    let s = sketch_ok(&w, &dmh(true), &common::test_rows(), 3);
+    let got = by_pair(bits(&cross(&w, s, s)));
+    assert_eq!(got.len(), 9);
+    for &(i, j, d) in &got {
+        if i == j {
+            assert_eq!(d, 0f32.to_bits(), "sample {i} against itself");
+        } else {
+            assert!(got.contains(&(j, i, d)), "({i}, {j}) is not symmetric");
+        }
+    }
+    let upper: Vec<_> = got.iter().copied().filter(|t| t.0 < t.1).collect();
+    assert_eq!(upper, by_pair(bits(&distances(&w, s))));
+    unsafe { df_sketches_free(s) };
+}
+
+/// df_sketch of one sample gives an empty set, and an empty side gives an
+/// empty stream, on either side, with a readable schema.
+#[test]
+fn an_empty_set_on_either_side_gives_an_empty_stream() {
+    let w = World::new();
+    let p = dmh(false);
+    let rows = common::test_rows();
+    let s = sketch_ok(&w, &p, &rows, 3);
+    let one: Vec<_> = rows.iter().copied().filter(|r| r.0 == 0).collect();
+    let empty = sketch_ok(&w, &p, &one, 3);
+    assert!(samples_of(empty).is_empty());
+    for (label, r, c) in [("rows", empty, s), ("cols", s, empty), ("both", empty, empty)] {
+        assert!(cross(&w, r, c).is_empty(), "an empty {label} side should give no batches");
+    }
+    unsafe {
+        df_sketches_free(empty);
+        df_sketches_free(s);
+    }
+}
+
+/// A set of one, which only an import can make, crosses like any other: M6
+/// kept one-row imports for exactly this.
+#[test]
+fn a_one_row_import_crosses_like_any_set() {
+    let w = World::new();
+    let p = dmh(true);
+    let s = sketch_ok(&w, &p, &common::test_rows(), 3);
+    let rows = drain_stream(export(&w, s));
+    let mut inp = stored(&[rows[0].slice(1, 1)]);
+    let one = import_ok(&w, &p, &mut inp.stream);
+    let got = by_pair(bits(&cross(&w, one, s)));
+    assert_eq!(
+        got.iter().map(|t| (t.0, t.1)).collect::<Vec<_>>(),
+        vec![(1, 0), (1, 1), (1, 2)]
+    );
+    assert_eq!(got, by_pair(naive_cross(one, s)));
+    unsafe {
+        df_sketches_free(one);
+        df_sketches_free(s);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The stream's contract (SC5)
+// ---------------------------------------------------------------------------
+
+/// Like df_distances' stream, a cross stream holds what it needs: it outlives
+/// both sets and the context.
+#[test]
+fn a_cross_stream_outlives_its_ctx_and_both_sets() {
+    let threads = if cfg!(target_family = "wasm") { 0 } else { 2 };
+    let w = World::with(threads, 4);
+    let (a, b) = two_sets(&w, &dmh(true));
+    let expected = bits(&cross(&w, a, b));
+    let mut stream = FFI_ArrowArrayStream::empty();
+    assert_eq!(unsafe { df_distances_cross(w.ctx, a, b, &mut stream) }, DF_OK);
+    unsafe {
+        df_sketches_free(a);
+        df_sketches_free(b);
+    }
+    drop(w);
+    let got = bits(&drain_stream(stream));
+    assert_eq!(got, expected);
+    assert_eq!(got.len(), 35);
+}
+
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "rayon cannot spawn threads on wasm")]
+fn df_distances_cross_gives_its_stream_the_ctx_pool() {
+    let w = World::with_threads(2);
+    let (a, b) = two_sets(&w, &dmh(false));
+    let holders = || Arc::strong_count(unsafe { &*w.ctx }.pool.as_ref().unwrap());
+    assert_eq!(holders(), 1);
+    let mut stream = FFI_ArrowArrayStream::empty();
+    assert_eq!(unsafe { df_distances_cross(w.ctx, a, b, &mut stream) }, DF_OK);
+    assert_eq!(holders(), 2, "the stream does not hold the context's pool");
+    drop(stream);
+    assert_eq!(holders(), 1, "releasing the stream did not let go of the pool");
+    unsafe {
+        df_sketches_free(a);
+        df_sketches_free(b);
+    }
+}
+
+/// The thread count is a resource choice, so it must never show in a result,
+/// order included.
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "rayon cannot spawn threads on wasm")]
+fn cross_output_is_identical_whatever_the_thread_count() {
+    let run = |threads: i32| {
+        let w = World::with(threads, 4);
+        let (a, b) = two_sets(&w, &dmh(true));
+        let got = bits(&cross(&w, a, b));
+        unsafe {
+            df_sketches_free(a);
+            df_sketches_free(b);
+        }
+        got
+    };
+    assert_eq!(run(1), run(distinct_thread_count()));
+}
+
+/// miint fetches blocks from several worker threads at once, each crossing its
+/// own batch against one shared anchor set. The header allows it (a set is
+/// immutable and may be shared across threads and contexts); this holds it to
+/// that. Every thread has its own context, and gets what one thread alone gets
+/// on a context configured the same way.
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "no threads to spawn on wasm")]
+fn one_anchor_set_crossed_from_several_threads_at_once_gives_one_answer() {
+    let w = World::new();
+    let p = dmh(true);
+    let (rows, totals) = synthetic_samples(12);
+    let anchors = sketch_table(&w, &p, &samples_in(&rows, 0..4), &totals);
+    let batches: Vec<*mut df_sketches_t> = [4..6, 6..8, 8..10, 10..12]
+        .into_iter()
+        .map(|ids| sketch_table(&w, &p, &samples_in(&rows, ids), &totals))
+        .collect();
+    // The threads' own configuration: the order depends on batch_rows (G2).
+    let solo = World::with(2, 4);
+    let alone: Vec<_> = batches.iter().map(|&b| bits(&cross(&solo, b, anchors))).collect();
+    let shared = Shared(anchors);
+    let together: Vec<Vec<(i64, i64, u32)>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = batches
+            .iter()
+            .map(|&b| {
+                let batch = Shared(b);
+                scope.spawn(move || {
+                    let own = World::with(2, 4);
+                    let mut last = Vec::new();
+                    for _ in 0..8 {
+                        last = bits(&cross(&own, batch.get(), shared.get()));
+                    }
+                    last
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("no thread panics")).collect()
+    });
+    assert_eq!(together, alone);
+    unsafe {
+        for b in batches {
+            df_sketches_free(b);
+        }
+        df_sketches_free(anchors);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pointers
+// ---------------------------------------------------------------------------
+
+/// A NULL is a status, never a crash, and the stream is left released. A NULL
+/// ctx reports on the thread; otherwise on the ctx.
+#[test]
+fn df_distances_cross_null_pointers_return_a_status_and_reset_out() {
+    let w = World::new();
+    let (a, b) = two_sets(&w, &dmh(false));
+    for (label, ctx, rows, cols) in [
+        ("ctx", ptr::null_mut(), a.cast_const(), b.cast_const()),
+        ("rows", w.ctx, ptr::null(), b.cast_const()),
+        ("cols", w.ctx, a.cast_const(), ptr::null()),
+    ] {
+        clear_thread_error();
+        let mut out = garbage::<FFI_ArrowArrayStream>();
+        assert_eq!(
+            unsafe { df_distances_cross(ctx, rows, cols, out.as_mut_ptr()) },
+            DF_ERR_NULL_POINTER,
+            "{label}"
+        );
+        let msg = if ctx.is_null() { thread_error() } else { ctx_error(ctx) };
+        assert_eq!(msg, Some(format!("null pointer: {label}")));
+        assert!(released_stream(out), "{label}: the stream was not reset");
+    }
+    assert_eq!(
+        unsafe { df_distances_cross(w.ctx, a, b, ptr::null_mut()) },
+        DF_ERR_NULL_POINTER
+    );
+    assert_eq!(w.error(), "null pointer: out");
+    unsafe {
+        df_sketches_free(a);
+        df_sketches_free(b);
     }
 }

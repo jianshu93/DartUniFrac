@@ -27,15 +27,15 @@ use std::sync::Arc;
 
 use arrow_array::ffi::{FFI_ArrowArray, FFI_ArrowSchema, to_ffi};
 use arrow_array::ffi_stream::{FFI_ArrowArrayStream, RecordBatchStreamReader};
-use arrow_array::{Array, Int64Array};
+use arrow_array::{Array, Int64Array, RecordBatchReader};
 use dartunifrac_arrow::{
-    Sketches, distances_reader, sketches_from_stream, sketches_reader, table_from_stream,
-    tree_from_arrays, trim_to_bbits,
+    Sketches, cross_distances_reader, distances_reader, sketches_from_stream, sketches_reader,
+    table_from_stream, tree_from_arrays, trim_to_bbits,
 };
 use dartunifrac_core::{CoreError, Method, NO_PARENT, SketchParams, Tree, build_sketches};
 use rayon::ThreadPool;
 
-use fingerprint::{Key, tree_digest};
+use fingerprint::{Key, hex, tree_digest};
 use guard::{ApiError, guard, guard_cstr, guard_void, slice_or_empty};
 use stream::PoolReader;
 
@@ -176,6 +176,17 @@ fn run_in_pool<R: Send>(pool: Option<&ThreadPool>, f: impl FnOnce() -> R + Send)
         Some(pool) => pool.install(f),
         None => f(),
     }
+}
+
+/// `inner` as the stream a caller receives: each batch built in `ctx`'s pool,
+/// behind [`PoolReader`]'s panic barrier, holding the pool so that the stream
+/// outlives the context.
+fn pool_stream(ctx: &df_ctx_t, inner: Box<dyn RecordBatchReader + Send>) -> FFI_ArrowArrayStream {
+    FFI_ArrowArrayStream::new(Box::new(PoolReader {
+        inner,
+        pool: ctx.pool.clone(),
+        done: false,
+    }))
 }
 
 /// The pointer C sees for a last-error slot. It aliases the stored `CString`,
@@ -682,12 +693,7 @@ pub unsafe extern "C" fn df_sketches_export(
             sketches.fingerprint,
             (ctx.batch_rows / k).max(1),
         )?;
-        let reader = PoolReader {
-            inner,
-            pool: ctx.pool.clone(),
-            done: false,
-        };
-        unsafe { out.write(FFI_ArrowArrayStream::new(Box::new(reader))) };
+        unsafe { out.write(pool_stream(ctx, inner)) };
         Ok(())
     })
 }
@@ -782,12 +788,68 @@ pub unsafe extern "C" fn df_distances(
             sketches.weighted,
             ctx.batch_rows,
         )?;
-        let reader = PoolReader {
-            inner,
-            pool: ctx.pool.clone(),
-            done: false,
-        };
-        unsafe { out.write(FFI_ArrowArrayStream::new(Box::new(reader))) };
+        unsafe { out.write(pool_stream(ctx, inner)) };
+        Ok(())
+    })
+}
+
+/// Stream every pair of `rows` x `cols`: one row per pair, `(i int64, j int64,
+/// distance float32)`, where i is a sample_idx from `rows` and j one from
+/// `cols`. Each pair comes exactly once, with no i < j filter, so the same set
+/// on both sides gives the full square with a zero diagonal. Batches hold at
+/// most the context's batch_rows rows. Nothing is computed until the stream's
+/// get_next is called.
+///
+/// The two sets must carry the same fingerprint (see the header's contract),
+/// whatever they hold, an empty set included; otherwise the call fails naming
+/// both. Sets that share one cross exactly as their samples would compare in
+/// one df_distances over both, so new samples can be compared with stored ones
+/// without recomputing the stored pairs. With matching fingerprints, an empty
+/// set on either side gives a stream with that schema and no rows.
+///
+/// A known limit: the context's threads share out `rows` tile by tile, so a
+/// `rows` set of few samples uses them less well. With 8 threads, 16 rows x
+/// 5,000 cost 1.23 times as much per pair as 1,000 rows did, and fewer rows
+/// than threads leaves threads idle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn df_distances_cross(
+    ctx: *mut df_ctx_t,
+    rows: *const df_sketches_t,
+    cols: *const df_sketches_t,
+    out: *mut FFI_ArrowArrayStream,
+) -> df_status_t {
+    guard(ctx, || {
+        // SAFETY (every dereference here): the API contract.
+        if !out.is_null() {
+            unsafe { out.write(FFI_ArrowArrayStream::empty()) };
+        }
+        let ctx = unsafe { ctx.as_ref() }.ok_or_else(|| ApiError::null("ctx"))?;
+        let rows = unsafe { rows.as_ref() }.ok_or_else(|| ApiError::null("rows"))?;
+        let cols = unsafe { cols.as_ref() }.ok_or_else(|| ApiError::null("cols"))?;
+        if out.is_null() {
+            return Err(ApiError::null("out"));
+        }
+        // The fingerprint covers weighted, k and bbits, so a match makes the
+        // sets' sketches comparable value for value.
+        if rows.fingerprint != cols.fingerprint {
+            return Err(ApiError::invalid(format!(
+                "rows' fingerprint {} is not cols', {}. The sets were sketched against \
+                 different trees, with different parameters or by different builds, so \
+                 their sketches cannot be compared",
+                hex(&rows.fingerprint),
+                hex(&cols.fingerprint)
+            )));
+        }
+        // Validates only; nothing is computed until the caller's first get_next.
+        let inner = cross_distances_reader(
+            rows.sketches.clone(),
+            rows.ids.clone(),
+            cols.sketches.clone(),
+            cols.ids.clone(),
+            rows.weighted,
+            ctx.batch_rows,
+        )?;
+        unsafe { out.write(pool_stream(ctx, inner)) };
         Ok(())
     })
 }

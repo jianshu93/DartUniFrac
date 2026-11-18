@@ -35,9 +35,9 @@ use sha2::{Digest, Sha256};
 use crate::df_params_t;
 
 /// The DartMinHash release every sketch here comes from. True only because the
-/// manifest pins exactly this version; a test holds the two, and Cargo.lock, to
-/// each other.
-pub(crate) const DARTMINHASH_VERSION: &str = "0.1.8";
+/// manifest pins exactly this version, and a test holds the pin and this constant
+/// to each other.
+pub(crate) const DARTMINHASH_VERSION: &str = "0.1.9";
 
 /// The key's encoding and its version. Changing how the key is encoded must
 /// change this tag, which changes every fingerprint, so sketches stored under
@@ -149,6 +149,11 @@ fn put_str(h: &mut Sha256, s: &str) {
     // Lossless: usize is at most 64 bits on every target.
     h.update((s.len() as u64).to_le_bytes());
     h.update(s.as_bytes());
+}
+
+/// A digest as messages show it: lowercase hex, two digits a byte.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The six ways this API sketches: each method, unweighted, weighted, and

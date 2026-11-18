@@ -74,14 +74,6 @@ fn element_type(bbits: u8) -> Result<DataType, MarshalError> {
     }
 }
 
-fn width(sketches: &Sketches) -> u8 {
-    match sketches {
-        Sketches::U16(_) => 16,
-        Sketches::U32(_) => 32,
-        Sketches::U64(_) => 64,
-    }
-}
-
 /// How many rows there are, and the first one whose length is not `k`.
 fn shape<T>(rows: &[Vec<T>], k: usize) -> (usize, Option<(usize, usize)>) {
     let misfit = rows
@@ -114,7 +106,7 @@ pub fn sketches_reader(
     rows_per_batch: usize,
 ) -> Result<Box<dyn RecordBatchReader + Send>, MarshalError> {
     let sketches = sketches.into();
-    let (item, list_len) = sketch_item(k, width(&sketches))?;
+    let (item, list_len) = sketch_item(k, sketches.width())?;
     let (count, misfit) = match &*sketches {
         Sketches::U16(rows) => shape(rows, k),
         Sketches::U32(rows) => shape(rows, k),
