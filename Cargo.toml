@@ -3,7 +3,7 @@ members = ["crates/dartunifrac-core", "crates/dartunifrac-arrow", "crates/dartun
 
 # Shared by the root package and every member, so they cannot drift apart.
 [workspace.package]
-version = "0.3.2"
+version = "0.4.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["jianshuzhao@yahoo.com"]
@@ -60,7 +60,7 @@ anndists = { version = "0.1.5", default-features = false, features = ["stdsimd"]
 # The sketching engine: tree walking, weighted set accumulation, MinHash.
 # The version is required, not decorative: `cargo package`/`publish` rejects a
 # path dependency without one, and this crate is published on crates.io.
-dartunifrac-core = { path = "crates/dartunifrac-core", version = "0.3.2" }
+dartunifrac-core = { path = "crates/dartunifrac-core", version = "0.4.0" }
 
 ndarray = { version = "0.17.1", features = ["rayon", "serde"] }
 ## fpcoa = { git = "https://github.com/jianshu93/fpcoa" }

@@ -25,10 +25,10 @@ crate-type = ["staticlib", "rlib"]
 arrow-array = { version = "60", default-features = false, features = ["ffi"] }
 arrow-schema = { version = "60", default-features = false }
 # The engine: the tree type and the sketcher.
-dartunifrac-core = { path = "../dartunifrac-core", version = "0.3.2" }
+dartunifrac-core = { path = "../dartunifrac-core", version = "0.4.0" }
 # Every conversion between the caller's data and core's types. This crate owns
 # only the C ABI policy: handles, pool, panics, status codes.
-dartunifrac-arrow = { path = "../dartunifrac-arrow", version = "0.3.2" }
+dartunifrac-arrow = { path = "../dartunifrac-arrow", version = "0.4.0" }
 # The per-context thread pool.
 rayon = "1.10"
 # The fingerprint's hash: sha256, jianshu93's choice (PR #2). Pure Rust; the
