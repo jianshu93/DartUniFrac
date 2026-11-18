@@ -716,9 +716,9 @@ dependencies = [
 
 [[package]]
 name = "dartminhash"
-version = "0.1.8"
+version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7aaee1430270119deae710483122e3618d46f5c33cc2b4f0d1c676d654b7d071"
+checksum = "13e9454da27f0d42f5b9772ec21bb2aa6baa30d5d0b7952bf2908eb97fd14b16"
 dependencies = [
  "mt19937",
  "rand_core 0.9.5",

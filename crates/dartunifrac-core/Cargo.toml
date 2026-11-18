@@ -21,12 +21,15 @@ repository.workspace = true
 keywords = ["unifrac", "phylogenetic", "MinHash", "Jaccard"]
 
 [dependencies]
-# The sketchers themselves. 0.1.8 is a wasm floor, not a preference: earlier
-# versions pull tab-hash 0.3, whose rand 0.7 disables Distribution<u128> on
-# emscripten, so they cannot compile for that target at all. Its `mixed_tab`
-# feature must stay off — it swaps the tabulation hash and would change every
-# sketch this crate has ever produced.
-dartminhash = "0.1.8"
+# The sketchers themselves. The floor is 0.1.9, which rewrote ERS: it densifies
+# empty buckets by Algorithm 3 (0.1.8 could copy from a bucket that was itself a
+# copy), and samples by binary search over the cap boundaries where 0.1.8 used an
+# alias table, which its author found sometimes fails to estimate. So every ERS
+# sketch changed; DMH and TMH did not. Nothing before 0.1.8 compiles for
+# emscripten: those pull tab-hash 0.3, whose rand 0.7 disables Distribution<u128>
+# there. Its `mixed_tab` feature must stay off — it swaps the tabulation hash and
+# would change every sketch this crate has ever produced.
+dartminhash = "0.1.9"
 # Per-sample parallelism. Proven on wasm32-unknown-emscripten.
 rayon = "1.10"
 # Facade only; a no-op unless the binary installs a logger.

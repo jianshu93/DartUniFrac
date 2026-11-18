@@ -35,9 +35,9 @@ use sha2::{Digest, Sha256};
 use crate::df_params_t;
 
 /// The DartMinHash release every sketch here comes from. True only because the
-/// manifest pins exactly this version; a test holds the two, and Cargo.lock, to
-/// each other.
-pub(crate) const DARTMINHASH_VERSION: &str = "0.1.8";
+/// manifest pins exactly this version, and a test holds the pin and this constant
+/// to each other.
+pub(crate) const DARTMINHASH_VERSION: &str = "0.1.9";
 
 /// The key's encoding and its version. Changing how the key is encoded must
 /// change this tag, which changes every fingerprint, so sketches stored under

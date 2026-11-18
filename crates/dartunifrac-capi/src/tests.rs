@@ -1906,10 +1906,11 @@ fn every_key_field_and_the_format_tag_reach_the_fingerprint() {
             },
         ),
         // The hash family: another DartMinHash release may hash differently.
+        // Not a real next release, so no future pin can equal it.
         (
             "dartminhash",
             Key {
-                dartminhash: "0.1.9",
+                dartminhash: "999.0.0",
                 ..base
             },
         ),
