@@ -26,7 +26,7 @@ mod table;
 mod tree;
 
 pub use coo::{coo_reader, output_schema, DISTANCE, I, J};
-pub use distances::{distances_reader, trim_to_bbits, Sketches};
+pub use distances::{cross_distances_reader, distances_reader, trim_to_bbits, Sketches};
 pub use error::MarshalError;
 pub use sketches::{
     sketches_from_stream, sketches_reader, sketches_schema, FINGERPRINT, FINGERPRINT_LEN, SKETCH,

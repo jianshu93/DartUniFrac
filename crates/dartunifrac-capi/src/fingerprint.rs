@@ -151,6 +151,11 @@ fn put_str(h: &mut Sha256, s: &str) {
     h.update(s.as_bytes());
 }
 
+/// A digest as messages show it: lowercase hex, two digits a byte.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// The six ways this API sketches: each method, unweighted, weighted, and
 /// weighted on raw counts. The self-test runs every one.
 pub(crate) const SELFTEST_RUNS: [(Method, bool, bool); 6] = [

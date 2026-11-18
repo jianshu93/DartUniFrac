@@ -179,9 +179,10 @@ typedef struct {
     float d;
 } pair_t;
 
-/* Read a df_distances stream to its end, at most `cap` pairs, checking each,
- * then release it. Returns the number of pairs. */
-static int64_t read_pairs(struct ArrowArrayStream *out, pair_t *pairs, int64_t cap) {
+/* Read a distance stream to its end, at most `cap` pairs, checking each, then
+ * release it. A condensed stream (df_distances) has i < j in every pair; a
+ * cross stream need not. Returns the number of pairs. */
+static int64_t read_pairs(struct ArrowArrayStream *out, pair_t *pairs, int64_t cap, int condensed) {
     struct ArrowSchema schema;
     CHECK(out->get_schema(out, &schema) == 0);
     CHECK(strcmp(schema.format, "+s") == 0 && schema.n_children == 3);
@@ -199,7 +200,7 @@ static int64_t read_pairs(struct ArrowArrayStream *out, pair_t *pairs, int64_t c
         const int64_t *j = int64_values(batch.children[1]);
         const float *d = (const float *)batch.children[2]->buffers[1] + batch.children[2]->offset;
         for (int64_t r = 0; r < batch.length; r++) {
-            CHECK(i[r] < j[r]);
+            CHECK(!condensed || i[r] < j[r]);
             CHECK(d[r] >= 0.0f && d[r] <= 1.0f);
             CHECK(rows < cap);
             pairs[rows++] = (pair_t){.i = i[r], .j = j[r], .d = d[r]};
@@ -299,7 +300,7 @@ static void sketch_and_distances(int32_t n_threads) {
     df_ctx_free(ctx);
 
     pair_t pairs[3];
-    CHECK(read_pairs(&out, pairs, 3) == 3); /* 3 samples, 3 pairs */
+    CHECK(read_pairs(&out, pairs, 3, 1) == 3); /* 3 samples, 3 pairs */
 }
 
 /* A rejected call still consumes its input stream, exactly once. */
@@ -384,7 +385,7 @@ static void export_and_import(int32_t n_threads) {
     struct ArrowArrayStream d;
     CHECK(df_distances(ctx, original, &d) == DF_OK);
     pair_t want[3];
-    CHECK(read_pairs(&d, want, 3) == 3);
+    CHECK(read_pairs(&d, want, 3, 1) == 3);
 
     struct ArrowArrayStream rows;
     CHECK(df_sketches_export(ctx, original, &rows) == DF_OK);
@@ -434,9 +435,81 @@ static void export_and_import(int32_t n_threads) {
     df_ctx_free(ctx);
     df_sketches_free(imported);
     pair_t got[3];
-    CHECK(read_pairs(&d, got, 3) == 3);
+    CHECK(read_pairs(&d, got, 3, 1) == 3);
     for (int r = 0; r < 3; r++) {
         CHECK(got[r].i == want[r].i && got[r].j == want[r].j && got[r].d == want[r].d);
+    }
+}
+
+/* Cross two separately sketched sets of the producer's 3 samples: the full
+ * 3 x 3 square, each pair once, the diagonal zero and every other pair
+ * df_distances' value. The stream is read after both sets and the context are
+ * freed. A set under another data_version is refused before anything is
+ * streamed, naming the fingerprint, and the stream is left released. */
+static void cross_distances(int32_t n_threads) {
+    df_config_t cfg = {.n_threads = n_threads, .batch_rows = 4}; /* tiles of 2 x 2 */
+    df_ctx_t *ctx = NULL;
+    CHECK(df_ctx_new(&cfg, &ctx) == DF_OK);
+    df_tree_t *tree = NULL;
+    CHECK(df_tree_new(ctx, PARENT, LENS, N_NODES, &tree) == DF_OK);
+
+    df_sketches_t *sets[3] = {NULL, NULL, NULL};
+    for (int s = 0; s < 3; s++) {
+        df_params_t params = {.method = DF_METHOD_DMH,
+                              .k = 64,
+                              .seed = 1337,
+                              .bbits = 16,
+                              .weighted = false,
+                              .raw_counts = false,
+                              .data_version = s == 2 ? 1 : 0}; /* the third: another key */
+        struct ArrowArrayStream input;
+        make_producer(&input);
+        CHECK(df_sketch(ctx, tree, &params, &input, 3, NULL, &sets[s]) == DF_OK);
+    }
+    df_tree_free(tree);
+
+    struct ArrowArrayStream d;
+    CHECK(df_distances(ctx, sets[0], &d) == DF_OK);
+    pair_t tri[3];
+    CHECK(read_pairs(&d, tri, 3, 1) == 3);
+
+    struct ArrowArrayStream out;
+    memset(&out, 0xAB, sizeof out); /* not a released stream: it must be reset */
+    CHECK(df_distances_cross(ctx, sets[0], sets[2], &out) == DF_ERR_INVALID_INPUT);
+    CHECK(out.release == NULL);
+    CHECK(strstr(df_ctx_last_error(ctx), "fingerprint") != NULL);
+    df_sketches_free(sets[2]);
+
+    CHECK(df_distances_cross(ctx, sets[0], sets[1], &out) == DF_OK);
+    df_sketches_free(sets[0]);
+    df_sketches_free(sets[1]);
+    df_ctx_free(ctx);
+
+    pair_t got[9];
+    CHECK(read_pairs(&out, got, 9, 0) == 9);
+    int seen[3][3] = {{0}};
+    for (int r = 0; r < 9; r++) {
+        CHECK(got[r].i >= 0 && got[r].i < 3 && got[r].j >= 0 && got[r].j < 3);
+        seen[got[r].i][got[r].j]++;
+        if (got[r].i == got[r].j) {
+            CHECK(got[r].d == 0.0f);
+            continue;
+        }
+        int64_t lo = got[r].i < got[r].j ? got[r].i : got[r].j;
+        int64_t hi = got[r].i < got[r].j ? got[r].j : got[r].i;
+        int found = 0;
+        for (int t = 0; t < 3; t++) {
+            if (tri[t].i == lo && tri[t].j == hi) {
+                CHECK(got[r].d == tri[t].d);
+                found = 1;
+            }
+        }
+        CHECK(found);
+    }
+    for (int a = 0; a < 3; a++) {
+        for (int b = 0; b < 3; b++) {
+            CHECK(seen[a][b] == 1);
+        }
     }
 }
 
@@ -457,6 +530,8 @@ int main(void) {
     fingerprints();
     export_and_import(2); /* a dedicated pool */
     export_and_import(0); /* rayon's global pool */
+    cross_distances(2);   /* a dedicated pool */
+    cross_distances(0);   /* rayon's global pool */
     frees_accept_null();
     puts("dartunifrac C harness: ok");
     return 0;
